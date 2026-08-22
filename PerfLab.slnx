@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PerfLab.Shared/PerfLab.Shared.csproj" />
+    <Project Path="src/PerfLab.Api/PerfLab.Api.csproj" />
+    <Project Path="src/PerfLab.Worker/PerfLab.Worker.csproj" />
+  </Folder>
+</Solution>
+

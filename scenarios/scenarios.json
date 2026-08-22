@@ -1,0 +1,192 @@
+{
+  "S00": {
+    "name": "control",
+    "method": "GET",
+    "path": "/api/catalog/recommendations?categoryId=1&take=20",
+    "body": "",
+    "target": "api",
+    "diagnostic": "trace",
+    "connections": 64
+  },
+  "S01": {
+    "name": "catalog-ranking",
+    "method": "GET",
+    "path": "/api/catalog/recommendations?categoryId=1&take=20",
+    "body": "",
+    "target": "api",
+    "diagnostic": "trace",
+    "connections": 64
+  },
+  "S02": {
+    "name": "request-continuations",
+    "method": "GET",
+    "path": "/api/runtime/threading",
+    "body": "",
+    "target": "api",
+    "diagnostic": "stacks",
+    "connections": 128
+  },
+  "S03": {
+    "name": "shared-coordination",
+    "method": "GET",
+    "path": "/api/runtime/threading",
+    "body": "",
+    "target": "api",
+    "diagnostic": "stacks",
+    "connections": 96
+  },
+  "S04": {
+    "name": "subscriber-lifecycle",
+    "method": "GET",
+    "path": "/api/runtime/memory",
+    "body": "",
+    "target": "api",
+    "diagnostic": "gcdump",
+    "connections": 32
+  },
+  "S05": {
+    "name": "payload-transform",
+    "method": "GET",
+    "path": "/api/runtime/memory",
+    "body": "",
+    "target": "api",
+    "diagnostic": "trace",
+    "connections": 32
+  },
+  "S06": {
+    "name": "work-scheduling",
+    "method": "GET",
+    "path": "/api/runtime/threading",
+    "body": "",
+    "target": "api",
+    "diagnostic": "trace",
+    "connections": 64
+  },
+  "S07": {
+    "name": "customer-orders",
+    "method": "GET",
+    "path": "/api/customers/1/orders?page=1&pageSize=50",
+    "body": "",
+    "target": "api",
+    "diagnostic": "stacks",
+    "connections": 48
+  },
+  "S08": {
+    "name": "order-history-page",
+    "method": "GET",
+    "path": "/api/customers/1/orders?page=100&pageSize=25",
+    "body": "",
+    "target": "api",
+    "diagnostic": "stacks",
+    "connections": 48
+  },
+  "S09": {
+    "name": "order-reader-lifecycle",
+    "method": "GET",
+    "path": "/api/customers/1/orders?page=1&pageSize=25",
+    "body": "",
+    "target": "api",
+    "diagnostic": "stacks",
+    "connections": 64
+  },
+  "S10": {
+    "name": "inventory-update",
+    "method": "POST",
+    "path": "/api/orders",
+    "body": "{\"customerId\":1,\"productId\":1,\"quantity\":1,\"poison\":false}",
+    "target": "api",
+    "diagnostic": "stacks",
+    "connections": 64
+  },
+  "S11": {
+    "name": "order-projection",
+    "method": "GET",
+    "path": "/api/customers/1/orders?page=1&pageSize=25",
+    "body": "",
+    "target": "api",
+    "diagnostic": "gcdump",
+    "connections": 32
+  },
+  "S12": {
+    "name": "catalog-refresh",
+    "method": "GET",
+    "path": "/api/cache/catalog/1",
+    "body": "",
+    "target": "api",
+    "diagnostic": "stacks",
+    "connections": 128
+  },
+  "S13": {
+    "name": "catalog-fragments",
+    "method": "GET",
+    "path": "/api/cache/catalog/1",
+    "body": "",
+    "target": "api",
+    "diagnostic": "stacks",
+    "connections": 64
+  },
+  "S14": {
+    "name": "cache-session",
+    "method": "GET",
+    "path": "/api/cache/catalog/1",
+    "body": "",
+    "target": "api",
+    "diagnostic": "trace",
+    "connections": 64
+  },
+  "S15": {
+    "name": "catalog-keyspace",
+    "method": "GET",
+    "path": "/api/cache/catalog/1",
+    "body": "",
+    "target": "api",
+    "diagnostic": "gcdump",
+    "connections": 64
+  },
+  "S16": {
+    "name": "order-publication",
+    "method": "POST",
+    "path": "/api/orders",
+    "body": "{\"customerId\":1,\"productId\":1,\"quantity\":1,\"poison\":false}",
+    "target": "api",
+    "diagnostic": "trace",
+    "connections": 64
+  },
+  "S17": {
+    "name": "order-consumption",
+    "method": "POST",
+    "path": "/api/orders",
+    "body": "{\"customerId\":1,\"productId\":1,\"quantity\":1,\"poison\":false}",
+    "target": "worker",
+    "diagnostic": "stacks",
+    "connections": 48
+  },
+  "S18": {
+    "name": "failed-order",
+    "method": "POST",
+    "path": "/api/orders",
+    "body": "{\"customerId\":1,\"productId\":1,\"quantity\":1,\"poison\":true}",
+    "target": "worker",
+    "diagnostic": "stacks",
+    "connections": 8
+  },
+  "S19": {
+    "name": "parallel-publication",
+    "method": "POST",
+    "path": "/api/orders",
+    "body": "{\"customerId\":1,\"productId\":1,\"quantity\":1,\"poison\":false}",
+    "target": "api",
+    "diagnostic": "trace",
+    "connections": 128
+  },
+  "S20": {
+    "name": "deferred-message-read",
+    "method": "POST",
+    "path": "/api/orders",
+    "body": "{\"customerId\":1,\"productId\":1,\"quantity\":1,\"poison\":false}",
+    "target": "worker",
+    "diagnostic": "gcdump",
+    "connections": 48
+  }
+}
+

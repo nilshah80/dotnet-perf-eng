@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "summary": { "type": "string" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "observedSymptoms": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "observation": { "type": "string" },
+          "value": { "type": "string" },
+          "evidencePath": { "type": "string" }
+        },
+        "required": ["observation", "value", "evidencePath"]
+      }
+    },
+    "hypotheses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "rank": { "type": "integer", "minimum": 1 },
+          "title": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "mechanism": { "type": "string" },
+          "evidenceFor": { "type": "array", "items": { "type": "string" } },
+          "evidenceAgainst": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["rank", "title", "confidence", "mechanism", "evidenceFor", "evidenceAgainst"]
+      }
+    },
+    "rootCause": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mechanism": { "type": "string" },
+        "causalChain": { "type": "array", "items": { "type": "string" } },
+        "sourceLocations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": { "type": "string" },
+              "line": { "type": "integer", "minimum": 1 },
+              "symbol": { "type": "string" },
+              "explanation": { "type": "string" }
+            },
+            "required": ["path", "line", "symbol", "explanation"]
+          }
+        }
+      },
+      "required": ["mechanism", "causalChain", "sourceLocations"]
+    },
+    "proposedFix": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "changes": { "type": "array", "items": { "type": "string" } },
+        "risks": { "type": "array", "items": { "type": "string" } },
+        "expectedImpact": { "type": "string" }
+      },
+      "required": ["changes", "risks", "expectedImpact"]
+    },
+    "validationPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "correctnessChecks": { "type": "array", "items": { "type": "string" } },
+        "benchmark": { "type": "array", "items": { "type": "string" } },
+        "mechanismGates": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["correctnessChecks", "benchmark", "mechanismGates"]
+    },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": [
+    "summary",
+    "confidence",
+    "observedSymptoms",
+    "hypotheses",
+    "rootCause",
+    "proposedFix",
+    "validationPlan",
+    "limitations"
+  ]
+}
+

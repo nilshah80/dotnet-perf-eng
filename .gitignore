@@ -1,0 +1,12 @@
+bin/
+obj/
+.idea/
+.vscode/
+.DS_Store
+.env
+artifacts/runs/*
+artifacts/runtime/*
+!artifacts/runs/.gitkeep
+!artifacts/runtime/.gitkeep
+ai/generated-mcp.json
+
