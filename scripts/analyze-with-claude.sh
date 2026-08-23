@@ -48,7 +48,10 @@ fi
 
 (
   cd "${repo_root}"
-  claude "${claude_args[@]}" "${prompt}"
+  # The "--" terminator is required: several Claude CLI flags are variadic
+  # (--mcp-config <configs...>, --allowed-tools <tools...>), so without it the
+  # positional prompt is swallowed as another value for the preceding flag.
+  claude "${claude_args[@]}" -- "${prompt}" < /dev/null
 ) > "${raw_output}"
 
 if jq -e '.structured_output != null' "${raw_output}" >/dev/null 2>&1; then
