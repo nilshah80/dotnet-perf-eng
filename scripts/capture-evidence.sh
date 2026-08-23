@@ -36,7 +36,21 @@ capture_prometheus_query working_set 'dotnet_process_memory_working_set_bytes{jo
 capture_prometheus_query gc_heap 'dotnet_gc_last_collection_heap_size_bytes{job=~"perflab-.*"}'
 capture_prometheus_query thread_pool_queue 'dotnet_thread_pool_queue_length_total{job=~"perflab-.*"}'
 capture_prometheus_query request_duration 'http_server_request_duration_seconds_count{job=~"perflab-.*"}'
-capture_prometheus_query scenario_executions 'perflab_scenario_executions_total'
+capture_prometheus_query scenario_executions "perflab_scenario_executions_total{perf_run_id=\"${telemetry_run_id}\"}"
+capture_prometheus_query application_metrics "{__name__=~\"perflab_.*\",perf_run_id=\"${telemetry_run_id}\"}"
+capture_prometheus_query pool_metrics "{__name__=~\"perflab_pool_.*\",perf_run_id=\"${telemetry_run_id}\"}"
+
+service_instance_regex="$(
+  jq -r '
+    [.data.result[]? | (.metric.service_instance_id // .metric.instance // empty)]
+    | unique
+    | join("|")
+  ' "${artifact_dir}/telemetry/metrics/application_metrics.json"
+)"
+service_instance_regex="${service_instance_regex:-__no_correlated_service_instance__}"
+
+capture_prometheus_query database_pool_metrics "{__name__=~\"(db_client_connection_.*|db_client_operation_npgsql_.*|npgsql_.*)\",service_instance_id=~\"${service_instance_regex}\"}"
+capture_prometheus_query http_client_metrics "{__name__=~\"http_client_.*\",service_instance_id=~\"${service_instance_regex}\"}"
 
 trace_query="{ resource.service.name =~ \"perflab-(api|worker)\" && resource.perf.run.id = \"${telemetry_run_id}\" }"
 trace_search_file="${artifact_dir}/telemetry/traces/search.json"
@@ -79,8 +93,13 @@ docker compose -f "${repo_root}/compose.yaml" exec -T postgres \
 
 docker compose -f "${repo_root}/compose.yaml" exec -T postgres \
   psql -U perflab -d perflab -c \
-  "COPY (SELECT pid, wait_event_type, wait_event, state, left(query,300) AS query FROM pg_stat_activity WHERE datname='perflab' ORDER BY pid) TO STDOUT WITH CSV HEADER" \
+  "COPY (SELECT pid, application_name, wait_event_type, wait_event, state, backend_start, state_change, left(query,300) AS query FROM pg_stat_activity WHERE datname='perflab' ORDER BY pid) TO STDOUT WITH CSV HEADER" \
   > "${artifact_dir}/dependencies/postgres-activity.csv"
+
+docker compose -f "${repo_root}/compose.yaml" exec -T postgres \
+  psql -U perflab -d perflab -c \
+  "COPY (SELECT application_name, state, count(*) AS connections, min(backend_start) AS oldest_backend FROM pg_stat_activity WHERE datname='perflab' GROUP BY application_name, state ORDER BY application_name, state) TO STDOUT WITH CSV HEADER" \
+  > "${artifact_dir}/dependencies/postgres-connections.csv"
 
 docker compose -f "${repo_root}/compose.yaml" exec -T postgres \
   psql -U perflab -d perflab -t -A -c \
@@ -100,6 +119,18 @@ curl -fsS -u "perflab:${RABBITMQ_PASSWORD:-perflab}" \
 
 curl -fsS http://127.0.0.1:52323/processes \
   > "${artifact_dir}/runtime/processes.json" || true
+
+docker compose -f "${repo_root}/compose.yaml" exec -T api \
+  sh -c 'cat /proc/net/tcp /proc/net/tcp6' \
+  > "${artifact_dir}/dependencies/api-net-tcp.txt" 2>/dev/null || true
+
+curl -fsS -u "perflab:${RABBITMQ_PASSWORD:-perflab}" \
+  http://127.0.0.1:15672/api/connections \
+  > "${artifact_dir}/dependencies/rabbitmq-connections.json" || true
+
+curl -fsS -u "perflab:${RABBITMQ_PASSWORD:-perflab}" \
+  http://127.0.0.1:15672/api/channels \
+  > "${artifact_dir}/dependencies/rabbitmq-channels.json" || true
 
 docker compose -f "${repo_root}/compose.yaml" ps --format json \
   | jq -s '.' \

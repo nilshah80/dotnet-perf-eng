@@ -39,6 +39,7 @@ builder.Services.AddScoped<CatalogService>();
 builder.Services.AddScoped<OrderQueryService>();
 builder.Services.AddScoped<CacheLabService>();
 builder.Services.AddScoped<RuntimeLabService>();
+builder.Services.AddSingleton<PoolLabService>();
 builder.Services.AddSingleton<OrderPublisher>();
 builder.Services.AddProblemDetails();
 
@@ -67,7 +68,7 @@ builder.Services.AddOpenTelemetry()
         .AddNpgsql()
         .AddOtlpExporter(options => options.Endpoint = otlpEndpoint))
     .WithMetrics(metrics => metrics
-        .AddMeter(LabTelemetry.MeterName, "Npgsql")
+        .AddMeter(LabTelemetry.MeterName, "Npgsql", "System.Net.Http")
         .AddAspNetCoreInstrumentation()
         .AddRuntimeInstrumentation()
         .AddOtlpExporter(options => options.Endpoint = otlpEndpoint));
@@ -140,6 +141,9 @@ app.MapGet("/api/scenario", () => Results.Ok(new
     {
         memoryRetentionLimitMb = 125,
         databasePoolSize = 20,
+        databasePoolExperimentSizes = new[] { 2, 64 },
+        redisMultiplexerPoolExperimentSizes = new[] { 1, 32 },
+        httpConnectionPoolExperimentSizes = new[] { 2, 128 },
         requestTimeoutSeconds = 5,
         rabbitQueueLimit = 10_000
     }
@@ -191,6 +195,27 @@ app.MapGet("/api/runtime/memory", async (
     CancellationToken cancellationToken) =>
     Results.Ok(await service.ExerciseMemoryAsync(cancellationToken)));
 
+app.MapGet("/api/pools/postgres", async (
+    PoolLabService service,
+    CancellationToken cancellationToken) =>
+    Results.Ok(await service.ExercisePostgresAsync(cancellationToken)));
+
+app.MapGet("/api/pools/redis", async (
+    PoolLabService service,
+    CancellationToken cancellationToken) =>
+    Results.Ok(await service.ExerciseRedisAsync(cancellationToken)));
+
+app.MapGet("/api/pools/http", async (
+    PoolLabService service,
+    CancellationToken cancellationToken) =>
+    Results.Ok(await service.ExerciseHttpAsync(cancellationToken)));
+
+app.MapGet("/internal/pool-delay", async (CancellationToken cancellationToken) =>
+{
+    await Task.Delay(100, cancellationToken);
+    return Results.Ok(new { status = "ok" });
+});
+
 app.MapPost("/api/orders", async (
     PublishOrderRequest request,
     OrderPublisher publisher,
@@ -211,4 +236,3 @@ app.Logger.LogInformation(
     runContext.RunMode);
 
 await app.RunAsync();
-

@@ -187,6 +187,59 @@
     "target": "worker",
     "diagnostic": "gcdump",
     "connections": 48
+  },
+  "S21": {
+    "name": "database-lease-capacity",
+    "method": "GET",
+    "path": "/api/pools/postgres",
+    "body": "",
+    "target": "api",
+    "diagnostic": "trace",
+    "connections": 48
+  },
+  "S22": {
+    "name": "database-lease-fanout",
+    "method": "GET",
+    "path": "/api/pools/postgres",
+    "body": "",
+    "target": "api",
+    "diagnostic": "trace",
+    "connections": 96
+  },
+  "S23": {
+    "name": "cache-lease-capacity",
+    "method": "GET",
+    "path": "/api/pools/redis",
+    "body": "",
+    "target": "api",
+    "diagnostic": "trace",
+    "connections": 64
+  },
+  "S24": {
+    "name": "cache-client-fanout",
+    "method": "GET",
+    "path": "/api/pools/redis",
+    "body": "",
+    "target": "api",
+    "diagnostic": "trace",
+    "connections": 128
+  },
+  "S25": {
+    "name": "upstream-connection-capacity",
+    "method": "GET",
+    "path": "/api/pools/http",
+    "body": "",
+    "target": "api",
+    "diagnostic": "trace",
+    "connections": 64
+  },
+  "S26": {
+    "name": "upstream-connection-fanout",
+    "method": "GET",
+    "path": "/api/pools/http",
+    "body": "",
+    "target": "api",
+    "diagnostic": "trace",
+    "connections": 128
   }
 }
-

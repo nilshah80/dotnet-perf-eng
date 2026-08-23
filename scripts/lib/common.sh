@@ -16,7 +16,9 @@ require_command() {
 require_scenario() {
   local scenario_id="$1"
   if ! jq -e --arg id "${scenario_id}" 'has($id)' "${scenario_catalog}" >/dev/null; then
-    echo "Unknown scenario '${scenario_id}'. Expected S00 through S20." >&2
+    local available_scenarios
+    available_scenarios="$(jq -r 'keys | join(", ")' "${scenario_catalog}")"
+    echo "Unknown scenario '${scenario_id}'. Available scenarios: ${available_scenarios}." >&2
     exit 1
   fi
 }
@@ -46,4 +48,3 @@ relative_to_repo() {
   local absolute_path="$1"
   printf '%s\n' "${absolute_path#"${repo_root}/"}"
 }
-

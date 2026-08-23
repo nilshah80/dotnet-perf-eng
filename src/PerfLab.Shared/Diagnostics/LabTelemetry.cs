@@ -35,6 +35,21 @@ public static class LabTelemetry
     public static readonly Histogram<long> ResponseItems =
         Meter.CreateHistogram<long>("perflab.response.items", unit: "{item}");
 
+    public static readonly Histogram<double> PoolWaitDuration =
+        Meter.CreateHistogram<double>("perflab.pool.wait.duration", unit: "ms");
+
+    public static readonly Histogram<double> PoolLeaseDuration =
+        Meter.CreateHistogram<double>("perflab.pool.lease.duration", unit: "ms");
+
+    public static readonly UpDownCounter<long> PoolActiveLeases =
+        Meter.CreateUpDownCounter<long>("perflab.pool.active_leases", unit: "{lease}");
+
+    public static readonly Counter<long> PoolResourcesCreated =
+        Meter.CreateCounter<long>("perflab.pool.resources.created", unit: "{resource}");
+
+    public static readonly Counter<long> PoolTimeouts =
+        Meter.CreateCounter<long>("perflab.pool.timeouts", unit: "{timeout}");
+
     public static TagList Tags(string scenarioId, string runId, params (string Key, object? Value)[] additional)
     {
         var tags = new TagList
@@ -51,4 +66,3 @@ public static class LabTelemetry
         return tags;
     }
 }
-

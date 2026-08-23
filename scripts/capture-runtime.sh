@@ -11,7 +11,15 @@ artifact_dir="${1:?Usage: capture-runtime.sh <artifact-directory> [trace|gcdump|
 manifest="${artifact_dir}/manifest.json"
 scenario_id="$(jq -r '.scenarioId' "${manifest}")"
 telemetry_run_id="$(jq -r '.telemetryRunId // .runId' "${manifest}")"
-kind="${2:-$(scenario_value "${scenario_id}" diagnostic)}"
+requested_kind="${2:-$(scenario_value "${scenario_id}" diagnostic)}"
+kind="${requested_kind}"
+fallback_reason=""
+if [[ "${kind}" == "stacks" && "${PERFLAB_ENABLE_DOTNET_MONITOR_STACKS:-false}" != "true" ]]; then
+  kind="trace"
+  fallback_reason="dotnet-monitor /stacks is disabled by default because its in-process profiler channel is unreliable in this Docker Desktop sidecar topology"
+  echo "Requested stacks for ${scenario_id}; capturing a CPU trace fallback instead."
+  echo "Set PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true to explicitly retry /stacks."
+fi
 duration_seconds="${3:-30}"
 target="$(scenario_value "${scenario_id}" target)"
 assembly_name="PerfLab.Api"
@@ -27,6 +35,18 @@ wait_for_api
 
 processes_file="${artifact_dir}/runtime/processes-diagnostic.json"
 mkdir -p "${artifact_dir}/runtime/${target}"
+runtime_capture_file="${artifact_dir}/runtime/capture.json"
+jq -n \
+  --arg scenarioId "${scenario_id}" \
+  --arg target "${target}" \
+  --arg requestedDiagnostic "${requested_kind}" \
+  --arg effectiveDiagnostic "${kind}" \
+  --arg fallbackReason "${fallback_reason}" \
+  --arg startedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --argjson durationSeconds "${duration_seconds}" \
+  '{scenarioId:$scenarioId,target:$target,requestedDiagnostic:$requestedDiagnostic,effectiveDiagnostic:$effectiveDiagnostic,durationSeconds:$durationSeconds,startedAt:$startedAt,status:"running"}
+  + if $fallbackReason == "" then {} else {fallbackReason:$fallbackReason} end' \
+  > "${runtime_capture_file}"
 curl -fsS http://127.0.0.1:52323/processes > "${processes_file}"
 runtime_uid="$(jq -r --arg assembly "${assembly_name}" '.[] | select(((.managedEntryPointAssemblyName // "") | contains($assembly)) or ((.name // "") | contains($assembly))) | .uid' "${processes_file}" | head -1)"
 if [[ -z "${runtime_uid}" || "${runtime_uid}" == "null" ]]; then
@@ -95,6 +115,13 @@ case "${kind}" in
     exit 1
     ;;
 esac
+
+temporary_capture="${runtime_capture_file}.tmp"
+jq \
+  --arg completedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '. + {completedAt:$completedAt,status:"captured"}' \
+  "${runtime_capture_file}" > "${temporary_capture}"
+mv "${temporary_capture}" "${runtime_capture_file}"
 
 echo "Captured ${kind} for ${target}."
 echo "Normalize it with: ${repo_root}/scripts/normalize-runtime.sh ${artifact_dir}"

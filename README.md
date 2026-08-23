@@ -80,23 +80,48 @@ curl http://127.0.0.1:8080/health/ready
 
 Open Grafana and choose the provisioned **.NET Performance Engineering Lab** dashboard. Use Explore for detailed Tempo traces and Loki logs.
 
-Run a complete measurement for one controlled scenario:
+Run one controlled scenario under a suite run ID:
 
 ```bash
-./scripts/run-scenario.sh S01 30
+./scripts/run-single.sh S01 30
 ```
 
-The command performs a deterministic dependency reset, recreates API/worker containers with the selected `PERF_SCENARIO` and unique `PERF_RUN_ID`, warms up for 10 seconds, runs `wrk`, and captures telemetry/dependency snapshots. It prints the evidence directory, for example:
+The command performs a deterministic dependency reset, recreates API/worker containers with the selected `PERF_SCENARIO` and unique telemetry correlation key, warms up for 10 seconds, runs `wrk`, and captures telemetry/dependency snapshots. It prints the suite evidence directory, for example:
 
 ```text
-artifacts/runs/s01-20260822T120000Z
+artifacts/runs/suite-20260822T120000Z/scenarios/S01
 ```
 
-The control is `S00`. Scenario workload definitions are in `scenarios/scenarios.json`; they deliberately use neutral names so the identifier itself is not a diagnosis.
+Use the lower-level `./scripts/run-scenario.sh S01 30` only when a flat, non-suite evidence package is specifically required. The control is `S00`. Scenario workload definitions are in `scenarios/scenarios.json`; they deliberately use neutral names so the identifier itself is not a diagnosis.
+
+## Single, multiple, and all-scenario scripts
+
+The convenience scripts all use the same suite format and accept an optional duration. Runtime capture remains a separate workload so its overhead never contaminates the reported measurement:
+
+| Scope | Measurement only | Measurement plus runtime evidence |
+|---|---|---|
+| Single | `./scripts/run-single.sh S07 30` | `./scripts/run-single.sh S07 30 --with-runtime` |
+| Multiple | `./scripts/run-multiple.sh S07,S12,S17 30` | `./scripts/run-multiple.sh S07,S12,S17 30 --with-runtime` |
+| All | `./scripts/run-all.sh 30` | `./scripts/run-all.sh 30 --with-runtime --continue-on-error` |
+
+`run-scenarios.sh` remains the underlying general-purpose runner, so these are equivalent:
+
+```bash
+./scripts/run-single.sh S21 30
+./scripts/run-scenarios.sh S21 30
+
+./scripts/run-multiple.sh S21,S22,S23,S24 30
+./scripts/run-scenarios.sh S21,S22,S23,S24 30
+
+./scripts/run-all.sh 30
+./scripts/run-scenarios.sh all 30
+```
+
+An all-scenario run currently executes 27 measurements (`S00` through `S26`). With 30-second measurement and diagnostic phases it includes at least 27 minutes of workload time, plus warm-ups, dependency resets, container recreation, OTLP flushes, and artifact normalization.
 
 ## Multi-scenario suite runs
 
-Use the suite runner when several scenarios must belong to one top-level run ID. Pass a comma-separated list, or `all` for the complete catalog:
+Use the suite runner directly when several scenarios must belong to one top-level run ID. Pass a comma-separated list, or `all` for the complete catalog:
 
 ```bash
 ./scripts/run-scenarios.sh S01,S07,S12 30
@@ -110,6 +135,8 @@ Add each scenario's recommended runtime capture and normalization with `--with-r
 ```bash
 ./scripts/run-scenarios.sh S01,S07,S12 30 --with-runtime
 ```
+
+Catalog entries that request managed stacks automatically use a CPU-trace fallback in this Docker Desktop topology. The requested and effective diagnostics are recorded in each child's `runtime/capture.json`. Set `PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true` only when intentionally retesting dotnet-monitor's in-process `/stacks` endpoint.
 
 By default the suite stops on the first failure and preserves all partial evidence. Use `--continue-on-error` when a full sweep should attempt every selected scenario; the final suite status is `completed-with-errors` and the command still exits nonzero if any scenario failed:
 
@@ -148,6 +175,8 @@ Use the capture recommended by the scenario catalog:
 ./scripts/capture-runtime.sh artifacts/runs/<run-id>
 ```
 
+If the recommendation is `stacks`, the default local behavior records `trace` instead and documents the fallback in `runtime/capture.json`. This avoids treating the known dotnet-monitor sidecar profiler-channel HTTP 500 as a failed application scenario.
+
 Or choose one explicitly:
 
 ```bash
@@ -181,15 +210,21 @@ artifacts/runs/<run-id>/
 │   └── diagnostic-wrk.txt
 ├── telemetry/
 │   ├── metrics/
+│   │   └── application_metrics.json
 │   ├── traces/
 │   └── logs/
 ├── dependencies/
 │   ├── postgres-statements.csv
+│   ├── postgres-connections.csv
 │   ├── postgres-order-plan.json
 │   ├── redis-info.txt
 │   ├── redis-slowlog.txt
-│   └── rabbitmq-queues.json
+│   ├── rabbitmq-queues.json
+│   ├── rabbitmq-connections.json
+│   ├── rabbitmq-channels.json
+│   └── api-net-tcp.txt
 ├── runtime/
+│   ├── capture.json
 │   ├── processes*.json
 │   └── api|worker/
 ├── source/
@@ -202,7 +237,18 @@ artifacts/runs/<run-id>/
 
 Yes, the PoC prompts Claude Code directly through its CLI, but it does not rely on a person pasting dashboard screenshots or raw dumps into a chat.
 
-The diagnosis phase is non-interactive and read-only:
+For the normal interactive, human-in-the-loop workflow, print the reusable prompt and then start the already authenticated Claude CLI without `-p`:
+
+```bash
+PERF_LAB_EVIDENCE_DIR="$(ls -td artifacts/runs/suite-* | head -1)"
+
+./scripts/print-ai-prompt.sh "${PERF_LAB_EVIDENCE_DIR}"
+claude
+```
+
+Copy the printed prompt into Claude. It works for a single package, a suite root, or one suite child. The source template is `ai/interactive-diagnosis-prompt.md`; it requires evidence-first reasoning, exact source locations, competing hypotheses, a minimal fix, and an unchanged-workload validation plan. For suite runs it also asks Claude to use `S00` as a general process baseline and produce a cross-scenario comparison.
+
+The optional structured diagnosis phase is non-interactive and read-only. Run it against a flat single-scenario package or a suite child, not a suite root:
 
 ```bash
 ./scripts/analyze-with-claude.sh artifacts/runs/<run-id>
@@ -251,16 +297,59 @@ This saves the container-generated configuration as the ignored local file `ai/g
 
 ## Controlled scenario coverage
 
-The current implementation includes one control plus twenty selectable behaviors covering:
+The implementation includes one healthy control and 26 deliberately problematic behaviors. The table states the lab's expected mechanism for maintainers and presenters; an AI diagnosis must still prove it from captured measurements and source rather than treating this table as evidence.
 
-- CPU complexity and excessive scheduling
-- blocking waits, broad synchronization, and thread-pool pressure
-- retained object graphs and large-object allocation churn
-- N+1 access, inefficient deep pagination, connection lifecycle, lock duration, and over-materialization
-- cache stampede, sequential Redis calls, connection churn, and keyspace growth
-- RabbitMQ connection/channel lifecycle, consumer backpressure, poison-message retries, concurrent publishing, and payload ownership
+| ID | Area | Workload | Deliberately injected mechanism | Expected evidence | Runtime capture |
+|---|---|---|---|---|---|
+| S00 | Control | Catalog recommendations, 64 connections | Bounded query and linear in-memory ordering | Healthy latency/throughput baseline; bounded DB spans and allocations | CPU trace |
+| S01 | CPU | Catalog recommendations, 64 | 2,500 candidates ranked with nested comparisons and repeated span equality | API CPU saturation, hot ranking loop, higher latency, lower throughput | CPU trace |
+| S02 | Threading | Runtime threading, 128 | Synchronous wait on `Task.Delay` inside request processing | Blocked worker threads, ThreadPool growth/queueing, long tail latency | Managed stacks → trace fallback |
+| S03 | Synchronization | Runtime threading, 96 | Process-wide semaphore held across a DB call and delay | Serialized requests, low CPU with growing wait time and long tails | Managed stacks → trace fallback |
+| S04 | Memory retention | Runtime memory, 32 | Static event subscribers retain capped 64 KiB arrays | Live heap grows toward the safety cap and survives collections | GC dump before/after |
+| S05 | Allocation/GC | Runtime memory, 32 | Repeated 128 KiB buffers, Base64 strings, JSON copies, and deserialization | LOH allocation churn, GC pressure, CPU in encoding/serialization | CPU trace |
+| S06 | Scheduling | Runtime threading, 64 | 128 `Task.Run` operations and buffers per request | Excess work items, scheduling overhead, allocation and CPU pressure | CPU trace |
+| S07 | PostgreSQL queries | Customer orders, 48 | One order query followed by one item query per order | N+1 spans/statements, amplified DB calls and request latency | Managed stacks → trace fallback |
+| S08 | PostgreSQL pagination | Deep order-history page, 48 | Large `OFFSET` pagination at page 100 | Rows scanned/discarded, slower DB span and unfavorable plan | Managed stacks → trace fallback |
+| S09 | PostgreSQL lifecycle | Customer orders, 64 | Open Npgsql connections retained in a static collection | Default pool drains, acquisition waits/timeouts, retained DB sockets | Managed stacks → trace fallback |
+| S10 | PostgreSQL locking | Order creation, 64 | Hot row transaction remains open across Redis work, delay, and publication | Lock waits, serialized updates, slow/erroring POST requests | Managed stacks → trace fallback |
+| S11 | EF Core materialization | Customer orders, 32 | Entire tracked order/item graph loaded before in-memory paging | Excess rows, allocations, tracking overhead, larger GC dump | GC dump |
+| S12 | Cache coordination | Catalog cache, 128 | Cache miss refreshes are not coalesced and include delayed DB work | Cache stampede, duplicated DB queries, latency spike after reset/expiry | Managed stacks → trace fallback |
+| S13 | Redis command pattern | Catalog cache, 64 | 100 cache fragments fetched sequentially | Many serialized Redis operations per request and high dependency time | Managed stacks → trace fallback |
+| S14 | Redis sockets | Catalog cache, 64 | `ConnectionMultiplexer` created and disposed per request | Redis connection churn, socket growth/TIME_WAIT, connect overhead | CPU trace |
+| S15 | Redis key lifecycle | Catalog cache, 64 | Unique GUID key per request with no expiry | Keyspace and Redis memory growth with almost no hits | GC dump |
+| S16 | RabbitMQ sockets | Order creation, 64 | RabbitMQ connection and channel created for every publish | Broker connection/channel churn, TCP overhead, lower throughput | CPU trace |
+| S17 | Consumer backpressure | Order creation, worker target, 48 | One consumer dispatch slot, prefetch 500, and blocking 100 ms processing | Queue backlog, unacked messages, slow drain and blocked worker | Managed stacks → trace fallback |
+| S18 | Retry behavior | Poison order creation, worker target, 8 | Immediate requeue up to a capped 50 attempts | Retry/log storm, repeated deliveries, dead-letter activity | Managed stacks → trace fallback |
+| S19 | RabbitMQ channel ownership | Order creation, 128 | Concurrent publishers use one shared channel without serialization | Channel contention/protocol risk, publish failures or irregular latency | CPU trace |
+| S20 | Message memory ownership | Order creation, worker target, 48 | Broker-owned delivery memory retained without copying | Retained/invalid payload ownership and worker heap growth | GC dump |
+| S21 | PostgreSQL pool—low | Pool endpoint, 48 | Npgsql pool capped at 2 while each request holds its lease for deterministic work | High acquisition wait, pool timeouts/non-2xx responses, only two active pool connections | CPU trace + pool metrics |
+| S22 | PostgreSQL pool—high | Pool endpoint, 96 | Npgsql pool permits 64 concurrent leases for the same workload | Large PostgreSQL backend/socket footprint; oversizing masks long lease duration and shifts pressure downstream | CPU trace + pool metrics |
+| S23 | Redis pseudo-pool—low | Pool endpoint, 64 | One exclusively leased `ConnectionMultiplexer` despite its thread-safe multiplexed design | Client-side lease queue, low throughput, high custom pool-wait metric | CPU trace + pool metrics |
+| S24 | Redis pseudo-pool—high | Pool endpoint, 128 | 32 application-managed multiplexers and exclusive slots | Redis `connected_clients`/socket inflation and unnecessary client memory/threads | CPU trace + pool metrics |
+| S25 | HTTP pool—low | Internal upstream call, 64 | Singleton handler limited to two connections against a 100 ms dependency | `http.client.request.time_in_queue`, long tails, about two active upstream connections | CPU trace + HTTP metrics |
+| S26 | HTTP pool—high | Internal upstream call, 128 | Singleton handler permits 128 pooled connections to the same dependency | High open/idle TCP connection count and resource footprint | CPU trace + HTTP metrics |
 
-Only one scenario is selected at startup. Do not activate multiple scenarios in the first diagnosis; combined incidents are useful only after individual mechanisms have been demonstrated.
+### What “Redis pool” means here
+
+StackExchange.Redis does not expose a conventional fixed-size connection pool: `ConnectionMultiplexer` is thread-safe, multiplexes concurrent commands, and is designed to be shared and reused. S23/S24 deliberately wrap multiplexers in an application-owned exclusive pool to demonstrate the two common mistakes—serializing work through too few slots and creating many multiplexers to compensate. The production correction is normally one appropriately configured, long-lived multiplexer, not a larger custom pool. See the [StackExchange.Redis basic usage guidance](https://stackexchange.github.io/StackExchange.Redis/Basics.html).
+
+Npgsql connections are pooled by default; its minimum/maximum settings define retention and capacity, and closing a logical connection returns the physical connection to the pool. See the [Npgsql connection-string parameters](https://www.npgsql.org/doc/connection-string-parameters) and [basic usage guidance](https://www.npgsql.org/doc/basic-usage.html). `HttpClient` pools belong to `SocketsHttpHandler`; connection limits that are too low queue callers, while unbounded/high fan-out or poor handler lifetime can create excessive sockets. See the [.NET HttpClient guidelines](https://learn.microsoft.com/dotnet/fundamentals/networking/http/httpclient-guidelines).
+
+### Existing socket and pool-adjacent scenarios
+
+Yes, socket issues were already represented before S21–S26:
+
+- S09 retains Npgsql connections, which consumes both pool leases and PostgreSQL TCP sockets until the pool exhausts.
+- S14 creates a Redis multiplexer per request, producing Redis client/socket churn.
+- S16 creates a RabbitMQ connection per publish, producing broker connection/channel and TCP churn.
+- S19 is primarily unsafe shared-channel concurrency rather than socket exhaustion.
+- S02/S06 cover ThreadPool starvation/fan-out; the .NET ThreadPool is not a network connection pool.
+
+S21–S26 add explicit low/high capacity experiments for Npgsql, an intentionally application-managed Redis pseudo-pool, and `SocketsHttpHandler`. Other useful future extensions would be RabbitMQ channel-pool sizing, outbound gRPC HTTP/2 stream limits, and multi-tenant per-destination pool fragmentation.
+
+The low/high pairs are deliberately two unsafe extremes, not a before/after fix pair. Compare S21 with S22, S23 with S24, and S25 with S26 to expose the queueing-versus-resource trade-off; use the validation plan to test a separately chosen right-sized configuration. S00 remains useful for process-level health but is not an endpoint-matched baseline for the pool workloads.
+
+Only one scenario is selected per process startup. A comma-separated or `all` suite still runs scenarios sequentially in fresh API/worker containers; it does not activate several injected behaviors simultaneously.
 
 ## Validation protocol
 
@@ -280,7 +369,10 @@ Docker Desktop measurements are comparative numbers for this machine, not produc
 
 - API: 1 CPU, 768 MiB
 - Worker: 0.75 CPU, 512 MiB
-- PostgreSQL pool: 20 connections, 5-second connect/command timeout
+- Normal PostgreSQL pool: 20 connections, 5-second connect/command timeout
+- Pool experiments: 2 connections for S21 and 64 for S22, below PostgreSQL's local server limit
+- Redis pseudo-pool experiments: 1 multiplexer for S23 and a capped 32 for S24
+- HTTP pool experiments: 2 connections for S25 and a capped 128 loopback connections for S26
 - Redis: 256 MiB with `allkeys-lru`
 - RabbitMQ work queue: maximum 10,000 messages
 - Poison-message requeue: local cap of 50 before dead-lettering

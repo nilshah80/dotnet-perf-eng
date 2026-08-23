@@ -22,6 +22,15 @@ public sealed record ThreadingResult(string Path, int Operations, double Elapsed
 
 public sealed record MemoryResult(string Path, long RetainedObjects, long AllocatedBytes, int Checksum);
 
+public sealed record PoolResult(
+    string Resource,
+    string Strategy,
+    int ConfiguredSize,
+    int? CreatedResources,
+    int Operations,
+    double ElapsedMs,
+    double? WaitMs);
+
 public sealed record PublishOrderRequest(
     int CustomerId = 1,
     int ProductId = 1,
@@ -29,4 +38,3 @@ public sealed record PublishOrderRequest(
     bool Poison = false);
 
 public sealed record PublishOrderResult(string MessageId, long OrderId, string Status);
-

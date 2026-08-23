@@ -9,7 +9,7 @@ Usage:
   ./scripts/run-scenarios.sh <S01,S07,...|all> [duration-seconds] [options]
 
 Options:
-  --with-runtime       Capture and normalize each scenario's recommended runtime diagnostic.
+  --with-runtime       Capture and normalize the recommended diagnostic. Managed stacks use a trace fallback by default.
   --continue-on-error  Continue with remaining scenarios if one scenario fails.
   -h, --help           Show this help.
 
