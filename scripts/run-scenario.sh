@@ -6,7 +6,16 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 require_command docker
 require_command curl
 require_command jq
-require_command wrk
+
+# wrk stays the default load generator. k6 is opt-in, and the two are not
+# numerically comparable to each other, so the generator is recorded in the
+# manifest and must be held constant across a before/after comparison.
+load_generator="${PERFLAB_LOAD_GENERATOR:-wrk}"
+if [[ "${load_generator}" != "wrk" && "${load_generator}" != "k6" ]]; then
+  echo "PERFLAB_LOAD_GENERATOR must be 'wrk' or 'k6'; received '${load_generator}'." >&2
+  exit 1
+fi
+require_command "${load_generator}"
 
 scenario_id="${1:-S01}"
 duration_seconds="${2:-30}"
@@ -40,6 +49,8 @@ jq -n \
   --arg suiteScenarioIndex "${suite_scenario_index}" \
   --arg suiteScenarioCount "${suite_scenario_count}" \
   --arg mode "measure" \
+  --arg loadGenerator "${load_generator}" \
+  --arg baseUrl "http://127.0.0.1:8080" \
   --arg method "${method}" \
   --arg path "${path}" \
   --arg startedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -47,7 +58,7 @@ jq -n \
   --argjson startedEpoch "$(date -u +%s)" \
   --argjson durationSeconds "${duration_seconds}" \
   --argjson connections "${connections}" \
-  '{runId:$runId,telemetryRunId:$telemetryRunId,scenarioId:$scenarioId,mode:$mode,workload:{method:$method,path:$path,durationSeconds:$durationSeconds,connections:$connections},startedAt:$startedAt,startedEpoch:$startedEpoch,source:{gitRevision:$gitRevision}}
+  '{runId:$runId,telemetryRunId:$telemetryRunId,scenarioId:$scenarioId,mode:$mode,workload:{loadGenerator:$loadGenerator,baseUrl:$baseUrl,method:$method,path:$path,durationSeconds:$durationSeconds,connections:$connections},startedAt:$startedAt,startedEpoch:$startedEpoch,source:{gitRevision:$gitRevision}}
   + if $suiteRunId == "" then {}
     else {suite:{runId:$suiteRunId,index:($suiteScenarioIndex | tonumber),count:($suiteScenarioCount | tonumber)}}
     end' \
@@ -72,18 +83,38 @@ docker compose -f "${repo_root}/compose.yaml" exec -T rabbitmq \
 export PERF_METHOD="${method}"
 export PERF_PATH="${path}"
 export PERF_BODY="${body}"
+# Pinned, not inherited: scripts/k6/scenario.js falls back to PERF_BASE_URL,
+# so an ambient value in the caller's shell would benchmark a different
+# target while health checks, telemetry, and profiling stay on this stack.
+export PERF_BASE_URL="http://127.0.0.1:8080"
 
-echo "Warming up for 10 seconds..."
-wrk -t2 -c16 -d10s \
-  -s "${repo_root}/scripts/wrk/scenario.lua" \
-  http://127.0.0.1:8080 \
-  > "${artifact_dir}/benchmark/warmup.txt"
+echo "Warming up for 10 seconds with ${load_generator}..."
+if [[ "${load_generator}" == "wrk" ]]; then
+  wrk -t2 -c16 -d10s \
+    -s "${repo_root}/scripts/wrk/scenario.lua" \
+    http://127.0.0.1:8080 \
+    > "${artifact_dir}/benchmark/warmup.txt"
+else
+  k6 run --vus 16 --duration 10s \
+    --summary-export "${artifact_dir}/benchmark/k6-warmup.json" \
+    --quiet --no-color \
+    "${repo_root}/scripts/k6/scenario.js" \
+    > "${artifact_dir}/benchmark/k6-warmup.txt"
+fi
 
-echo "Measuring for ${duration_seconds} seconds at ${connections} connections..."
-wrk -t4 -c"${connections}" -d"${duration_seconds}s" --latency \
-  -s "${repo_root}/scripts/wrk/scenario.lua" \
-  http://127.0.0.1:8080 \
-  > "${artifact_dir}/benchmark/wrk.txt"
+echo "Measuring for ${duration_seconds} seconds at ${connections} connections with ${load_generator}..."
+if [[ "${load_generator}" == "wrk" ]]; then
+  wrk -t4 -c"${connections}" -d"${duration_seconds}s" --latency \
+    -s "${repo_root}/scripts/wrk/scenario.lua" \
+    http://127.0.0.1:8080 \
+    > "${artifact_dir}/benchmark/wrk.txt"
+else
+  k6 run --vus "${connections}" --duration "${duration_seconds}s" \
+    --summary-export "${artifact_dir}/benchmark/k6-summary.json" \
+    --quiet --no-color \
+    "${repo_root}/scripts/k6/scenario.js" \
+    > "${artifact_dir}/benchmark/k6.txt"
+fi
 
 echo "Waiting 6 seconds for the final OTLP export batch..."
 sleep 6

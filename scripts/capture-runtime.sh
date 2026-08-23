@@ -5,12 +5,21 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 require_command curl
 require_command jq
-require_command wrk
 
 artifact_dir="${1:?Usage: capture-runtime.sh <artifact-directory> [trace|gcdump|stacks|dump] [duration-seconds]}"
 manifest="${artifact_dir}/manifest.json"
 scenario_id="$(jq -r '.scenarioId' "${manifest}")"
 telemetry_run_id="$(jq -r '.telemetryRunId // .runId' "${manifest}")"
+
+# The diagnostic workload defaults to whichever generator produced the
+# measurement so the two runs stay comparable. An explicit environment value
+# overrides it for a deliberate cross-generator comparison.
+load_generator="${PERFLAB_LOAD_GENERATOR:-$(jq -r '.workload.loadGenerator // "wrk"' "${manifest}")}"
+if [[ "${load_generator}" != "wrk" && "${load_generator}" != "k6" ]]; then
+  echo "PERFLAB_LOAD_GENERATOR must be 'wrk' or 'k6'; received '${load_generator}'." >&2
+  exit 1
+fi
+require_command "${load_generator}"
 requested_kind="${2:-$(scenario_value "${scenario_id}" diagnostic)}"
 kind="${requested_kind}"
 fallback_reason=""
@@ -39,12 +48,13 @@ runtime_capture_file="${artifact_dir}/runtime/capture.json"
 jq -n \
   --arg scenarioId "${scenario_id}" \
   --arg target "${target}" \
+  --arg loadGenerator "${load_generator}" \
   --arg requestedDiagnostic "${requested_kind}" \
   --arg effectiveDiagnostic "${kind}" \
   --arg fallbackReason "${fallback_reason}" \
   --arg startedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson durationSeconds "${duration_seconds}" \
-  '{scenarioId:$scenarioId,target:$target,requestedDiagnostic:$requestedDiagnostic,effectiveDiagnostic:$effectiveDiagnostic,durationSeconds:$durationSeconds,startedAt:$startedAt,status:"running"}
+  '{scenarioId:$scenarioId,target:$target,loadGenerator:$loadGenerator,requestedDiagnostic:$requestedDiagnostic,effectiveDiagnostic:$effectiveDiagnostic,durationSeconds:$durationSeconds,startedAt:$startedAt,status:"running"}
   + if $fallbackReason == "" then {} else {fallbackReason:$fallbackReason} end' \
   > "${runtime_capture_file}"
 curl -fsS http://127.0.0.1:52323/processes > "${processes_file}"
@@ -61,12 +71,24 @@ connections="$(scenario_value "${scenario_id}" connections)"
 export PERF_METHOD="${method}"
 export PERF_PATH="${path}"
 export PERF_BODY="${body}"
+# Pinned, not inherited: scripts/k6/scenario.js falls back to PERF_BASE_URL,
+# so an ambient value in the caller's shell would benchmark a different
+# target while health checks, telemetry, and profiling stay on this stack.
+export PERF_BASE_URL="http://127.0.0.1:8080"
 
 run_load() {
-  wrk -t4 -c"${connections}" -d"${duration_seconds}s" --latency \
-    -s "${repo_root}/scripts/wrk/scenario.lua" \
-    http://127.0.0.1:8080 \
-    > "${artifact_dir}/benchmark/diagnostic-wrk.txt"
+  if [[ "${load_generator}" == "wrk" ]]; then
+    wrk -t4 -c"${connections}" -d"${duration_seconds}s" --latency \
+      -s "${repo_root}/scripts/wrk/scenario.lua" \
+      http://127.0.0.1:8080 \
+      > "${artifact_dir}/benchmark/diagnostic-wrk.txt"
+  else
+    k6 run --vus "${connections}" --duration "${duration_seconds}s" \
+      --summary-export "${artifact_dir}/benchmark/diagnostic-k6-summary.json" \
+      --quiet --no-color \
+      "${repo_root}/scripts/k6/scenario.js" \
+      > "${artifact_dir}/benchmark/diagnostic-k6.txt"
+  fi
 }
 
 case "${kind}" in

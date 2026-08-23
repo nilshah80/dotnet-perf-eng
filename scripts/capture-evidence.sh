@@ -17,6 +17,7 @@ fi
 run_id="$(jq -r '.runId' "${manifest}")"
 telemetry_run_id="$(jq -r '.telemetryRunId // .runId' "${manifest}")"
 scenario_id="$(jq -r '.scenarioId' "${manifest}")"
+load_generator="$(jq -r '.workload.loadGenerator // "wrk"' "${manifest}")"
 start_epoch="$(jq -r '.startedEpoch' "${manifest}")"
 end_epoch="$(date -u +%s)"
 
@@ -31,11 +32,29 @@ capture_prometheus_query() {
     > "${artifact_dir}/telemetry/metrics/${output_name}.json" || true
 }
 
-capture_prometheus_query process_cpu 'rate(dotnet_process_cpu_time_seconds_total{job=~"perflab-.*"}[1m])'
-capture_prometheus_query working_set 'dotnet_process_memory_working_set_bytes{job=~"perflab-.*"}'
-capture_prometheus_query gc_heap 'dotnet_gc_last_collection_heap_size_bytes{job=~"perflab-.*"}'
-capture_prometheus_query thread_pool_queue 'dotnet_thread_pool_queue_length_total{job=~"perflab-.*"}'
-capture_prometheus_query request_duration 'http_server_request_duration_seconds_count{job=~"perflab-.*"}'
+# Gauges and rates must be captured over the run window, not sampled once after
+# the load stops. An instant query taken at capture time reports an idle process
+# and systematically hides the peak the metric exists to show: thread-pool
+# queueing, heap growth, and CPU saturation are all over by then. Cumulative
+# perflab_* counters stay on the instant query above, where a single read at the
+# end is already the run total.
+capture_prometheus_range() {
+  local output_name="$1"
+  local query="$2"
+  curl -fsS --get \
+    --data-urlencode "query=${query}" \
+    --data-urlencode "start=${start_epoch}" \
+    --data-urlencode "end=${end_epoch}" \
+    --data-urlencode "step=5" \
+    http://127.0.0.1:9090/api/v1/query_range \
+    > "${artifact_dir}/telemetry/metrics/${output_name}.json" || true
+}
+
+capture_prometheus_range process_cpu 'rate(dotnet_process_cpu_time_seconds_total{job=~"perflab-.*"}[1m])'
+capture_prometheus_range working_set 'dotnet_process_memory_working_set_bytes{job=~"perflab-.*"}'
+capture_prometheus_range gc_heap 'dotnet_gc_last_collection_heap_size_bytes{job=~"perflab-.*"}'
+capture_prometheus_range thread_pool_queue 'dotnet_thread_pool_queue_length_total{job=~"perflab-.*"}'
+capture_prometheus_range request_duration 'http_server_request_duration_seconds_count{job=~"perflab-.*"}'
 capture_prometheus_query scenario_executions "perflab_scenario_executions_total{perf_run_id=\"${telemetry_run_id}\"}"
 capture_prometheus_query application_metrics "{__name__=~\"perflab_.*\",perf_run_id=\"${telemetry_run_id}\"}"
 capture_prometheus_query pool_metrics "{__name__=~\"perflab_pool_.*\",perf_run_id=\"${telemetry_run_id}\"}"
@@ -88,7 +107,7 @@ curl -fsS --get \
 
 docker compose -f "${repo_root}/compose.yaml" exec -T postgres \
   psql -U perflab -d perflab -c \
-  "COPY (SELECT queryid, calls, rows, round(total_exec_time::numeric,2) AS total_exec_ms, round(mean_exec_time::numeric,2) AS mean_exec_ms, shared_blks_hit, shared_blks_read, temp_blks_written FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname='perflab') ORDER BY total_exec_time DESC LIMIT 50) TO STDOUT WITH CSV HEADER" \
+  "COPY (SELECT queryid, calls, rows, round(total_exec_time::numeric,2) AS total_exec_ms, round(mean_exec_time::numeric,2) AS mean_exec_ms, shared_blks_hit, shared_blks_read, temp_blks_written, left(regexp_replace(query, '\s+', ' ', 'g'), 300) AS query FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname='perflab') ORDER BY total_exec_time DESC LIMIT 50) TO STDOUT WITH CSV HEADER" \
   > "${artifact_dir}/dependencies/postgres-statements.csv"
 
 docker compose -f "${repo_root}/compose.yaml" exec -T postgres \
@@ -141,6 +160,7 @@ docker compose -f "${repo_root}/compose.yaml" ps --format json \
   docker version
   docker compose version
   wrk --version
+  k6 version
   claude --version
 } > "${artifact_dir}/source/tool-versions.txt" 2>&1 || true
 
@@ -149,26 +169,56 @@ if git -C "${repo_root}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git -C "${repo_root}" diff --stat > "${artifact_dir}/source/git-diff-stat.txt"
 fi
 
-wrk_file="${artifact_dir}/benchmark/wrk.txt"
-requests_per_second="$(awk '/Requests\/sec:/ {print $2}' "${wrk_file}" | tail -1)"
-p50="$(awk '$1 == "50%" {print $2}' "${wrk_file}" | tail -1)"
-p90="$(awk '$1 == "90%" {print $2}' "${wrk_file}" | tail -1)"
-p99="$(awk '$1 == "99%" {print $2}' "${wrk_file}" | tail -1)"
-non_2xx="$(awk '/Non-2xx or 3xx responses:/ {print $5}' "${wrk_file}" | tail -1)"
-requests_per_second="${requests_per_second:-0}"
-non_2xx="${non_2xx:-0}"
+if [[ "${load_generator}" == "wrk" ]]; then
+  wrk_file="${artifact_dir}/benchmark/wrk.txt"
+  requests_per_second="$(awk '/Requests\/sec:/ {print $2}' "${wrk_file}" | tail -1)"
+  p50="$(awk '$1 == "50%" {print $2}' "${wrk_file}" | tail -1)"
+  p90="$(awk '$1 == "90%" {print $2}' "${wrk_file}" | tail -1)"
+  p99="$(awk '$1 == "99%" {print $2}' "${wrk_file}" | tail -1)"
+  non_2xx="$(awk '/Non-2xx or 3xx responses:/ {print $5}' "${wrk_file}" | tail -1)"
+  requests_per_second="${requests_per_second:-0}"
+  non_2xx="${non_2xx:-0}"
 
-jq -n \
-  --arg runId "${run_id}" \
-  --arg telemetryRunId "${telemetry_run_id}" \
-  --arg scenarioId "${scenario_id}" \
-  --arg p50 "${p50:-unknown}" \
-  --arg p90 "${p90:-unknown}" \
-  --arg p99 "${p99:-unknown}" \
-  --argjson requestsPerSecond "${requests_per_second}" \
-  --argjson non2xx "${non_2xx}" \
-  '{runId:$runId,telemetryRunId:$telemetryRunId,scenarioId:$scenarioId,observations:[{name:"http.requests_per_second",value:$requestsPerSecond,unit:"request/s",source:"benchmark/wrk.txt"},{name:"http.latency.p50",value:$p50,unit:"wrk-duration",source:"benchmark/wrk.txt"},{name:"http.latency.p90",value:$p90,unit:"wrk-duration",source:"benchmark/wrk.txt"},{name:"http.latency.p99",value:$p99,unit:"wrk-duration",source:"benchmark/wrk.txt"},{name:"http.responses.non_2xx_3xx",value:$non2xx,unit:"response",source:"benchmark/wrk.txt"}]}' \
-  > "${artifact_dir}/facts.json"
+  # wrk prints latency as a unit-suffixed string such as "1.23ms" or "1.05s",
+  # so these percentiles stay strings tagged as wrk-duration.
+  jq -n \
+    --arg runId "${run_id}" \
+    --arg telemetryRunId "${telemetry_run_id}" \
+    --arg scenarioId "${scenario_id}" \
+    --arg loadGenerator "${load_generator}" \
+    --arg p50 "${p50:-unknown}" \
+    --arg p90 "${p90:-unknown}" \
+    --arg p99 "${p99:-unknown}" \
+    --argjson requestsPerSecond "${requests_per_second}" \
+    --argjson non2xx "${non_2xx}" \
+    '{runId:$runId,telemetryRunId:$telemetryRunId,scenarioId:$scenarioId,loadGenerator:$loadGenerator,observations:[{name:"http.requests_per_second",value:$requestsPerSecond,unit:"request/s",source:"benchmark/wrk.txt"},{name:"http.latency.p50",value:$p50,unit:"wrk-duration",source:"benchmark/wrk.txt"},{name:"http.latency.p90",value:$p90,unit:"wrk-duration",source:"benchmark/wrk.txt"},{name:"http.latency.p99",value:$p99,unit:"wrk-duration",source:"benchmark/wrk.txt"},{name:"http.responses.non_2xx_3xx",value:$non2xx,unit:"response",source:"benchmark/wrk.txt"}]}' \
+    > "${artifact_dir}/facts.json"
+else
+  k6_summary_file="${artifact_dir}/benchmark/k6-summary.json"
+  if [[ ! -s "${k6_summary_file}" ]]; then
+    echo "k6 summary export not found or empty: ${k6_summary_file}" >&2
+    exit 1
+  fi
+
+  # k6 reports trend statistics as floating-point milliseconds, so these
+  # percentiles are numeric and directly comparable between k6 runs. They are
+  # not comparable to a wrk-duration string from a wrk run.
+  #
+  # A k6 counter that never fires is omitted from the export entirely rather
+  # than exported as zero, hence the "// 0" fallbacks. non_2xx_3xx and
+  # transport_errors come from the lab's own counters in
+  # scripts/k6/scenario.js because the built-in http_req_failed rate merges an
+  # HTTP error response together with a connection-level failure.
+  jq -n \
+    --arg runId "${run_id}" \
+    --arg telemetryRunId "${telemetry_run_id}" \
+    --arg scenarioId "${scenario_id}" \
+    --arg loadGenerator "${load_generator}" \
+    --slurpfile summary "${k6_summary_file}" \
+    '($summary[0].metrics // {}) as $m
+    | {runId:$runId,telemetryRunId:$telemetryRunId,scenarioId:$scenarioId,loadGenerator:$loadGenerator,observations:[{name:"http.requests_per_second",value:($m.http_reqs.rate // 0),unit:"request/s",source:"benchmark/k6-summary.json"},{name:"http.latency.p50",value:($m.http_req_duration["p(50)"]),unit:"ms",source:"benchmark/k6-summary.json"},{name:"http.latency.p90",value:($m.http_req_duration["p(90)"]),unit:"ms",source:"benchmark/k6-summary.json"},{name:"http.latency.p99",value:($m.http_req_duration["p(99)"]),unit:"ms",source:"benchmark/k6-summary.json"},{name:"http.responses.non_2xx_3xx",value:($m.perflab_http_non_2xx_3xx.count // 0),unit:"response",source:"benchmark/k6-summary.json"},{name:"http.transport_errors",value:($m.perflab_http_transport_errors.count // 0),unit:"error",source:"benchmark/k6-summary.json"},{name:"http.requests.total",value:($m.http_reqs.count // 0),unit:"request",source:"benchmark/k6-summary.json"}]}' \
+    > "${artifact_dir}/facts.json"
+fi
 
 temporary_manifest="${manifest}.tmp"
 jq \
