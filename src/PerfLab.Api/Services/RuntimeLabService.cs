@@ -99,7 +99,12 @@ public sealed class RuntimeLabService(
                 var bytes = GC.AllocateUninitializedArray<byte>(128 * 1024);
                 RandomNumberGenerator.Fill(bytes);
                 var base64 = Convert.ToBase64String(bytes);
-                var json = JsonSerializer.Serialize(new { index, base64 });
+                // Property names must match AllocationPayload's constructor
+                // parameters exactly: this is a direct JsonSerializer call, so
+                // JsonSerializerOptions.Default applies and property matching is
+                // case-sensitive. Lower-cased names left Base64 null and the
+                // length read below threw before any real round-trip happened.
+                var json = JsonSerializer.Serialize(new { Index = index, Base64 = base64 });
                 var copy = JsonSerializer.Deserialize<AllocationPayload>(json);
                 checksum ^= copy?.Base64.Length ?? 0;
                 allocated += bytes.LongLength + (base64.Length * sizeof(char)) + (json.Length * sizeof(char));
