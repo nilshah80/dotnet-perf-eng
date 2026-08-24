@@ -62,7 +62,17 @@ builder.Logging.AddOpenTelemetry(logging =>
     logging.SetResourceBuilder(ResourceBuilder.CreateDefault()
         .AddService("perflab-worker")
         .AddAttributes(resourceAttributes));
-    logging.AddOtlpExporter(options => options.Endpoint = otlpEndpoint);
+    // The batch log processor defaults to a 2,048-record queue, and a scenario
+    // that logs per message can emit tens of thousands of records per second, so
+    // records were being dropped before export. A larger queue keeps moderate
+    // volumes intact. A deliberate log storm still exceeds any queue: for those,
+    // the reliable evidence is the counter metric, not individual log lines.
+    logging.AddOtlpExporter((exporterOptions, processorOptions) =>
+    {
+        exporterOptions.Endpoint = otlpEndpoint;
+        processorOptions.BatchExportProcessorOptions.MaxQueueSize = 20_000;
+        processorOptions.BatchExportProcessorOptions.MaxExportBatchSize = 2_048;
+    });
 });
 
 var host = builder.Build();

@@ -66,6 +66,11 @@ builder.Services.AddOpenTelemetry()
         })
         .AddHttpClientInstrumentation(options => options.RecordException = true)
         .AddNpgsql()
+        // Redis was previously the only dependency with no tracing, which left the
+        // cache scenarios unable to show dependency time at all. This instruments
+        // the injected singleton multiplexer; multiplexers a scenario constructs
+        // itself are still not traced.
+        .AddRedisInstrumentation()
         .AddOtlpExporter(options => options.Endpoint = otlpEndpoint))
     .WithMetrics(metrics => metrics
         .AddMeter(LabTelemetry.MeterName, "Npgsql", "System.Net.Http")
@@ -81,7 +86,17 @@ builder.Logging.AddOpenTelemetry(logging =>
     logging.SetResourceBuilder(ResourceBuilder.CreateDefault()
         .AddService("perflab-api")
         .AddAttributes(resourceAttributes));
-    logging.AddOtlpExporter(options => options.Endpoint = otlpEndpoint);
+    // The batch log processor defaults to a 2,048-record queue, and a scenario
+    // that logs per message can emit tens of thousands of records per second, so
+    // records were being dropped before export. A larger queue keeps moderate
+    // volumes intact. A deliberate log storm still exceeds any queue: for those,
+    // the reliable evidence is the counter metric, not individual log lines.
+    logging.AddOtlpExporter((exporterOptions, processorOptions) =>
+    {
+        exporterOptions.Endpoint = otlpEndpoint;
+        processorOptions.BatchExportProcessorOptions.MaxQueueSize = 20_000;
+        processorOptions.BatchExportProcessorOptions.MaxExportBatchSize = 2_048;
+    });
 });
 
 var app = builder.Build();

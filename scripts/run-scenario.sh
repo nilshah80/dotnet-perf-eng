@@ -73,12 +73,23 @@ docker compose -f "${repo_root}/compose.yaml" up -d --build api worker
 wait_for_api
 
 docker compose -f "${repo_root}/compose.yaml" exec -T redis redis-cli FLUSHALL >/dev/null
+# FLUSHALL clears keys but not INFO counters, so keyspace_hits/misses stayed
+# cumulative for the container's lifetime and had to be read as deltas between
+# consecutive scenarios. Resetting makes redis-info.txt scenario-scoped.
+docker compose -f "${repo_root}/compose.yaml" exec -T redis redis-cli CONFIG RESETSTAT >/dev/null
 docker compose -f "${repo_root}/compose.yaml" exec -T postgres \
   psql -U perflab -d perflab -c "SELECT pg_stat_statements_reset();" >/dev/null
 docker compose -f "${repo_root}/compose.yaml" exec -T rabbitmq \
   rabbitmqctl purge_queue perf.orders.created >/dev/null 2>&1 || true
 docker compose -f "${repo_root}/compose.yaml" exec -T rabbitmq \
   rabbitmqctl purge_queue perf.orders.dead >/dev/null 2>&1 || true
+
+# Baseline for the broker's cumulative opened/closed counters, taken after the
+# dependency reset and before any load, so churn during the run is a difference
+# rather than an absolute that carries every earlier scenario's history.
+curl -fsS --max-time 15 http://127.0.0.1:15692/metrics 2>/dev/null \
+  | grep -E '^rabbitmq_(connections|channels)' \
+  > "${artifact_dir}/dependencies/rabbitmq-broker-metrics-preload.txt" || true
 
 export PERF_METHOD="${method}"
 export PERF_PATH="${path}"
@@ -102,7 +113,30 @@ else
     > "${artifact_dir}/benchmark/k6-warmup.txt"
 fi
 
+# Every dependency snapshot used to be taken after the load stopped, which made
+# peak pool usage and connection churn invisible: a scenario that creates a
+# connection per request showed a fully idle broker by capture time. This samples
+# the live state once, halfway through the measurement.
+sample_midload() {
+  local out="${artifact_dir}/dependencies"
+  sleep $(( duration_seconds / 2 ))
+  docker compose -f "${repo_root}/compose.yaml" exec -T postgres \
+    psql -U perflab -d perflab -c \
+    "COPY (SELECT application_name, state, count(*) AS connections FROM pg_stat_activity WHERE datname='perflab' GROUP BY application_name, state ORDER BY application_name, state) TO STDOUT WITH CSV HEADER" \
+    > "${out}/postgres-connections-midload.csv" 2>/dev/null || true
+  docker compose -f "${repo_root}/compose.yaml" exec -T redis redis-cli INFO clients \
+    > "${out}/redis-clients-midload.txt" 2>/dev/null || true
+  curl -fsS --max-time 10 -u "perflab:${RABBITMQ_PASSWORD:-perflab}" \
+    http://127.0.0.1:15672/api/connections > "${out}/rabbitmq-connections-midload.json" 2>/dev/null || true
+  curl -fsS --max-time 10 -u "perflab:${RABBITMQ_PASSWORD:-perflab}" \
+    http://127.0.0.1:15672/api/channels > "${out}/rabbitmq-channels-midload.json" 2>/dev/null || true
+  docker compose -f "${repo_root}/compose.yaml" exec -T api \
+    sh -c 'cat /proc/net/tcp /proc/net/tcp6' > "${out}/api-net-tcp-midload.txt" 2>/dev/null || true
+}
+
 echo "Measuring for ${duration_seconds} seconds at ${connections} connections with ${load_generator}..."
+sample_midload &
+midload_pid=$!
 if [[ "${load_generator}" == "wrk" ]]; then
   wrk -t4 -c"${connections}" -d"${duration_seconds}s" --latency \
     -s "${repo_root}/scripts/wrk/scenario.lua" \
@@ -115,6 +149,8 @@ else
     "${repo_root}/scripts/k6/scenario.js" \
     > "${artifact_dir}/benchmark/k6.txt"
 fi
+
+wait "${midload_pid}" 2>/dev/null || true
 
 echo "Waiting 6 seconds for the final OTLP export batch..."
 sleep 6

@@ -26,7 +26,7 @@ mkdir -p "${artifact_dir}/telemetry/metrics" "${artifact_dir}/telemetry/traces/d
 capture_prometheus_query() {
   local output_name="$1"
   local query="$2"
-  curl -fsS --get \
+  curl -fsS --max-time 20 --get \
     --data-urlencode "query=${query}" \
     http://127.0.0.1:9090/api/v1/query \
     > "${artifact_dir}/telemetry/metrics/${output_name}.json" || true
@@ -41,7 +41,7 @@ capture_prometheus_query() {
 capture_prometheus_range() {
   local output_name="$1"
   local query="$2"
-  curl -fsS --get \
+  curl -fsS --max-time 30 --get \
     --data-urlencode "query=${query}" \
     --data-urlencode "start=${start_epoch}" \
     --data-urlencode "end=${end_epoch}" \
@@ -55,6 +55,14 @@ capture_prometheus_range working_set 'dotnet_process_memory_working_set_bytes{jo
 capture_prometheus_range gc_heap 'dotnet_gc_last_collection_heap_size_bytes{job=~"perflab-.*"}'
 capture_prometheus_range thread_pool_queue 'dotnet_thread_pool_queue_length_total{job=~"perflab-.*"}'
 capture_prometheus_range request_duration 'http_server_request_duration_seconds_count{job=~"perflab-.*"}'
+# dotnet_gc_last_collection_heap_size_bytes above only changes when a collection
+# happens, which made it report the same stale value for several scenarios in a
+# row. These two move continuously and are what memory-growth claims should
+# rest on.
+capture_prometheus_range gc_allocation_rate 'rate(dotnet_gc_heap_allocated_bytes_total{job=~"perflab-.*"}[1m])'
+capture_prometheus_range gc_committed 'dotnet_gc_last_collection_memory_committed_size_bytes{job=~"perflab-.*"}'
+capture_prometheus_range gc_collections 'dotnet_gc_collections_total{job=~"perflab-.*"}'
+capture_prometheus_range gc_pause 'rate(dotnet_gc_pause_time_seconds_total{job=~"perflab-.*"}[1m])'
 capture_prometheus_query scenario_executions "perflab_scenario_executions_total{perf_run_id=\"${telemetry_run_id}\"}"
 capture_prometheus_query application_metrics "{__name__=~\"perflab_.*\",perf_run_id=\"${telemetry_run_id}\"}"
 capture_prometheus_query pool_metrics "{__name__=~\"perflab_pool_.*\",perf_run_id=\"${telemetry_run_id}\"}"
@@ -74,7 +82,7 @@ capture_prometheus_query http_client_metrics "{__name__=~\"http_client_.*\",serv
 trace_query="{ resource.service.name =~ \"perflab-(api|worker)\" && resource.perf.run.id = \"${telemetry_run_id}\" }"
 trace_search_file="${artifact_dir}/telemetry/traces/search.json"
 for trace_attempt in $(seq 1 6); do
-  curl -fsS --get \
+  curl -fsS --max-time 20 --get \
     --data-urlencode "q=${trace_query}" \
     --data-urlencode "start=${start_epoch}" \
     --data-urlencode "end=${end_epoch}" \
@@ -91,19 +99,42 @@ done
 
 if jq -e '.traces | length > 0' "${trace_search_file}" >/dev/null 2>&1; then
   while IFS= read -r trace_id; do
-    curl -fsS "http://127.0.0.1:3200/api/traces/${trace_id}" \
+    curl -fsS --max-time 20 "http://127.0.0.1:3200/api/traces/${trace_id}" \
       > "${artifact_dir}/telemetry/traces/details/${trace_id}.json" || true
   done < <(jq -r '.traces | sort_by(.durationMs // 0) | reverse | .[:10][] | .traceID' "${trace_search_file}")
 fi
 
-log_query="{service_name=~\"perflab-(api|worker)\"} |= \"${telemetry_run_id}\""
-curl -fsS --get \
-  --data-urlencode "query=${log_query}" \
-  --data-urlencode "start=${start_epoch}000000000" \
-  --data-urlencode "end=${end_epoch}000000000" \
-  --data-urlencode "limit=5000" \
-  http://127.0.0.1:3100/loki/api/v1/query_range \
-  > "${artifact_dir}/telemetry/logs/query-range.json" || true
+# The previous query appended |= "<runId>", which filters on message TEXT. The
+# run id is a resource attribute, not part of any message, so the only line
+# that ever matched was the startup banner that prints it literally: a
+# scenario emitting ~52k log lines captured exactly one. The run window below
+# already scopes the query to this scenario, because each scenario runs in a
+# freshly recreated container, so no run-id filter is needed.
+log_query="{service_name=~\"perflab-(api|worker)\"}"
+# Loki needs time to ingest and flush a burst, and a high-volume scenario can
+# still be indexing when capture starts: a scenario emitting ~988k lines returned
+# an empty result here while the same query answered normally moments later.
+# Tempo already retries for this reason; the log query now does too, and each
+# attempt writes to a temp file so a timeout cannot leave a truncated artifact.
+log_file="${artifact_dir}/telemetry/logs/query-range.json"
+log_tmp="${log_file}.tmp"
+: > "${log_file}"
+for log_attempt in $(seq 1 6); do
+  if curl -fsS --max-time 30 --get \
+    --data-urlencode "query=${log_query}" \
+    --data-urlencode "start=${start_epoch}000000000" \
+    --data-urlencode "end=${end_epoch}000000000" \
+    --data-urlencode "limit=5000" \
+    http://127.0.0.1:3100/loki/api/v1/query_range \
+    > "${log_tmp}" 2>/dev/null; then
+    mv "${log_tmp}" "${log_file}"
+    if jq -e '[.data.result[]?.values[]?] | length > 0' "${log_file}" >/dev/null 2>&1; then
+      break
+    fi
+  fi
+  rm -f "${log_tmp}"
+  sleep 5
+done
 
 docker compose -f "${repo_root}/compose.yaml" exec -T postgres \
   psql -U perflab -d perflab -c \
@@ -132,24 +163,28 @@ docker compose -f "${repo_root}/compose.yaml" exec -T redis redis-cli SLOWLOG GE
 docker compose -f "${repo_root}/compose.yaml" exec -T redis redis-cli LATENCY LATEST \
   > "${artifact_dir}/dependencies/redis-latency.txt"
 
-curl -fsS -u "perflab:${RABBITMQ_PASSWORD:-perflab}" \
+curl -fsS --max-time 15 -u "perflab:${RABBITMQ_PASSWORD:-perflab}" \
   http://127.0.0.1:15672/api/queues \
   > "${artifact_dir}/dependencies/rabbitmq-queues.json" || true
 
-curl -fsS http://127.0.0.1:52323/processes \
+curl -fsS --max-time 15 http://127.0.0.1:52323/processes \
   > "${artifact_dir}/runtime/processes.json" || true
 
 docker compose -f "${repo_root}/compose.yaml" exec -T api \
   sh -c 'cat /proc/net/tcp /proc/net/tcp6' \
   > "${artifact_dir}/dependencies/api-net-tcp.txt" 2>/dev/null || true
 
-curl -fsS -u "perflab:${RABBITMQ_PASSWORD:-perflab}" \
+curl -fsS --max-time 15 -u "perflab:${RABBITMQ_PASSWORD:-perflab}" \
   http://127.0.0.1:15672/api/connections \
   > "${artifact_dir}/dependencies/rabbitmq-connections.json" || true
 
-curl -fsS -u "perflab:${RABBITMQ_PASSWORD:-perflab}" \
+curl -fsS --max-time 15 -u "perflab:${RABBITMQ_PASSWORD:-perflab}" \
   http://127.0.0.1:15672/api/channels \
   > "${artifact_dir}/dependencies/rabbitmq-channels.json" || true
+
+curl -fsS --max-time 15 http://127.0.0.1:15692/metrics 2>/dev/null \
+  | grep -E '^rabbitmq_(connections|channels)' \
+  > "${artifact_dir}/dependencies/rabbitmq-broker-metrics.txt" || true
 
 docker compose -f "${repo_root}/compose.yaml" ps --format json \
   | jq -s '.' \
@@ -223,7 +258,8 @@ fi
 temporary_manifest="${manifest}.tmp"
 jq \
   --arg completedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --argjson completedEpoch "${end_epoch}" \
-  '. + {completedAt:$completedAt,completedEpoch:$completedEpoch,status:"captured"}' \
+  --argjson measurementEndedEpoch "${end_epoch}" \
+  --argjson completedEpoch "$(date -u +%s)" \
+  '. + {measurementEndedEpoch:$measurementEndedEpoch,completedAt:$completedAt,completedEpoch:$completedEpoch,status:"captured"}' \
   "${manifest}" > "${temporary_manifest}"
 mv "${temporary_manifest}" "${manifest}"
