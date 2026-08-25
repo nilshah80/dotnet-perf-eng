@@ -10,3 +10,5 @@ artifacts/runtime/*
 !artifacts/runtime/.gitkeep
 ai/generated-mcp.json
 
+artifacts/diagrams/perflab-high-level-architecture.html
+artifacts/diagrams/perflab-step-by-step-process.html
