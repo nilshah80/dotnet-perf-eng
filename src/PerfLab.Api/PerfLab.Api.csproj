@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <ItemGroup>
+    <PackageReference Include="OpenTelemetry.Instrumentation.StackExchangeRedis" />
     <ProjectReference Include="../PerfLab.Shared/PerfLab.Shared.csproj" />
     <PackageReference Include="Npgsql.OpenTelemetry" />
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />

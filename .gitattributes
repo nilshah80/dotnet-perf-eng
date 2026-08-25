@@ -1,0 +1,32 @@
+# Line endings in this repository are not a cosmetic preference. The same files
+# are consumed by Git Bash/MSYS on Windows, by bash on macOS and Linux, and by
+# Linux containers that bind-mount them straight off the host working tree
+# (compose.yaml mounts ./ into diagnostics, plus infra/postgres/init.sql,
+# infra/rabbitmq/enabled_plugins, and the two Grafana provisioning files).
+#
+# Without this file the invariant held only by accident, because the Windows
+# clone happened to have core.autocrlf=true. One clone with core.autocrlf=false
+# puts CRLF into the index, and a macOS or Linux checkout then fails on the very
+# first line of every entry point with "env: bash\r: No such file or directory".
+#
+# `text=auto` normalizes the index to LF; the explicit `eol=lf` entries also pin
+# the working tree, which is what the container bind mounts actually read.
+* text=auto
+
+# Executed as programs: a CR in the shebang or after a line continuation breaks
+# them outright.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+.dockerignore   text eol=lf
+
+# Read by the load generators, which run on the host but parse these verbatim.
+*.lua           text eol=lf
+*.js            text eol=lf
+
+# Bind-mounted into Linux containers and parsed by Postgres, RabbitMQ (an Erlang
+# term file), and Grafana provisioning.
+*.sql           text eol=lf
+*.yaml          text eol=lf
+*.yml           text eol=lf
+*.json          text eol=lf
+enabled_plugins text eol=lf

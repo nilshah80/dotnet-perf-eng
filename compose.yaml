@@ -77,6 +77,12 @@ services:
     container_name: perflab-lgtm
     environment:
       TEMPO_EXTRA_ARGS: --query-frontend.mcp-server.enabled=true
+      # One 27-scenario sweep wrote 812 MB of traces and 364 MB of logs against a
+      # 3 GiB limit, which starved evidence capture of traces and metrics for the
+      # last seven scenarios. Prometheus is not the problem (1.5 MB, ~5k series),
+      # so the trace volume is capped at the source with sampling below; this is
+      # belt-and-braces so a long session cannot grow the metric store unbounded.
+      PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=6h --storage.tsdb.retention.size=512MB
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/grafana/conf/provisioning/dashboards/custom/perflab.json
     ports:
       - "127.0.0.1:3000:3000"
@@ -90,7 +96,11 @@ services:
       - lgtm-data:/data
       - ./infra/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/custom.yaml:ro
       - ./infra/grafana/perflab.json:/otel-lgtm/grafana/conf/provisioning/dashboards/custom/perflab.json:ro
-    mem_limit: 2g
+    # A full 27-scenario sweep saturated this at 2g: Prometheus and Tempo stopped
+    # responding partway through, which starved evidence capture of traces and
+    # logs for the later scenarios. Raised to 3g, which keeps the sum of all
+    # container limits inside the Docker VM's 8 GiB budget.
+    mem_limit: 4g
 
   dotnet-monitor:
     image: mcr.microsoft.com/dotnet/monitor:10.0
@@ -105,8 +115,8 @@ services:
       DOTNETMONITOR_Urls: http://+:52323
       DOTNETMONITOR_Metrics__Endpoints: http://+:52325
     ports:
-      - "127.0.0.1:52323:52323"
-      - "127.0.0.1:52325:52325"
+      - "127.0.0.1:18323:52323"
+      - "127.0.0.1:18325:52325"
     volumes:
       - diagnostic-ipc:/diag
     mem_limit: 512m
@@ -131,6 +141,13 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
       OTEL_METRIC_EXPORT_INTERVAL: 5000
+      # Head sampling keeps whole traces intact while capping what reaches Tempo.
+      # Evidence capture only reads the ten slowest traces per scenario, so a
+      # fraction is ample for structural findings such as span counts per request.
+      # Raise to 1.0 for a single-scenario run when the extreme tail is the
+      # subject, since a sample can miss the true worst outlier.
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${PERFLAB_TRACE_SAMPLE_RATIO:-0.25}
       DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
       DOTNET_gcServer: "1"
       DOTNET_GCHeapHardLimitPercent: "50"
@@ -169,6 +186,13 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
       OTEL_METRIC_EXPORT_INTERVAL: 5000
+      # Head sampling keeps whole traces intact while capping what reaches Tempo.
+      # Evidence capture only reads the ten slowest traces per scenario, so a
+      # fraction is ample for structural findings such as span counts per request.
+      # Raise to 1.0 for a single-scenario run when the extreme tail is the
+      # subject, since a sample can miss the true worst outlier.
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${PERFLAB_TRACE_SAMPLE_RATIO:-0.25}
       DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
       DOTNET_gcServer: "1"
       DOTNET_GCHeapHardLimitPercent: "60"

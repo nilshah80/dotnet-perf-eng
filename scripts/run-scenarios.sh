@@ -22,6 +22,13 @@ EOF
 
 require_command jq
 
+load_generator="${PERFLAB_LOAD_GENERATOR:-wrk}"
+if [[ "${load_generator}" != "wrk" && "${load_generator}" != "k6" ]]; then
+  echo "PERFLAB_LOAD_GENERATOR must be 'wrk' or 'k6'; received '${load_generator}'." >&2
+  exit 1
+fi
+require_command "${load_generator}"
+
 if [[ $# -eq 0 ]]; then
   usage >&2
   exit 1
@@ -158,10 +165,11 @@ jq -n \
   --arg gitRevision "${git_revision}" \
   --argjson startedEpoch "$(date -u +%s)" \
   --argjson durationSeconds "${duration_seconds}" \
+  --arg loadGenerator "${load_generator}" \
   --argjson withRuntime "${with_runtime}" \
   --argjson scenarioCount "${scenario_count}" \
   --argjson scenarios "${scenario_entries_json}" \
-  '{runId:$runId,kind:$kind,selector:$selector,status:$status,startedAt:$startedAt,startedEpoch:$startedEpoch,durationSeconds:$durationSeconds,withRuntimeDiagnostics:$withRuntime,scenarioCount:$scenarioCount,completedCount:0,failedCount:0,source:{gitRevision:$gitRevision},scenarios:$scenarios}' \
+  '{runId:$runId,kind:$kind,selector:$selector,status:$status,startedAt:$startedAt,startedEpoch:$startedEpoch,durationSeconds:$durationSeconds,loadGenerator:$loadGenerator,withRuntimeDiagnostics:$withRuntime,scenarioCount:$scenarioCount,completedCount:0,failedCount:0,source:{gitRevision:$gitRevision},scenarios:$scenarios}' \
   > "${suite_manifest}"
 
 update_scenario_status() {
@@ -208,7 +216,7 @@ build_suite_facts() {
 
   jq -s \
     --arg runId "${suite_run_id}" \
-    '{runId:$runId,kind:"scenario-suite",scenarioCount:length,scenarios:map({scenarioId,telemetryRunId,artifactPath:("scenarios/" + .scenarioId),observations})}' \
+    '{runId:$runId,kind:"scenario-suite",scenarioCount:length,scenarios:map({scenarioId,telemetryRunId,loadGenerator,artifactPath:("scenarios/" + .scenarioId),observations})}' \
     "${fact_files[@]}" > "${suite_facts}"
 }
 
@@ -246,6 +254,7 @@ completed_with_errors="false"
 scenario_index=0
 
 echo "Suite run ID: ${suite_run_id}"
+echo "Load generator: ${load_generator}"
 echo "Scenarios (${scenario_count}): ${scenario_ids[*]}"
 echo "Suite artifacts: ${suite_dir}"
 

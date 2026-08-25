@@ -14,7 +14,10 @@ is a single-scenario package, analyze only that package.
 
 For each measured scenario, inspect:
 
-- `benchmark/wrk.txt` and `benchmark/diagnostic-wrk.txt`;
+- the benchmark output of the load generator named in `manifest.json` at
+  `workload.loadGenerator`: `benchmark/wrk.txt` and
+  `benchmark/diagnostic-wrk.txt` for wrk, or `benchmark/k6-summary.json`,
+  `benchmark/k6.txt`, and `benchmark/diagnostic-k6-summary.json` for k6;
 - OpenTelemetry metrics, traces, and logs;
 - PostgreSQL, Redis, RabbitMQ, HTTP/socket, and Docker snapshots;
 - `runtime/capture.json` and the available normalized runtime evidence;
@@ -24,6 +27,15 @@ Some catalog entries recommend managed stacks, but the local dotnet-monitor
 sidecar can fail on `/stacks`. In that case `runtime/capture.json` records a CPU
 trace fallback. Treat that as a diagnostic limitation, not as an application
 failure. Empty or missing telemetry is also a limitation, not proof of health.
+
+`facts.json` records which load generator produced the numbers. wrk reports
+latency percentiles as unit-suffixed strings such as `43.21ms`, k6 reports them
+as floating-point milliseconds, and the two impose different client-side cost on
+the same machine as the container under measurement. Never compare a wrk
+measurement against a k6 measurement: compare wrk with wrk and k6 with k6. A k6
+package also separates `http.responses.non_2xx_3xx` from
+`http.transport_errors`, so a connection-level failure is not evidence of an
+application error response.
 
 For each scenario, explain in plain English:
 
