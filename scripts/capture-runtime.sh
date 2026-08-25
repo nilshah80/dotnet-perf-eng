@@ -57,7 +57,7 @@ jq -n \
   '{scenarioId:$scenarioId,target:$target,loadGenerator:$loadGenerator,requestedDiagnostic:$requestedDiagnostic,effectiveDiagnostic:$effectiveDiagnostic,durationSeconds:$durationSeconds,startedAt:$startedAt,status:"running"}
   + if $fallbackReason == "" then {} else {fallbackReason:$fallbackReason} end' \
   > "${runtime_capture_file}"
-curl -fsS http://127.0.0.1:52323/processes > "${processes_file}"
+curl -fsS http://127.0.0.1:18323/processes > "${processes_file}"
 runtime_uid="$(jq -r --arg assembly "${assembly_name}" '.[] | select(((.managedEntryPointAssemblyName // "") | contains($assembly)) or ((.name // "") | contains($assembly))) | .uid' "${processes_file}" | head -1)"
 if [[ -z "${runtime_uid}" || "${runtime_uid}" == "null" ]]; then
   echo "Could not find ${assembly_name} in dotnet-monitor /processes." >&2
@@ -99,17 +99,17 @@ case "${kind}" in
       --data-urlencode "uid=${runtime_uid}" \
       --data-urlencode "durationSeconds=${duration_seconds}" \
       --data-urlencode "profile=cpu" \
-      http://127.0.0.1:52323/trace \
+      http://127.0.0.1:18323/trace \
       > "${artifact_dir}/runtime/${target}/cpu.nettrace"
     wait "${load_pid}"
     ;;
   gcdump)
     curl -fsS --get --data-urlencode "uid=${runtime_uid}" \
-      http://127.0.0.1:52323/gcdump \
+      http://127.0.0.1:18323/gcdump \
       > "${artifact_dir}/runtime/${target}/before.gcdump"
     run_load
     curl -fsS --get --data-urlencode "uid=${runtime_uid}" \
-      http://127.0.0.1:52323/gcdump \
+      http://127.0.0.1:18323/gcdump \
       > "${artifact_dir}/runtime/${target}/after.gcdump"
     ;;
   stacks)
@@ -117,7 +117,7 @@ case "${kind}" in
     load_pid=$!
     sleep 5
     curl -fsS --get --data-urlencode "uid=${runtime_uid}" \
-      http://127.0.0.1:52323/stacks \
+      http://127.0.0.1:18323/stacks \
       > "${artifact_dir}/runtime/${target}/stacks.json"
     wait "${load_pid}"
     ;;
@@ -128,7 +128,7 @@ case "${kind}" in
     curl -fsS --get \
       --data-urlencode "uid=${runtime_uid}" \
       --data-urlencode "type=Heap" \
-      http://127.0.0.1:52323/dump \
+      http://127.0.0.1:18323/dump \
       > "${artifact_dir}/runtime/${target}/process.dmp"
     wait "${load_pid}"
     ;;

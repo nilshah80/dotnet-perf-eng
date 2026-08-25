@@ -45,7 +45,7 @@ flowchart TD
 | Loki | Log query API | `http://127.0.0.1:3100` |
 | Tempo | Trace query API and optional MCP | `http://127.0.0.1:3200` |
 | Pyroscope | Profiles backend, reachable but unused (see note below) | `http://127.0.0.1:4040` |
-| dotnet-monitor | Diagnostic API | `http://127.0.0.1:52323` |
+| dotnet-monitor | Diagnostic API | `http://127.0.0.1:18323` |
 | PostgreSQL | Lab database | `127.0.0.1:5432` |
 | Redis | Lab cache | `127.0.0.1:6379` |
 | RabbitMQ management | Queue inspection | `http://127.0.0.1:15672` (`perflab` / `perflab`) |

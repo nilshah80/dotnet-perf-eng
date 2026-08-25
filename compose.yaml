@@ -115,8 +115,8 @@ services:
       DOTNETMONITOR_Urls: http://+:52323
       DOTNETMONITOR_Metrics__Endpoints: http://+:52325
     ports:
-      - "127.0.0.1:52323:52323"
-      - "127.0.0.1:52325:52325"
+      - "127.0.0.1:18323:52323"
+      - "127.0.0.1:18325:52325"
     volumes:
       - diagnostic-ipc:/diag
     mem_limit: 512m

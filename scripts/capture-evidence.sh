@@ -98,10 +98,24 @@ for trace_attempt in $(seq 1 6); do
 done
 
 if jq -e '.traces | length > 0' "${trace_search_file}" >/dev/null 2>&1; then
+  trace_detail_failures=0
   while IFS= read -r trace_id; do
-    curl -fsS --max-time 20 "http://127.0.0.1:3200/api/traces/${trace_id}" \
-      > "${artifact_dir}/telemetry/traces/details/${trace_id}.json" || true
+    trace_detail_file="${artifact_dir}/telemetry/traces/details/${trace_id}.json"
+    # The redirect creates the file before curl runs, so a failed fetch left a
+    # zero-byte artifact indistinguishable from a captured trace. Stage the
+    # fetch and publish it only when curl actually succeeded.
+    if curl -fsS --max-time 20 "http://127.0.0.1:3200/api/traces/${trace_id}" \
+      > "${trace_detail_file}.tmp" 2>/dev/null; then
+      mv "${trace_detail_file}.tmp" "${trace_detail_file}"
+    else
+      rm -f "${trace_detail_file}.tmp"
+      trace_detail_failures=$((trace_detail_failures + 1))
+    fi
   done < <(jq -r '.traces | sort_by(.durationMs // 0) | reverse | .[:10][] | .traceID' "${trace_search_file}")
+
+  if [[ "${trace_detail_failures}" -gt 0 ]]; then
+    echo "WARNING: ${trace_detail_failures} trace detail fetch(es) failed; this evidence package is INCOMPLETE." >&2
+  fi
 fi
 
 # The previous query appended |= "<runId>", which filters on message TEXT. The
@@ -116,6 +130,12 @@ log_query="{service_name=~\"perflab-(api|worker)\"}"
 # an empty result here while the same query answered normally moments later.
 # Tempo already retries for this reason; the log query now does too, and each
 # attempt writes to a temp file so a timeout cannot leave a truncated artifact.
+# limit=5000 exceeded Loki's 4 MiB internal gRPC message cap on verbose
+# scenarios: the query failed with HTTP 500 "ResourceExhausted ... larger than
+# max (7317305 vs 4194304)" after ~18s, all six attempts failed the same way,
+# and the pre-truncated artifact was left at zero bytes while the run still
+# reported success. Measured on this stack: 5000 -> 500 (7.3MB), 3000 -> 500,
+# 2000 -> 200 (2.92MB in 0.30s), 1000 -> 200 (1.46MB).
 log_file="${artifact_dir}/telemetry/logs/query-range.json"
 log_tmp="${log_file}.tmp"
 : > "${log_file}"
@@ -124,7 +144,7 @@ for log_attempt in $(seq 1 6); do
     --data-urlencode "query=${log_query}" \
     --data-urlencode "start=${start_epoch}000000000" \
     --data-urlencode "end=${end_epoch}000000000" \
-    --data-urlencode "limit=5000" \
+    --data-urlencode "limit=2000" \
     http://127.0.0.1:3100/loki/api/v1/query_range \
     > "${log_tmp}" 2>/dev/null; then
     mv "${log_tmp}" "${log_file}"
@@ -135,6 +155,13 @@ for log_attempt in $(seq 1 6); do
   rm -f "${log_tmp}"
   sleep 5
 done
+
+# An empty artifact must not be mistaken for a quiet run. A silently empty
+# capture is worse than a loud failure because it makes an incomplete package
+# look diagnosable.
+if ! jq -e '[.data.result[]?.values[]?] | length > 0' "${log_file}" >/dev/null 2>&1; then
+  echo "WARNING: log capture produced no entries at ${log_file}; treat these logs as MISSING, not as evidence of a quiet run." >&2
+fi
 
 docker compose -f "${repo_root}/compose.yaml" exec -T postgres \
   psql -U perflab -d perflab -c \
@@ -167,7 +194,7 @@ curl -fsS --max-time 15 -u "perflab:${RABBITMQ_PASSWORD:-perflab}" \
   http://127.0.0.1:15672/api/queues \
   > "${artifact_dir}/dependencies/rabbitmq-queues.json" || true
 
-curl -fsS --max-time 15 http://127.0.0.1:52323/processes \
+curl -fsS --max-time 15 http://127.0.0.1:18323/processes \
   > "${artifact_dir}/runtime/processes.json" || true
 
 docker compose -f "${repo_root}/compose.yaml" exec -T api \

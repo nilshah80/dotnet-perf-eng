@@ -41,7 +41,14 @@ if git -C "${repo_root}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git_revision="$(git -C "${repo_root}" rev-parse HEAD)"
 fi
 
-jq -n \
+# MSYS rewrites POSIX-looking ARGUMENTS into Windows paths when spawning a native
+# binary, and jq.exe is native: --arg path "/api/orders" was recorded in the
+# manifest as "C:/Program Files/Git/api/orders", so the package misreported the
+# workload that ran. This is argument conversion, a different mechanism from the
+# environment conversion handled in lib/common.sh, and it needs its own opt-out.
+# Suppressed only for this call: conversion stays on elsewhere because the k6 and
+# docker invocations depend on it to turn repo paths into real Windows paths.
+MSYS_NO_PATHCONV=1 jq -n \
   --arg runId "${package_run_id}" \
   --arg telemetryRunId "${telemetry_run_id}" \
   --arg scenarioId "${scenario_id}" \
