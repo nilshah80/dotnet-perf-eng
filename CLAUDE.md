@@ -2,6 +2,8 @@
 
 This repository is a controlled local performance lab. Diagnose from the captured evidence and the actual implementation; a scenario identifier is only a correlation key and is never proof of a defect.
 
+The harness is runtime-agnostic and lives under `harness/` (core scripts + adapters + the AI phase). Each experiment is a `labs/<project>/` folder (`lab.config.sh` + `scenarios.tsv` + compose/infra); the application it tests lives separately under `source/<runtime>/<project>/`. For this repository: lab `labs/scenariolab/`, app `source/dotnet/scenariolab/` (solution `PerfLab.slnx`).
+
 For diagnosis work:
 
 - Treat `artifacts/runs/<run-id>/facts.json` as an index, then verify claims against the referenced raw artifacts.

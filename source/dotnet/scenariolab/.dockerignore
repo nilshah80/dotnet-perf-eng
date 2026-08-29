@@ -1,0 +1,5 @@
+# Build context for the api/worker images is this pristine .NET app directory.
+# Exclude build outputs.
+**/bin
+**/obj
+.dockerignore
