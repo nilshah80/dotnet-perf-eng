@@ -9,9 +9,14 @@ source "${HARNESS_ROOT}/core/lib/common.sh"
 artifact_dir="${1:?reset.sh <artifact-dir>}"
 mkdir -p "${artifact_dir}/dependencies"
 
-compose exec -T rabbitmq rabbitmqctl purge_queue perf.orders.created >/dev/null 2>&1 || true
-compose exec -T rabbitmq rabbitmqctl purge_queue perf.orders.dead    >/dev/null 2>&1 || true
+# Queue names are project-specific, declared as PERFLAB_RABBIT_QUEUES in
+# lab.config.sh; a lab that declares none purges nothing here.
+for q in ${rabbit_queues}; do
+  compose exec -T "${rabbit_service}" rabbitmqctl purge_queue "${q}" >/dev/null 2>&1 || true
+done
 
-curl -fsS --max-time 15 http://127.0.0.1:15692/metrics 2>/dev/null \
+curl -fsS --max-time 15 "${rabbit_metrics_url}" 2>/dev/null \
   | grep -E '^rabbitmq_(connections|channels)' \
   > "${artifact_dir}/dependencies/rabbitmq-broker-metrics-preload.txt" || true
+
+run_lab_dependency_hook rabbitmq reset "${artifact_dir}"

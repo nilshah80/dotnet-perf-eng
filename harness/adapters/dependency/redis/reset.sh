@@ -6,5 +6,8 @@ set -euo pipefail
 HARNESS_ROOT="${PERFLAB_HARNESS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 # shellcheck disable=SC1091
 source "${HARNESS_ROOT}/core/lib/common.sh"
-compose exec -T redis redis-cli FLUSHALL >/dev/null
-compose exec -T redis redis-cli CONFIG RESETSTAT >/dev/null
+artifact_dir="${1:-}"
+compose exec -T "${redis_service}" redis-cli FLUSHALL >/dev/null
+compose exec -T "${redis_service}" redis-cli CONFIG RESETSTAT >/dev/null
+
+run_lab_dependency_hook redis reset "${artifact_dir}"
