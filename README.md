@@ -19,12 +19,14 @@ harness/                          # reusable toolkit (never edited per project)
 ├── core/                         # run-scenario(s), capture-evidence, capture/normalize-runtime, lib/common.sh
 ├── adapters/
 │   ├── runtime/dotnet/           # metrics.sh, capture.sh, normalize.sh, versions.sh, evidence-extra.sh, diagnostics/Dockerfile
-│   ├── dependency/{postgres,redis,rabbitmq}/  # reset.sh, sample-midload.sh, snapshot.sh
-│   └── loadgen/{wrk,k6}/         # run.sh + scenario.lua / scenario.js
+│   ├── dependency/{postgres,redis,rabbitmq}/  # reset/sample-midload/snapshot.sh (generic; config-parameterized)
+│   └── loadgen/{wrk,k6}/         # run.sh (shared contract) + default.lua / default.js (fallback workload)
 └── ai/                           # diagnosis.schema.json, *-prompt.md, scripts/
 labs/scenariolab/                 # the EXPERIMENT (per project): what to test + how to run it
 ├── lab.config.sh                 # descriptor — the single re-pointing seam (bash)
 ├── scenarios.tsv                 # this project's API scenarios
+├── loadgen/{k6.js,wrk.lua}       # this lab's workload (auth/data live here; else the shared default)
+├── dependencies/<dep>/<phase>.sh # project-specific probes (e.g. postgres EXPLAIN), by convention
 └── compose.yaml  infra/          # lab wiring: app + deps + observability + diagnostics
 source/dotnet/scenariolab/        # the APP under test ONLY (pristine — swappable for a real repo)
 └── PerfLab.slnx  src/{Api,Worker,Shared}/
@@ -121,6 +123,14 @@ PERFLAB_LOAD_GENERATOR=wrk ./harness/core/run-single.sh S01 30
 The two are **not numerically comparable** (k6 reports latency as numeric ms;
 wrk as unit-suffixed strings), so the generator is recorded in `manifest.json`
 and must be held constant across a before/after comparison.
+
+**Per-lab workloads.** `run.sh` (the measurement + `observations.json` contract)
+is shared and identical across labs; the *workload script* is per-lab, resolved as
+`PERFLAB_{K6,WRK}_SCRIPT` > `labs/<project>/loadgen/<gen>.{js,lua}` > the shared
+`default.{js,lua}`. A project that needs a JWT `setup()` login, request chaining,
+or per-request datasets ships its own `loadgen/<gen>.js` instead of editing the
+shared default. The defaults also accept an optional `PERF_HEADERS` env var (a JSON
+object of extra headers, e.g. a pre-minted bearer token).
 
 ## Runtime diagnostics
 
