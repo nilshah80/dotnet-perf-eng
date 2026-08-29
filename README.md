@@ -38,6 +38,16 @@ Three concerns, three homes: `harness/` (the reusable engine), `labs/<project>/`
 `source/<runtime>/<project>/` (the application, kept clean). The harness
 auto-discovers the sole lab; with several, select one via `PERFLAB_LAB=<name>`.
 
+### Labs in this repo
+
+| Lab | App | Dependencies | Demonstrates |
+|---|---|---|---|
+| `scenariolab` | `source/dotnet/scenariolab` (`PerfLab.Api` + worker) | postgres, redis, rabbitmq | the reference planted-defect catalog (`S00`–`S26`) |
+| `ecommerce` | `source/dotnet/ecommerce` (`ECommerce.Api`) | postgres | a JWT-protected CRUD API (`E00`–`E14`); per-lab k6 workload that logs in via `setup()`, and postgres db/user `ecommerce` (parameterized dependency adapter) |
+
+With more than one lab present, **every command needs a lab selected**, e.g.
+`PERFLAB_LAB=ecommerce ./harness/core/run-multiple.sh E02,E03 20`.
+
 ## Prerequisites
 
 - **Docker + Docker Compose** (runs the whole stack; also hosts `jq` — no host jq needed).
