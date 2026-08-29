@@ -105,6 +105,19 @@ services:
     mem_limit: 768m
     restart: unless-stopped
 
+  # Profile-gated tools container (built from the shared dotnet runtime adapter)
+  # used by normalize-runtime.sh to convert *.nettrace -> Speedscope and
+  # gcdump/dump -> text. Only started for --with-runtime normalization.
+  diagnostics:
+    profiles: ["tools"]
+    build:
+      context: ../../harness/adapters/runtime/dotnet/diagnostics
+      dockerfile: Dockerfile
+    working_dir: /workspace
+    volumes:
+      - ../../source/dotnet/ecommerce:/workspace:ro
+      - ../../artifacts:/artifacts
+
 volumes:
   postgres-data:
   lgtm-data:
