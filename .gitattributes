@@ -23,6 +23,9 @@ Dockerfile      text eol=lf
 *.lua           text eol=lf
 *.js            text eol=lf
 
+# Scenario catalog, parsed by the harness with awk on the host.
+*.tsv           text eol=lf
+
 # Bind-mounted into Linux containers and parsed by Postgres, RabbitMQ (an Erlang
 # term file), and Grafana provisioning.
 *.sql           text eol=lf
@@ -30,3 +33,7 @@ Dockerfile      text eol=lf
 *.yml           text eol=lf
 *.json          text eol=lf
 enabled_plugins text eol=lf
+
+# Parsed by docker compose on the host; a stray CR would corrupt a value.
+.env            text eol=lf
+.env.example    text eol=lf

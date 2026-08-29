@@ -1,0 +1,30 @@
+# Scenario catalog (TAB-separated). Parsed by harness/core/lib/common.sh with awk -- no jq.
+# Columns: id	name	method	path	body	target	diagnostic	connections
+# body is empty for GET rows (two adjacent tabs). Fields never contain a tab.
+S00	control	GET	/api/catalog/recommendations?categoryId=1&take=20		api	trace	64
+S01	catalog-ranking	GET	/api/catalog/recommendations?categoryId=1&take=20		api	trace	64
+S02	request-continuations	GET	/api/runtime/threading		api	stacks	128
+S03	shared-coordination	GET	/api/runtime/threading		api	stacks	96
+S04	subscriber-lifecycle	GET	/api/runtime/memory		api	gcdump	32
+S05	payload-transform	GET	/api/runtime/memory		api	trace	32
+S06	work-scheduling	GET	/api/runtime/threading		api	trace	64
+S07	customer-orders	GET	/api/customers/1/orders?page=1&pageSize=50		api	stacks	48
+S08	order-history-page	GET	/api/customers/1/orders?page=100&pageSize=25		api	stacks	48
+S09	order-reader-lifecycle	GET	/api/customers/1/orders?page=1&pageSize=25		api	stacks	64
+S10	inventory-update	POST	/api/orders	{"customerId":1,"productId":1,"quantity":1,"poison":false}	api	stacks	64
+S11	order-projection	GET	/api/customers/1/orders?page=1&pageSize=25		api	gcdump	32
+S12	catalog-refresh	GET	/api/cache/catalog/1		api	stacks	128
+S13	catalog-fragments	GET	/api/cache/catalog/1		api	stacks	64
+S14	cache-session	GET	/api/cache/catalog/1		api	trace	64
+S15	catalog-keyspace	GET	/api/cache/catalog/1		api	gcdump	64
+S16	order-publication	POST	/api/orders	{"customerId":1,"productId":1,"quantity":1,"poison":false}	api	trace	64
+S17	order-consumption	POST	/api/orders	{"customerId":1,"productId":1,"quantity":1,"poison":false}	worker	stacks	48
+S18	failed-order	POST	/api/orders	{"customerId":1,"productId":1,"quantity":1,"poison":true}	worker	stacks	8
+S19	parallel-publication	POST	/api/orders	{"customerId":1,"productId":1,"quantity":1,"poison":false}	api	trace	128
+S20	deferred-message-read	POST	/api/orders	{"customerId":1,"productId":1,"quantity":1,"poison":false}	worker	gcdump	48
+S21	database-lease-capacity	GET	/api/pools/postgres		api	trace	48
+S22	database-lease-fanout	GET	/api/pools/postgres		api	trace	96
+S23	cache-lease-capacity	GET	/api/pools/redis		api	trace	64
+S24	cache-client-fanout	GET	/api/pools/redis		api	trace	128
+S25	upstream-connection-capacity	GET	/api/pools/http		api	trace	64
+S26	upstream-connection-fanout	GET	/api/pools/http		api	trace	128
