@@ -33,12 +33,13 @@ capture_prometheus_range() {
     "${prometheus_url}/api/v1/query_range" > "${artifact_dir}/telemetry/metrics/$1.json" || true
 }
 
-# Application (perflab_*) metrics: the harness's own instrumentation, run-id
-# scoped and runtime-neutral. Captured first because the client-metric scoping
-# regex below is derived from them.
-capture_prometheus_query scenario_executions "perflab_scenario_executions_total{${run_id_label}=\"${telemetry_run_id}\"}"
-capture_prometheus_query application_metrics "{__name__=~\"perflab_.*\",${run_id_label}=\"${telemetry_run_id}\"}"
-capture_prometheus_query pool_metrics "{__name__=~\"perflab_pool_.*\",${run_id_label}=\"${telemetry_run_id}\"}"
+# Application (<app_metric_prefix>_*) metrics: the app's own instrumentation,
+# run-id scoped and runtime-neutral. Captured first because the client-metric
+# scoping regex below is derived from them. The prefix is per-lab
+# (PERFLAB_APP_METRIC_PREFIX, default "perflab").
+capture_prometheus_query scenario_executions "${app_metric_prefix}_scenario_executions_total{${run_id_label}=\"${telemetry_run_id}\"}"
+capture_prometheus_query application_metrics "{__name__=~\"${app_metric_prefix}_.*\",${run_id_label}=\"${telemetry_run_id}\"}"
+capture_prometheus_query pool_metrics "{__name__=~\"${app_metric_prefix}_pool_.*\",${run_id_label}=\"${telemetry_run_id}\"}"
 
 service_instance_regex="$(jqd -r '[.data.result[]? | (.metric.service_instance_id // .metric.instance // empty)] | unique | join("|")' \
   < "${artifact_dir}/telemetry/metrics/application_metrics.json" 2>/dev/null || true)"

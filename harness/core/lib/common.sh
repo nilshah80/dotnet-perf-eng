@@ -100,6 +100,11 @@ run_id_attr="${PERFLAB_RUN_ID_ATTR:-perf.run.id}"
 # OTEL resource attribute perf.run.id becomes Prometheus label perf_run_id
 # (dots to underscores). Loki/Tempo keep the dotted attribute.
 run_id_label="${run_id_attr//./_}"
+# Application (business) metric prefix in Prometheus: the app's own OTel meter
+# emits metrics named "<prefix>_*", and capture-evidence scopes its app-metric,
+# scenario-executions, and pool-metric queries by it (and derives the
+# service-instance regex from the result). Default matches the reference lab.
+app_metric_prefix="${PERFLAB_APP_METRIC_PREFIX:-perflab}"
 
 prometheus_url="${PERFLAB_PROMETHEUS_URL:-http://127.0.0.1:9090}"
 tempo_url="${PERFLAB_TEMPO_URL:-http://127.0.0.1:3200}"

@@ -1,0 +1,114 @@
+name: ecommerce
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: ecommerce
+      POSTGRES_USER: ecommerce
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ecommerce}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - track_io_timing=on
+      - -c
+      - log_min_duration_statement=250
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ecommerce -d ecommerce"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    mem_limit: 768m
+
+  lgtm:
+    image: grafana/otel-lgtm:0.31.0
+    container_name: ecommerce-lgtm
+    environment:
+      TEMPO_EXTRA_ARGS: --query-frontend.mcp-server.enabled=true
+      PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=6h --storage.tsdb.retention.size=512MB
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3100:3100"
+      - "127.0.0.1:3200:3200"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:9090:9090"
+      - "127.0.0.1:4040:4040"
+    volumes:
+      - lgtm-data:/data
+    mem_limit: 4g
+
+  dotnet-monitor:
+    image: mcr.microsoft.com/dotnet/monitor:10.0
+    command:
+      - collect
+      - --no-auth
+    environment:
+      DOTNETMONITOR_DiagnosticPort__ConnectionMode: Listen
+      DOTNETMONITOR_DiagnosticPort__EndpointName: /diag/dotnet-monitor.sock
+      DOTNETMONITOR_Storage__DefaultSharedPath: /diag
+      DOTNETMONITOR_InProcessFeatures__Enabled: "true"
+      DOTNETMONITOR_Urls: http://+:52323
+      DOTNETMONITOR_Metrics__Endpoints: http://+:52325
+    ports:
+      - "127.0.0.1:18323:52323"
+      - "127.0.0.1:18325:52325"
+    volumes:
+      - diagnostic-ipc:/diag
+    mem_limit: 512m
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ../../source/dotnet/ecommerce
+      dockerfile: src/ECommerce.Api/Dockerfile
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__PostgreSql: Host=postgres;Port=5432;Database=ecommerce;Username=ecommerce;Password=${POSTGRES_PASSWORD:-ecommerce};Maximum Pool Size=20;Minimum Pool Size=0;Timeout=5;Command Timeout=5;GSS Encryption Mode=Disable;Application Name=ecommerce-api
+      Jwt__Key: ${JWT_KEY:-ecommerce-lab-local-dev-signing-key-do-not-use-in-production}
+      Jwt__Issuer: ecommerce-lab
+      Jwt__Audience: ecommerce-lab
+      Jwt__LifetimeMinutes: "30"
+      PERF_SCENARIO: ${PERF_SCENARIO:-E00}
+      PERF_RUN_ID: ${PERF_RUN_ID:-local-manual}
+      PERF_RUN_MODE: ${PERF_RUN_MODE:-measure}
+      SEED_SCALE: ${SEED_SCALE:-smoke}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_METRIC_EXPORT_INTERVAL: 5000
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${PERFLAB_TRACE_SAMPLE_RATIO:-0.25}
+      DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
+      DOTNET_gcServer: "1"
+      DOTNET_GCHeapHardLimitPercent: "50"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - diagnostic-ipc:/diag
+    depends_on:
+      postgres:
+        condition: service_healthy
+      lgtm:
+        condition: service_started
+      dotnet-monitor:
+        condition: service_started
+    cpus: 1.0
+    mem_limit: 768m
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  lgtm-data:
+  diagnostic-ipc:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
