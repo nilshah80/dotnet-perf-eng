@@ -39,7 +39,10 @@ capture_prometheus_range() {
 # (PERFLAB_APP_METRIC_PREFIX, default "perflab").
 capture_prometheus_query scenario_executions "${app_metric_prefix}_scenario_executions_total{${run_id_label}=\"${telemetry_run_id}\"}"
 capture_prometheus_query application_metrics "{__name__=~\"${app_metric_prefix}_.*\",${run_id_label}=\"${telemetry_run_id}\"}"
-capture_prometheus_query pool_metrics "{__name__=~\"${app_metric_prefix}_pool_.*\",${run_id_label}=\"${telemetry_run_id}\"}"
+# (No separate <prefix>_pool_* probe: neither lab exports app-level pool metrics,
+# so it only ever produced an empty result[] file. The application_metrics query
+# above already captures any <prefix>_pool_* series if a lab adds them, and the
+# real connection-pool telemetry is database_pool_metrics.json from metrics.sh.)
 
 service_instance_regex="$(jqd -r '[.data.result[]? | (.metric.service_instance_id // .metric.instance // empty)] | unique | join("|")' \
   < "${artifact_dir}/telemetry/metrics/application_metrics.json" 2>/dev/null || true)"

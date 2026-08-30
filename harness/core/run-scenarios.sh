@@ -131,16 +131,35 @@ set_status() {
 }
 
 build_suite_facts() {
-  local files=() i
+  local i meta files=()
+  # Build the scenario list from the suite's OWN arrays so the terminal status is
+  # authoritative. facts.json is CLAUDE.md's index, but it was previously
+  # assembled purely from the per-scenario facts.json files -- which are written
+  # at measurement time and never mention status. A scenario that failed LATER
+  # (e.g. a --with-runtime normalize failure, as in suite-20260829T113030Z) then
+  # appeared here with healthy observations and no failure marker, so the index
+  # read as a clean run. Carry status/error here, and list every selected
+  # scenario (observations:null when it never got far enough to emit facts).
+  meta='['
   for ((i = 0; i < scenario_count; i++)); do
+    [[ $i -gt 0 ]] && meta+=','
+    meta+=$(printf '{"scenarioId":"%s","telemetryRunId":"%s","loadGenerator":"%s","artifactPath":"scenarios/%s","status":"%s"' \
+      "$(json_escape "${s_id[i]}")" "$(json_escape "${s_telemetry[i]}")" "$(json_escape "${load_generator}")" \
+      "$(json_escape "${s_id[i]}")" "$(json_escape "${s_status[i]}")")
+    [[ -n "${s_error[i]}" ]] && meta+=$(printf ',"error":"%s"' "$(json_escape "${s_error[i]}")")
+    meta+='}'
     [[ -f "${suite_dir}/scenarios/${s_id[i]}/facts.json" ]] && files+=("${suite_dir}/scenarios/${s_id[i]}/facts.json")
   done
+  meta+=']'
   if [[ "${#files[@]}" -eq 0 ]]; then
-    printf '{"runId":"%s","kind":"scenario-suite","scenarioCount":0,"scenarios":[]}\n' "$(json_escape "${suite_run_id}")" > "${suite_facts}"
+    printf '%s' "${meta}" | jqd --arg runId "${suite_run_id}" \
+      '{runId:$runId,kind:"scenario-suite",scenarioCount:length,scenarios:.}' > "${suite_facts}"
     return
   fi
-  cat "${files[@]}" | jqd -s --arg runId "${suite_run_id}" \
-    '{runId:$runId,kind:"scenario-suite",scenarioCount:length,scenarios:map({scenarioId,telemetryRunId,loadGenerator,artifactPath:("scenarios/"+.scenarioId),observations})}' \
+  cat "${files[@]}" | jqd -s --arg runId "${suite_run_id}" --argjson meta "${meta}" \
+    '(reduce .[] as $f ({}; . + {($f.scenarioId): $f.observations})) as $obs
+     | {runId:$runId,kind:"scenario-suite",scenarioCount:($meta|length),
+        scenarios:($meta|map(. + {observations:($obs[.scenarioId] // null)}))}' \
     > "${suite_facts}"
 }
 

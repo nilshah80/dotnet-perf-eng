@@ -10,7 +10,7 @@ E04	product-list-large-page	GET	/api/products?page=1&pageSize=100		api	trace	48
 E05	product-search	GET	/api/products?page=1&pageSize=25&search=feature-3		api	trace	64
 E06	product-get	GET	/api/products/1234		api	trace	64
 E07	product-create	POST	/api/products	{"name":"Perf Product","description":"created under load","price":19.99,"stock":100,"categoryId":3}	api	stacks	32
-E08	product-update	PATCH	/api/products/1234	{"price":24.99,"stock":50}	api	stacks	32
+E08	product-update	PATCH	/api/products/1234	{"price":24.99,"stock":__PERF_SEQ__}	api	stacks	32
 E09	orders-list-shallow	GET	/api/orders?page=1&pageSize=25		api	stacks	64
 E10	orders-list-deep	GET	/api/orders?page=50&pageSize=25		api	stacks	48
 E11	order-get	GET	/api/orders/400		api	trace	64

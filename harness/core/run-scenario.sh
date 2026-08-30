@@ -75,6 +75,19 @@ sample_midload() {
   done
   compose exec -T "${primary_app_service}" sh -c 'cat /proc/net/tcp /proc/net/tcp6' \
     > "${artifact_dir}/dependencies/${primary_app_service}-net-tcp-midload.txt" 2>/dev/null || true
+  # Per-container CPU/memory at peak load, scoped to this compose project. This is
+  # the only host-side resource signal in the package: the runtime metrics show a
+  # single .NET process, so a scenario whose latency grows while its process sits
+  # below its own CPU quota can only be attributed to cross-container contention
+  # (e.g. the co-located observability stack) with these numbers. NDJSON, one
+  # container per line.
+  local cids
+  cids="$(compose ps -q 2>/dev/null | tr '\n' ' ')"
+  if [[ -n "${cids// /}" ]]; then
+    # shellcheck disable=SC2086
+    MSYS_NO_PATHCONV=1 docker stats --no-stream --format '{{json .}}' ${cids} \
+      > "${artifact_dir}/dependencies/container-stats-midload.ndjson" 2>/dev/null || true
+  fi
 }
 
 echo "Measuring for ${duration_seconds}s at ${connections} connections with ${load_generator}..."

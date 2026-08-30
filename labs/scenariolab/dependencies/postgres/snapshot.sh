@@ -1,19 +1,57 @@
 #!/usr/bin/env bash
 # scenariolab PROJECT probe -- postgres snapshot phase.
 #
-# Captures the query plan of the deep-page order query that scenario S08
-# measures. This lives in the LAB, not in the shared postgres adapter, because
-# the query text, the `orders` table, and the OFFSET are scenariolab schema
-# knowledge -- exactly the kind of project-specific evidence the shared adapter
-# must not hardcode. The shared adapter runs its three generic captures first,
-# then calls this via run_lab_dependency_hook.
+# Captures the deep-page order query plan for the order-history scenarios
+# (GET /api/customers/<id>/orders), derived from PERF_METHOD/PERF_PATH exported
+# by run-scenario.sh. Previously it EXPLAINed one fixed order query for EVERY
+# scenario, so catalog, runtime/threading, runtime/memory, cache, pool, and
+# order-publish scenarios -- none of which run this query -- were all given an
+# orders plan that misrepresented them. Now non-order scenarios get an explicit
+# skip marker instead of a misleading plan. Lives in the lab because the
+# `orders` table, its columns, and the OFFSET are scenariolab schema knowledge.
+#
+# Output: dependencies/postgres-query-plan.json -- either an EXPLAIN (ANALYZE,
+# BUFFERS, FORMAT JSON) array, or {"skipped":true,"reason":...}.
 set -euo pipefail
 # The shared adapter that invokes this hook exports PERFLAB_HARNESS_ROOT.
 # shellcheck disable=SC1091
 source "${PERFLAB_HARNESS_ROOT}/core/lib/common.sh"   # compose, pg_* config
 artifact_dir="${1:?snapshot hook needs <artifact-dir>}"
 mkdir -p "${artifact_dir}/dependencies"
+plan_file="${artifact_dir}/dependencies/postgres-query-plan.json"
 
-compose exec -T "${pg_service}" psql -U "${pg_user}" -d "${pg_db}" -t -A -c \
-  "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT id, created_at, total, status FROM orders WHERE customer_id=1 ORDER BY created_at DESC, id DESC OFFSET 2475 LIMIT 25" \
-  > "${artifact_dir}/dependencies/postgres-order-plan.json"
+method="${PERF_METHOD:-GET}"
+full_path="${PERF_PATH:-}"
+base_path="${full_path%%\?*}"
+query_string=""
+[[ "${full_path}" == *\?* ]] && query_string="${full_path#*\?}"
+
+qs_param() { local name="$1"; printf '%s' "${query_string}" | tr '&' '\n' | sed -n "s/^${name}=//p" | head -1; }
+clamp() {
+  local v="$1" lo="$2" hi="$3"
+  [[ "${v}" =~ ^[0-9]+$ ]] || { printf '%s' "${lo}"; return; }
+  v=$((10#${v}))
+  (( v < lo )) && v="${lo}"
+  (( v > hi )) && v="${hi}"
+  printf '%s' "${v}"
+}
+emit_skip() {
+  printf '{"skipped":true,"reason":"%s","scenarioId":"%s","method":"%s","path":"%s"}\n' \
+    "$(json_escape "$1")" "$(json_escape "${PERF_SCENARIO:-}")" "$(json_escape "${method}")" "$(json_escape "${full_path}")" \
+    > "${plan_file}"
+}
+
+# Only the order-history read scenarios (GET /api/customers/<id>/orders) run the
+# query this plan represents.
+if [[ "${method}" == "GET" && "${base_path}" == /api/customers/*/orders ]]; then
+  cust="${base_path#/api/customers/}"; cust="${cust%%/*}"
+  [[ "${cust}" =~ ^[0-9]+$ ]] || cust=1
+  page="$(clamp "$(qs_param page)" 1 100000)"
+  page_size="$(clamp "$(qs_param pageSize)" 1 1000)"
+  offset=$(( (page - 1) * page_size ))
+  compose exec -T "${pg_service}" psql -U "${pg_user}" -d "${pg_db}" -t -A -c \
+    "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT id, created_at, total, status FROM orders WHERE customer_id=${cust} ORDER BY created_at DESC, id DESC OFFSET ${offset} LIMIT ${page_size}" \
+    > "${plan_file}"
+else
+  emit_skip "no order-history query for path ${base_path}"
+fi

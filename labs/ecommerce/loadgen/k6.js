@@ -21,6 +21,14 @@ const loginPassword = __ENV.PERF_LOGIN_PASSWORD || 'Password123!';
 const nonSuccessResponses = new Counter('perflab_http_non_2xx_3xx');
 const transportErrors = new Counter('perflab_http_transport_errors');
 
+// Per-VU monotonic counter used to expand the literal token __PERF_SEQ__ in a
+// request body into a value that changes on every iteration. A scenario whose
+// body repeats identical values (e.g. a PATCH that always sets the same price
+// and stock) is silently no-op'd by EF Core change tracking after the first
+// request, so it measures a SELECT + empty SaveChanges instead of the write
+// path it claims to. Bodies that never contain the token are sent unchanged.
+let iterationSeq = 0;
+
 export const options = {
   discardResponseBodies: true,
   noConnectionReuse: false,
@@ -59,10 +67,22 @@ export default function (data) {
     params.headers['Content-Type'] = 'application/json';
   }
 
+  let requestBody = null;
+  if (sendsBody) {
+    requestBody = body;
+    if (requestBody.indexOf('__PERF_SEQ__') !== -1) {
+      iterationSeq += 1;
+      // VU-scoped so concurrent VUs never collide, monotonic so this VU's
+      // successive writes to the same row always differ (defeating the no-op).
+      const seq = __VU * 1000000 + iterationSeq;
+      requestBody = requestBody.split('__PERF_SEQ__').join(String(seq));
+    }
+  }
+
   const response = http.request(
     method,
     `${baseUrl}${path}`,
-    sendsBody ? body : null,
+    requestBody,
     params);
 
   if (response.status === 0) {
