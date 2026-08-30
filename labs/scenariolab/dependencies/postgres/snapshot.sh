@@ -20,6 +20,14 @@ artifact_dir="${1:?snapshot hook needs <artifact-dir>}"
 mkdir -p "${artifact_dir}/dependencies"
 plan_file="${artifact_dir}/dependencies/postgres-query-plan.json"
 
+# Deadlock + rollback counters -- the definitive evidence for the deadlock
+# scenario (S27), captured for every scenario (deadlocks=0 for the rest). These
+# are cumulative since the last stats reset, so on a fresh stack the count
+# reflects this run; read it as a delta if the stack has served earlier runs.
+compose exec -T "${pg_service}" psql -U "${pg_user}" -d "${pg_db}" -c \
+  "COPY (SELECT datname, numbackends, xact_commit, xact_rollback, deadlocks FROM pg_stat_database WHERE datname='${pg_db}') TO STDOUT WITH CSV HEADER" \
+  > "${artifact_dir}/dependencies/postgres-deadlocks.csv" 2>/dev/null || true
+
 method="${PERF_METHOD:-GET}"
 full_path="${PERF_PATH:-}"
 base_path="${full_path%%\?*}"
@@ -49,9 +57,20 @@ if [[ "${method}" == "GET" && "${base_path}" == /api/customers/*/orders ]]; then
   page="$(clamp "$(qs_param page)" 1 100000)"
   page_size="$(clamp "$(qs_param pageSize)" 1 1000)"
   offset=$(( (page - 1) * page_size ))
-  compose exec -T "${pg_service}" psql -U "${pg_user}" -d "${pg_db}" -t -A -c \
-    "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT id, created_at, total, status FROM orders WHERE customer_id=${cust} ORDER BY created_at DESC, id DESC OFFSET ${offset} LIMIT ${page_size}" \
-    > "${plan_file}"
+  sql="SELECT id, created_at, total, status FROM orders WHERE customer_id=${cust} ORDER BY created_at DESC, id DESC OFFSET ${offset} LIMIT ${page_size}"
+  # Wrap with the query + a caveat: this is only the PARENT order query. The
+  # order-history scenarios' headline cost (e.g. S07's N+1 item queries) lives in
+  # additional statements not visible in a single plan -- see pg_stat_statements.
+  explain_json="$(compose exec -T "${pg_service}" psql -U "${pg_user}" -d "${pg_db}" -t -A -c \
+    "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}" 2>/dev/null || true)"
+  if [[ "${explain_json}" == \[* ]]; then
+    printf '{"query":"%s","note":"%s","plan":%s}\n' \
+      "$(json_escape "${sql}")" \
+      "$(json_escape "Parent order query only; per-order child queries (N+1) and other statements are not visible in one plan -- consult postgres-statements.csv (pg_stat_statements).")" \
+      "${explain_json}" > "${plan_file}"
+  else
+    emit_skip "EXPLAIN returned no plan for this scenario"
+  fi
 else
   emit_skip "no order-history query for path ${base_path}"
 fi

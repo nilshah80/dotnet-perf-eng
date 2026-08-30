@@ -42,6 +42,6 @@ PERFLAB_METRIC_ROLES=(
   'gc_committed|range|dotnet_gc_last_collection_memory_committed_size_bytes{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
   'gc_collections|range|dotnet_gc_collections_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
   'gc_pause|range|rate(dotnet_gc_pause_time_seconds_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[1m])'
-  'database_pool_metrics|instant|{__name__=~"(db_client_connection_.*|db_client_operation_npgsql_.*|npgsql_.*)",service_instance_id=~"$SERVICE_INSTANCE"}'
-  'http_client_metrics|instant|{__name__=~"http_client_.*",service_instance_id=~"$SERVICE_INSTANCE"}'
+  'database_pool_metrics|range|{__name__=~"(db_client_connection_.*|db_client_operation_npgsql_.*|npgsql_.*)",service_instance_id=~"$SERVICE_INSTANCE"}'
+  'http_client_metrics|range|{__name__=~"http_client_.*",service_instance_id=~"$SERVICE_INSTANCE"}'
 )

@@ -79,6 +79,16 @@ case "${base_path}" in
     ;;
 esac
 
-compose exec -T "${pg_service}" psql -U "${pg_user}" -d "${pg_db}" -t -A -c \
-  "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}" \
-  > "${plan_file}"
+# Wrap the plan with the exact query and a caveat: this is ONE representative
+# query, so patterns spread across multiple statements (e.g. an N+1's child
+# queries) are not visible here -- pg_stat_statements is the record of what ran.
+explain_json="$(compose exec -T "${pg_service}" psql -U "${pg_user}" -d "${pg_db}" -t -A -c \
+  "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}" 2>/dev/null || true)"
+if [[ "${explain_json}" == \[* ]]; then
+  printf '{"query":"%s","note":"%s","plan":%s}\n' \
+    "$(json_escape "${sql}")" \
+    "$(json_escape "Single representative query for this scenario; consult postgres-statements.csv (pg_stat_statements) for the full statement mix -- N+1 child queries and secondary statements are not visible in one plan.")" \
+    "${explain_json}" > "${plan_file}"
+else
+  emit_skip "EXPLAIN returned no plan for this scenario"
+fi

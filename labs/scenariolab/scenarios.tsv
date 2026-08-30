@@ -28,3 +28,4 @@ S23	cache-lease-capacity	GET	/api/pools/redis		api	trace	64
 S24	cache-client-fanout	GET	/api/pools/redis		api	trace	128
 S25	upstream-connection-capacity	GET	/api/pools/http		api	trace	64
 S26	upstream-connection-fanout	GET	/api/pools/http		api	trace	128
+S27	inventory-deadlock	GET	/api/inventory/deadlock		api	stacks	16
