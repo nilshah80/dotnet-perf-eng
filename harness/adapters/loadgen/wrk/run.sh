@@ -49,10 +49,17 @@ case "${phase}" in
     p90="$(awk '$1 == "90%" {print $2}' "${f}" | tail -1)"
     p99="$(awk '$1 == "99%" {print $2}' "${f}" | tail -1)"
     non2xx="$(awk '/Non-2xx or 3xx responses:/ {print $5}' "${f}" | tail -1)"; non2xx="${non2xx:-0}"
+    # "N requests in Ts, ..." is wrk's total line; the "Socket errors:" line
+    # (connect/read/write/timeout) appears only when there ARE transport errors.
+    # Emit requests.total + transport_errors + error_rate so the suite health
+    # signal is load-generator-agnostic; without a total it could only guess.
+    total="$(awk '/requests in/ {print $1}' "${f}" | tail -1)"; total="${total:-0}"
+    transport="$(awk '/Socket errors:/ {print $4 + $6 + $8 + $10}' "${f}" | tail -1)"; transport="${transport:-0}"
+    errrate="$(awk -v e="$((non2xx + transport))" -v t="${total}" 'BEGIN { if (t + 0 > 0) printf "%.6f", e / (t + 0); else print 0 }')"
     # wrk latency percentiles are unit-suffixed strings (e.g. "1.23ms") -> tagged
-    # wrk-duration; rps/non2xx are numeric.
-    printf '[{"name":"http.requests_per_second","value":%s,"unit":"request/s","source":"benchmark/wrk.txt"},{"name":"http.latency.p50","value":"%s","unit":"wrk-duration","source":"benchmark/wrk.txt"},{"name":"http.latency.p90","value":"%s","unit":"wrk-duration","source":"benchmark/wrk.txt"},{"name":"http.latency.p99","value":"%s","unit":"wrk-duration","source":"benchmark/wrk.txt"},{"name":"http.responses.non_2xx_3xx","value":%s,"unit":"response","source":"benchmark/wrk.txt"}]\n' \
-      "${rps}" "$(json_escape "${p50:-unknown}")" "$(json_escape "${p90:-unknown}")" "$(json_escape "${p99:-unknown}")" "${non2xx}" \
+    # wrk-duration; the counts and rates are numeric.
+    printf '[{"name":"http.requests_per_second","value":%s,"unit":"request/s","source":"benchmark/wrk.txt"},{"name":"http.latency.p50","value":"%s","unit":"wrk-duration","source":"benchmark/wrk.txt"},{"name":"http.latency.p90","value":"%s","unit":"wrk-duration","source":"benchmark/wrk.txt"},{"name":"http.latency.p99","value":"%s","unit":"wrk-duration","source":"benchmark/wrk.txt"},{"name":"http.responses.non_2xx_3xx","value":%s,"unit":"response","source":"benchmark/wrk.txt"},{"name":"http.transport_errors","value":%s,"unit":"error","source":"benchmark/wrk.txt"},{"name":"http.requests.total","value":%s,"unit":"request","source":"benchmark/wrk.txt"},{"name":"http.error_rate","value":%s,"unit":"ratio","source":"benchmark/wrk.txt"}]\n' \
+      "${rps}" "$(json_escape "${p50:-unknown}")" "$(json_escape "${p90:-unknown}")" "$(json_escape "${p99:-unknown}")" "${non2xx}" "${transport}" "${total}" "${errrate}" \
       > "${artifact_dir}/benchmark/observations.json"
     ;;
   *)

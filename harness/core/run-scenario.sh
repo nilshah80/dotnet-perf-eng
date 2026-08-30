@@ -54,6 +54,8 @@ export PERF_METHOD="${method}" PERF_PATH="${path}" PERF_BODY="${body}" PERF_BASE
 export PERFLAB_CONNECTIONS="${connections}" PERFLAB_DURATION_SECONDS="${duration_seconds}"
 
 echo "Starting local stack for ${scenario_id} (${telemetry_run_id})..."
+# Free the shared host ports first: other labs bind the same 8080/5432/etc.
+stop_conflicting_lab_stacks
 # shellcheck disable=SC2086
 compose up -d --build ${app_services}
 wait_for_api

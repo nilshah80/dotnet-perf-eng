@@ -193,6 +193,22 @@ json_escape() {
 # Convenience wrapper so no caller hardcodes the compose file path.
 compose() { docker compose -f "${compose_file}" "$@"; }
 
+# Stop OTHER labs' compose stacks before bringing up the selected one. Every lab
+# in this repo publishes the same fixed host ports (the app's 8080, postgres
+# 5432, and the shared observability/diagnostics ports), so a lab left running
+# from a previous selection would block `compose up` for the selected lab with a
+# port-bind error -- following the documented PERFLAB_LAB workflow could not
+# switch labs without a manual teardown. Bringing the others down (keeping their
+# volumes) frees the ports; it is a fast no-op when they are already stopped.
+stop_conflicting_lab_stacks() {
+  local other
+  for other in "${repo_root}"/labs/*/compose.yaml; do
+    [[ -f "${other}" ]] || continue
+    [[ "${other}" -ef "${compose_file}" ]] && continue   # never the selected lab
+    docker compose -f "${other}" down --remove-orphans >/dev/null 2>&1 || true
+  done
+}
+
 # Adapter locators. Adapters re-source this file via PERFLAB_HARNESS_ROOT.
 export PERFLAB_HARNESS_ROOT="${harness_root}"
 dependency_dir() { printf '%s/adapters/dependency/%s' "${harness_root}" "$1"; }

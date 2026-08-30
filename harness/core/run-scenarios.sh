@@ -145,7 +145,9 @@ build_suite_facts() {
   # index (env-overridable). A scenario can be pipeline-"completed" yet have most
   # requests fail -- e.g. a saturated connection pool returning timeouts -- which
   # the raw status hides; health surfaces that without conflating it with a
-  # harness/pipeline failure.
+  # harness/pipeline failure. errRate is computed from non_2xx + transport_errors
+  # over requests.total; when a load generator does not emit requests.total the
+  # rate is unknowable, so health is "unknown" rather than a false "ok".
   local health_threshold="${PERFLAB_MAX_HTTP_ERROR_RATE:-0.05}"
   [[ "${health_threshold}" =~ ^[0-9]*\.?[0-9]+$ ]] || health_threshold="0.05"
   # Build the scenario list from the suite's OWN arrays so the terminal status is
@@ -178,13 +180,14 @@ build_suite_facts() {
          | ((($x|map(select(.name=="http.responses.non_2xx_3xx"))|.[0].value) // 0)
             + (($x|map(select(.name=="http.transport_errors"))|.[0].value) // 0)) as $err
          | (($x|map(select(.name=="http.requests.total"))|.[0].value) // 0) as $tot
-         | if $tot > 0 then ($err / $tot) else 0 end);
+         | if $tot > 0 then ($err / $tot) else null end);
        {runId:$runId,kind:"scenario-suite",scenarioCount:($meta|length),
         scenarios:($meta|map(
           ($obs[.scenarioId] // null) as $o
+          | errRate($o) as $er
           | . + {observations:$o,
-                 errorRate:(if $o == null then null else (errRate($o)*10000|round/10000) end),
-                 health:(if $o == null then "unknown" elif errRate($o) > $threshold then "degraded" else "ok" end)}))}' \
+                 errorRate:(if $er == null then null else ($er*10000|round/10000) end),
+                 health:(if $er == null then "unknown" elif $er > $threshold then "degraded" else "ok" end)}))}' \
     > "${suite_facts}"
 }
 
