@@ -6,13 +6,15 @@
 set -euo pipefail
 HARNESS_ROOT="${PERFLAB_HARNESS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 # shellcheck disable=SC1091
-source "${HARNESS_ROOT}/core/lib/common.sh"   # jqd
-adapter_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${HARNESS_ROOT}/core/lib/common.sh"   # jqd, loadgen_script
 
 artifact_dir="${1:?run.sh <artifact-dir> <phase>}"
 phase="${2:?phase required (warmup|measure|diagnostic)}"
 mkdir -p "${artifact_dir}/benchmark"
-js="${adapter_dir}/scenario.js"
+# The workload script is the lab's own k6.js if it ships one, else the shared
+# default.js. run.sh (this file, the measurement + evidence contract) is always
+# shared and identical across labs.
+js="$(loadgen_script)"
 
 case "${phase}" in
   warmup)
@@ -42,8 +44,8 @@ case "${phase}" in
     fi
     # k6 trend stats are floating-point ms (numeric, comparable between k6 runs,
     # NOT comparable to a wrk-duration string). Counters that never fire are
-    # omitted, hence "// 0". non_2xx_3xx / transport_errors come from the lab's
-    # own counters in scenario.js.
+    # omitted, hence "// 0". non_2xx_3xx / transport_errors come from the
+    # workload script's own counters (default.js or the lab's k6.js).
     jqd '(.metrics // {}) as $m | [
         {name:"http.requests_per_second",value:($m.http_reqs.rate // 0),unit:"request/s",source:"benchmark/k6-summary.json"},
         {name:"http.latency.p50",value:($m.http_req_duration["p(50)"]),unit:"ms",source:"benchmark/k6-summary.json"},
@@ -51,7 +53,8 @@ case "${phase}" in
         {name:"http.latency.p99",value:($m.http_req_duration["p(99)"]),unit:"ms",source:"benchmark/k6-summary.json"},
         {name:"http.responses.non_2xx_3xx",value:($m.perflab_http_non_2xx_3xx.count // 0),unit:"response",source:"benchmark/k6-summary.json"},
         {name:"http.transport_errors",value:($m.perflab_http_transport_errors.count // 0),unit:"error",source:"benchmark/k6-summary.json"},
-        {name:"http.requests.total",value:($m.http_reqs.count // 0),unit:"request",source:"benchmark/k6-summary.json"}
+        {name:"http.requests.total",value:($m.http_reqs.count // 0),unit:"request",source:"benchmark/k6-summary.json"},
+        {name:"http.error_rate",value:((($m.perflab_http_non_2xx_3xx.count // 0) + ($m.perflab_http_transport_errors.count // 0)) / (if ($m.http_reqs.count // 0) > 0 then $m.http_reqs.count else 1 end)),unit:"ratio",source:"benchmark/k6-summary.json"}
       ]' < "${sfile}" > "${artifact_dir}/benchmark/observations.json"
     ;;
   *)

@@ -22,7 +22,7 @@ public sealed partial record LabRunContext(
         if (!ScenarioPattern().IsMatch(scenarioId))
         {
             throw new InvalidOperationException(
-                $"PERF_SCENARIO must be S00 through S26; received '{scenarioId}'.");
+                $"PERF_SCENARIO must be S00 through S27; received '{scenarioId}'.");
         }
 
         if (!RunIdPattern().IsMatch(runId))
@@ -40,7 +40,7 @@ public sealed partial record LabRunContext(
         return new LabRunContext(scenarioId.ToUpperInvariant(), runId, runMode);
     }
 
-    [GeneratedRegex("^S(?:0[0-9]|1[0-9]|2[0-6])$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^S(?:0[0-9]|1[0-9]|2[0-7])$", RegexOptions.CultureInvariant)]
     private static partial Regex ScenarioPattern();
 
     [GeneratedRegex("^[A-Za-z0-9._-]{1,80}$", RegexOptions.CultureInvariant)]

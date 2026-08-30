@@ -7,8 +7,7 @@
 set -euo pipefail
 HARNESS_ROOT="${PERFLAB_HARNESS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 # shellcheck disable=SC1091
-source "${HARNESS_ROOT}/core/lib/common.sh"   # json_escape, compose_network, internal_base_url, wrk_image
-adapter_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${HARNESS_ROOT}/core/lib/common.sh"   # json_escape, compose_network, internal_base_url, wrk_image, loadgen_script
 
 artifact_dir="${1:?run.sh <artifact-dir> <phase>}"
 phase="${2:?phase required (warmup|measure|diagnostic)}"
@@ -16,16 +15,20 @@ mkdir -p "${artifact_dir}/benchmark"
 
 [[ -n "${wrk_image}" ]] || { echo "PERFLAB_WRK_IMAGE is not set; wrk runs via Docker." >&2; exit 1; }
 
-# wrk in a container on the compose network. scenario.lua is mounted at /lab and
-# the workload comes from PERF_* passed by name (so MSYS does not rewrite the
-# values). MSYS_NO_PATHCONV keeps the -v source (a Windows path) and /lab intact.
+# The workload script is the lab's own wrk.lua if it ships one, else the shared
+# default.lua. Its directory (not this adapter's) is mounted at /lab, and the
+# workload values come from PERF_* passed by name so MSYS does not rewrite them.
+# MSYS_NO_PATHCONV keeps the -v source (a Windows path) and /lab intact.
+script="$(loadgen_script)"
+script_dir="$(cd "$(dirname "${script}")" && pwd)"
+script_base="$(basename "${script}")"
 wrk_run() {
   MSYS_NO_PATHCONV=1 docker run --rm --network "${compose_network}" \
-    -e PERF_METHOD -e PERF_PATH -e PERF_BODY -e PERF_RUN_ID \
-    -v "${adapter_dir}:/lab:ro" \
+    -e PERF_METHOD -e PERF_PATH -e PERF_BODY -e PERF_RUN_ID -e PERF_HEADERS \
+    -v "${script_dir}:/lab:ro" \
     "${wrk_image}" "$@"
 }
-lua="/lab/scenario.lua"
+lua="/lab/${script_base}"
 url="${internal_base_url}"
 
 case "${phase}" in

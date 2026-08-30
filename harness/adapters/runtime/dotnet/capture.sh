@@ -90,8 +90,14 @@ case "${kind}" in
     ;;
 esac
 
-# Finalize capture.json (append top-level fields to our own JSON, no jq).
+# Finalize capture.json: replace the transient "running" status with a terminal
+# "captured" and append completedAt (append-only edit, no jq). The initial write
+# emits ...,"status":"running"[,"fallbackReason":...]; strip that status token
+# first so the finalized object carries exactly one status key (a duplicate key
+# is ambiguous JSON -- last-wins parsers say captured, strict/first-wins say
+# running, which would falsely read as "capture never completed").
 content="$(cat "${capture_json}")"; content="${content%\}}"
+running_status=',"status":"running"'; content="${content/${running_status}/}"
 printf '%s,"completedAt":"%s","status":"captured"}\n' \
   "${content}" "$(json_escape "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" > "${capture_json}"
 echo "Captured ${kind} for ${target}."

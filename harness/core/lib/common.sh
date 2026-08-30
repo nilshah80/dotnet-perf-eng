@@ -31,7 +31,7 @@ repo_root="$(cd "${harness_root}/.." && pwd)"
 # via jqd and the harness emits its own JSON with printf.)
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*)
-    export MSYS2_ENV_CONV_EXCL='PERF_BASE_URL;PERF_METHOD;PERF_PATH;PERF_BODY;PERF_RUN_ID;PERF_SCENARIO;PERF_RUN_MODE'
+    export MSYS2_ENV_CONV_EXCL='PERF_BASE_URL;PERF_METHOD;PERF_PATH;PERF_BODY;PERF_RUN_ID;PERF_SCENARIO;PERF_RUN_MODE;PERF_HEADERS'
     ;;
 esac
 
@@ -100,6 +100,11 @@ run_id_attr="${PERFLAB_RUN_ID_ATTR:-perf.run.id}"
 # OTEL resource attribute perf.run.id becomes Prometheus label perf_run_id
 # (dots to underscores). Loki/Tempo keep the dotted attribute.
 run_id_label="${run_id_attr//./_}"
+# Application (business) metric prefix in Prometheus: the app's own OTel meter
+# emits metrics named "<prefix>_*", and capture-evidence scopes its app-metric,
+# scenario-executions, and pool-metric queries by it (and derives the
+# service-instance regex from the result). Default matches the reference lab.
+app_metric_prefix="${PERFLAB_APP_METRIC_PREFIX:-perflab}"
 
 prometheus_url="${PERFLAB_PROMETHEUS_URL:-http://127.0.0.1:9090}"
 tempo_url="${PERFLAB_TEMPO_URL:-http://127.0.0.1:3200}"
@@ -110,6 +115,32 @@ dependencies="${PERFLAB_DEPENDENCIES:-}"
 artifacts_root="$(resolve_repo_path "${PERFLAB_ARTIFACTS_ROOT:-artifacts}")"
 scenario_catalog="$(resolve_repo_path "${PERFLAB_SCENARIOS:?PERFLAB_SCENARIOS not set}")"
 runtime_adapter_dir="${harness_root}/adapters/runtime/${runtime}"
+
+# ---------------------------------------------------------------------------
+# Dependency connection config -- the "parameterize" seam. Defaults match this
+# lab's compose services; a lab overrides any of these in lab.config.sh so the
+# SHARED dependency adapters run their GENERIC captures against a different
+# db/user/service/port without being edited. Project-specific EVIDENCE (an
+# EXPLAIN of a named query, a probe of a named table) goes through the per-lab
+# dependency hook mechanism below instead, never through these variables.
+# ---------------------------------------------------------------------------
+pg_service="${PERFLAB_PG_SERVICE:-postgres}"
+pg_user="${PERFLAB_PG_USER:-perflab}"
+pg_db="${PERFLAB_PG_DB:-perflab}"
+redis_service="${PERFLAB_REDIS_SERVICE:-redis}"
+rabbit_service="${PERFLAB_RABBIT_SERVICE:-rabbitmq}"
+rabbit_user="${PERFLAB_RABBIT_USER:-perflab}"
+rabbit_mgmt_url="${PERFLAB_RABBIT_MGMT_URL:-http://127.0.0.1:15672}"
+rabbit_metrics_url="${PERFLAB_RABBIT_METRICS_URL:-http://127.0.0.1:15692/metrics}"
+# Space-separated queue names the rabbitmq reset should purge (project-specific).
+rabbit_queues="${PERFLAB_RABBIT_QUEUES:-}"
+
+# The current lab's own directory (holds lab.config.sh, compose, infra, and the
+# per-lab loadgen/ and dependencies/ override folders).
+lab_dir="$(cd "$(dirname "${lab_config}")" && pwd)"
+# Project-specific dependency probes are discovered here by convention:
+#   <lab>/dependencies/<dep>/<phase>.sh   (phase = reset|sample-midload|snapshot)
+lab_dep_hooks_dir="${PERFLAB_DEP_HOOKS_DIR:-${lab_dir}/dependencies}"
 
 # wrk stays the default load generator. k6 is opt-in, and the two are not
 # numerically comparable, so the generator is recorded in the manifest and must
@@ -166,10 +197,42 @@ compose() { docker compose -f "${compose_file}" "$@"; }
 export PERFLAB_HARNESS_ROOT="${harness_root}"
 dependency_dir() { printf '%s/adapters/dependency/%s' "${harness_root}" "$1"; }
 loadgen_dir() { printf '%s/adapters/loadgen/%s' "${harness_root}" "${load_generator}"; }
+
+# Per-lab workload script for the active generator, falling back to the shared
+# default. Resolution order: explicit PERFLAB_{K6,WRK}_SCRIPT from the descriptor
+# > <lab>/loadgen/<gen>.<ext> > the shared default.<ext>. This is the seam that
+# lets a project own its workload (auth in k6 setup(), datasets, chaining)
+# WITHOUT forking the shared run.sh or the observations/evidence contract.
+loadgen_script() {
+  local ext override lab_script
+  case "${load_generator}" in
+    k6)  ext="js";  override="${PERFLAB_K6_SCRIPT:-}" ;;
+    wrk) ext="lua"; override="${PERFLAB_WRK_SCRIPT:-}" ;;
+    *)   echo "loadgen_script: unknown generator '${load_generator}'." >&2; return 1 ;;
+  esac
+  if [[ -n "${override}" ]]; then resolve_repo_path "${override}"; return 0; fi
+  lab_script="${lab_dir}/loadgen/${load_generator}.${ext}"
+  if [[ -f "${lab_script}" ]]; then printf '%s' "${lab_script}"; return 0; fi
+  printf '%s/default.%s' "$(loadgen_dir)" "${ext}"
+}
+
 # The load adapter has a single entry point run.sh <artifact-dir> <phase>,
 # phase = warmup | measure | diagnostic.
 loadgen_warmup() { "$(loadgen_dir)/run.sh" "$1" warmup; }
 loadgen_measure() { "$(loadgen_dir)/run.sh" "$1" "$2"; }
+
+# Run a lab's project-specific dependency probe for <dep> <phase>, if the lab
+# provides one under <lab>/dependencies/<dep>/<phase>.sh. Additive: the shared
+# adapter has ALREADY done the generic capture before calling this. Best-effort
+# but LOUD on failure, so a broken probe is never mistaken for "nothing to
+# capture" (cf. the log/trace warnings in capture-evidence.sh).
+run_lab_dependency_hook() {
+  local dep="$1" phase="$2" artifact_dir="$3"
+  local hook="${lab_dep_hooks_dir}/${dep}/${phase}.sh"
+  [[ -f "${hook}" ]] || return 0
+  bash "${hook}" "${artifact_dir}" \
+    || echo "WARNING: lab dependency hook ${dep}/${phase} failed; its evidence is MISSING, not empty." >&2
+}
 
 # diag_target <app-service> -> process identity from PERFLAB_DIAG_TARGETS.
 diag_target() {

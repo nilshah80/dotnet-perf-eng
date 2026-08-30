@@ -30,16 +30,19 @@ repo root
 │   ├── core/              # orchestration, capture, normalize, lib/common.sh
 │   ├── adapters/
 │   │   ├── runtime/<rt>/     # metrics.sh, capture.sh, normalize.sh, versions.sh, evidence-extra.sh
-│   │   ├── dependency/<dep>/ # reset.sh, sample-midload.sh, snapshot.sh
-│   │   └── loadgen/<gen>/    # run.sh (+ the native script: scenario.lua / scenario.js)
+│   │   ├── dependency/<dep>/ # reset/sample-midload/snapshot.sh (generic; connection config from the descriptor)
+│   │   └── loadgen/<gen>/    # run.sh (shared measurement+evidence contract) + default.{lua,js} (fallback workload)
 │   └── ai/                # diagnosis.schema.json, *-prompt.md, scripts/
 ├── labs/<project>/        # the experiment: lab.config.sh + scenarios.tsv + compose + infra
+│                          #   + loadgen/<gen>.{js,lua} (own workload) + dependencies/<dep>/<phase>.sh (own probes)
 └── source/<runtime>/<project>/   # the application under test (pristine)
 ```
 
 Selecting `PERFLAB_RUNTIME=dotnet` loads `harness/adapters/runtime/dotnet/`.
 Selecting `PERFLAB_DEPENDENCIES="postgres redis"` runs those dependency adapters.
-Selecting `PERFLAB_LOAD_GENERATOR=k6` runs `harness/adapters/loadgen/k6/run.sh`.
+Selecting `PERFLAB_LOAD_GENERATOR=k6` runs `harness/adapters/loadgen/k6/run.sh`,
+which executes the lab's own `loadgen/k6.js` if present, else the shared
+`default.js`.
 
 ## The descriptor (`labs/<project>/lab.config.sh`)
 
@@ -62,7 +65,10 @@ A sourced bash file — no jq needed to read it. Key fields:
 | Contract | Owner | Shape |
 |---|---|---|
 | **Correlation** | core + app | every signal carries `service.name` + run-id resource attr |
-| **Workload** | core → loadgen | `PERF_METHOD/PATH/BODY/BASE_URL/RUN_ID` env |
+| **Workload** | core → loadgen | `PERF_METHOD/PATH/BODY/BASE_URL/RUN_ID` (+ optional `PERF_HEADERS`) env |
+| **Per-lab workload** | lab → loadgen | `<lab>/loadgen/<gen>.{js,lua}` overrides the shared `default`; same counters + `observations.json` contract |
+| **Dependency connection** | descriptor → dependency adapter | `PERFLAB_PG_*`, `PERFLAB_REDIS_*`, `PERFLAB_RABBIT_*` parameterize the generic captures |
+| **Dependency probe (project)** | lab → dependency adapter | `<lab>/dependencies/<dep>/<phase>.sh`, discovered by convention, run after the generic capture |
 | **Metric-role** | runtime adapter | `metrics.sh` exports `PERFLAB_METRIC_ROLES=("file|range\|instant|promql")` with `$JOB/$RUN_ID/$SERVICE_INSTANCE` placeholders |
 | **Diagnostic-kind** | runtime adapter | `capture.sh <dir> <kind> <dur> <target>` produces raw; `normalize.sh <dir>` → Speedscope/text |
 | **Dependency-lifecycle** | dependency adapter | `reset.sh` / `sample-midload.sh` / `snapshot.sh` (each takes `<dir>`) |
@@ -109,10 +115,15 @@ artifacts/runs/<run-id>/
   `source/<rt>/<project>/`. No script edits, no harness change. (A different framework — Spring vs Quarkus, Express vs Fastify — is *not*
   a new adapter; OTel auto-instrumentation + the descriptor cover it.)
 - **A new dependency (e.g. kafka, mongo):** add
-  `harness/adapters/dependency/<dep>/{reset,sample-midload,snapshot}.sh` and list
-  it in `PERFLAB_DEPENDENCIES`.
+  `harness/adapters/dependency/<dep>/{reset,sample-midload,snapshot}.sh` (generic;
+  read connection config from the descriptor, never hardcode names/creds) and list
+  it in `PERFLAB_DEPENDENCIES`. Project-specific probes (a named-query `EXPLAIN`, a
+  named-table check) go in `labs/<project>/dependencies/<dep>/<phase>.sh`, run
+  additively after the generic capture and discovered by convention.
 - **A new load generator (e.g. gatling, vegeta):** add
-  `harness/adapters/loadgen/<gen>/run.sh` emitting the canonical observations.
+  `harness/adapters/loadgen/<gen>/run.sh` (the shared measurement + observations
+  contract) plus a shared `default.<ext>`. A project's own workload — auth,
+  chaining, datasets — lives at `labs/<project>/loadgen/<gen>.<ext>`.
 - **A new runtime:** add `harness/adapters/runtime/<rt>/` implementing the
   metric-role + diagnostic-kind contracts, and a thin instrumentation shim in the
   app that sets the standard resource attributes.

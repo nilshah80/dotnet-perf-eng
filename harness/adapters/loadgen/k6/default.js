@@ -1,15 +1,22 @@
 import http from 'k6/http';
 import { Counter } from 'k6/metrics';
 
-// This script is the k6 counterpart of scripts/wrk/scenario.lua and reads the
-// same environment contract so both load generators drive an identical
-// workload. wrk remains the default generator; k6 is opt-in through
-// PERFLAB_LOAD_GENERATOR=k6.
+// Shared DEFAULT k6 workload: one stateless request per iteration, driven
+// entirely by the PERF_* env contract. It is the k6 counterpart of the shared
+// wrk default.lua so both generators drive an identical workload, and it is the
+// fallback a lab gets when it ships no <lab>/loadgen/k6.js of its own. A project
+// that needs auth, request chaining, or per-request datasets provides its own
+// per-lab k6.js (with a setup() login, a SharedArray dataset, etc.) instead of
+// editing this file -- see harness/core/lib/common.sh:loadgen_script.
 const baseUrl = __ENV.PERF_BASE_URL || 'http://127.0.0.1:8080';
 const method = (__ENV.PERF_METHOD || 'GET').toUpperCase();
 const path = __ENV.PERF_PATH || '/';
 const body = __ENV.PERF_BODY || '';
 const runId = __ENV.PERF_RUN_ID || 'k6-manual';
+// Optional generic extra headers as a JSON object, e.g. a pre-minted bearer
+// token: PERF_HEADERS='{"Authorization":"Bearer ..."}'. Inert when unset, so
+// this default stays byte-for-byte behavior-identical for unauthenticated labs.
+const extraHeaders = __ENV.PERF_HEADERS || '';
 
 // wrk reported "Non-2xx or 3xx responses" and "Socket errors" as two separate
 // figures. k6 folds both into the built-in http_req_failed rate, which would
@@ -40,15 +47,25 @@ const params = {
   },
 };
 
-if (method === 'POST') {
+if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
   params.headers['Content-Type'] = 'application/json';
 }
+
+if (extraHeaders) {
+  try {
+    Object.assign(params.headers, JSON.parse(extraHeaders));
+  } catch (e) {
+    throw new Error(`PERF_HEADERS must be a JSON object of header name/value pairs: ${e}`);
+  }
+}
+
+const sendsBody = method === 'POST' || method === 'PUT' || method === 'PATCH';
 
 export default function () {
   const response = http.request(
     method,
     `${baseUrl}${path}`,
-    method === 'POST' ? body : null,
+    sendsBody ? body : null,
     params);
 
   if (response.status === 0) {

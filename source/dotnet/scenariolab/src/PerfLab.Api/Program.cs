@@ -238,6 +238,51 @@ app.MapPost("/api/orders", async (
     Results.Accepted(
         value: await publisher.PublishAsync(request, cancellationToken)));
 
+// S27 inventory-deadlock: force a real PostgreSQL circular-wait deadlock. Two
+// concurrent transactions lock the SAME two inventory rows in OPPOSITE order
+// (1->2 and 2->1), with a gap between the two locks so both are holding one row
+// and reaching for the other. The server's deadlock detector then aborts one
+// side with SQLSTATE 40P01. This is the case S10 does NOT cover: S10's requests
+// all lock a single row, which serializes into a convoy but never forms a cycle;
+// alternating the lock order per request is what creates the circular wait. The
+// 40P01 abort is surfaced as a 409 so it is a countable outcome in the HTTP
+// metrics and pg_stat_database.deadlocks, not an opaque 500. Kept at 16
+// connections (< the 20 pool) so the evidence is the deadlock, not pool
+// exhaustion; deadlock_timeout (~1s) fires before the 5s command timeout.
+var deadlockToggle = 0;
+app.MapGet("/api/inventory/deadlock", async (
+    IDbContextFactory<LabDbContext> contextFactory,
+    CancellationToken cancellationToken) =>
+{
+    var forward = System.Threading.Interlocked.Increment(ref deadlockToggle) % 2 == 0;
+    var (first, second) = forward ? (1, 2) : (2, 1);
+
+    await using var db = await contextFactory.CreateDbContextAsync(cancellationToken);
+    await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+    try
+    {
+        await db.Inventory
+            .FromSqlInterpolated($"SELECT * FROM inventory WHERE product_id = {first} FOR UPDATE")
+            .AsNoTracking().ToListAsync(cancellationToken);
+        await Task.Delay(50, cancellationToken);
+        await db.Inventory
+            .FromSqlInterpolated($"SELECT * FROM inventory WHERE product_id = {second} FOR UPDATE")
+            .AsNoTracking().ToListAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return Results.Ok(new { lockedOrder = new[] { first, second }, outcome = "committed" });
+    }
+    catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.DeadlockDetected)
+    {
+        await transaction.RollbackAsync(CancellationToken.None);
+        return Results.Conflict(new
+        {
+            lockedOrder = new[] { first, second },
+            outcome = "deadlock_detected",
+            sqlState = ex.SqlState,
+        });
+    }
+});
+
 await using (var seedScope = app.Services.CreateAsyncScope())
 {
     var seeder = seedScope.ServiceProvider.GetRequiredService<DatabaseSeeder>();
