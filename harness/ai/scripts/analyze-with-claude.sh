@@ -3,6 +3,10 @@
 # analysis/diagnosis.json. Claude's JSON output is parsed with dockerized jq.
 set -euo pipefail
 HARNESS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# The AI phase operates on an existing evidence package: it needs the harness
+# helpers (relative_to_repo, jqd), not a specific lab. Load common.sh in
+# helpers-only mode so it never demands a lab selection when the repo has >1.
+export PERFLAB_LAB_OPTIONAL=1
 # shellcheck disable=SC1091
 source "${HARNESS_ROOT}/core/lib/common.sh"
 require_command claude

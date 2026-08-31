@@ -1,16 +1,60 @@
 # Reusable performance-engineering lab
 
-A local, language-neutral performance-evidence harness built as a thin
+A local, language-neutral **performance-evidence harness** built as a thin
 ports-and-adapters toolkit. A stable core drives measurement, evidence capture,
 normalization, and a read-only AI diagnosis; everything project- or
 language-specific plugs in through a bash descriptor and small adapter scripts.
 
-The reference project is a .NET service with deliberately planted performance
-defects (scenarios `S00`–`S27`). Onboarding another project or runtime means
-**adding files, not editing the core**.
+The reference project is a .NET 10 service (plus an order worker) with
+**deliberately planted performance defects** — a synthetic commerce API measured
+against PostgreSQL, Redis, and RabbitMQ, exporting OpenTelemetry
+logs/metrics/traces to Grafana OTEL-LGTM and runtime diagnostics through a
+`dotnet-monitor` sidecar. Nothing runs in the cloud; every port is loopback-only.
+
+Onboarding another project or runtime means **adding files, not editing the
+core**.
 
 > Architecture, contracts, and the per-runtime adapter matrix live in
 > [`BLUEPRINT.md`](BLUEPRINT.md).
+
+## Architecture
+
+The load generator drives the app; telemetry, dependency state, and runtime
+diagnostics all fold into one immutable evidence package on the host, which is
+the only thing the AI phase reads.
+
+```mermaid
+flowchart TD
+    LG["Load generator<br/>k6 (default) or wrk<br/>+ scenario runner"] --> API["ASP.NET Core API<br/>.NET 10"]
+    API --> PG[("PostgreSQL")]
+    API -. scenariolab .-> REDIS[("Redis")]
+    API -. scenariolab .-> RABBIT[("RabbitMQ")]
+    RABBIT --> WORKER["Order worker<br/>.NET 10 · scenariolab"]
+
+    API -- OTLP --> LGTM["Grafana OTEL-LGTM<br/>Prometheus · Loki · Tempo · Pyroscope"]
+    WORKER -- OTLP --> LGTM
+    API -- diagnostic socket --> MON["dotnet-monitor"]
+    WORKER -- diagnostic socket --> MON
+    MON --> RT["nettrace / gcdump / stacks / dump"]
+
+    LG --> EV["Evidence package<br/>artifacts/runs/&lt;run-id&gt;"]
+    LGTM --> EV
+    PG --> EV
+    REDIS --> EV
+    RABBIT --> EV
+    RT --> NORM["normalize<br/>Speedscope / text reports"]
+    NORM --> EV
+
+    EV --> CLAUDE["Claude Code<br/>read-only structured diagnosis"]
+    CLAUDE --> GATE{{"Human review gate"}}
+    GATE --> FIX["Interactive fix<br/>claude-fix.sh — the only editor"]
+    FIX --> VAL["Re-measure:<br/>same workload + mechanism gate"]
+```
+
+`scenariolab` uses the full dependency set (postgres + redis + rabbitmq + worker);
+`ecommerce` is a single API over postgres only. The two labs publish the **same**
+loopback ports, so only one runs at a time — the harness stops the other lab's
+stack automatically on bring-up.
 
 ## Repository layout
 
@@ -21,7 +65,7 @@ harness/                          # reusable toolkit (never edited per project)
 │   ├── pe-tests/                # perf-engineering runners: run-sweep/mix/repeat/data-scale/fault
 │   ├── capture/                 # capture-evidence + capture/normalize-runtime (the evidence pipeline)
 │   ├── analyze/                 # analyze-trends (leak/trend), compare-runs (A/B regression)
-│   └── lib/common.sh            # shared library (descriptor + adapters + JSON/loadgen helpers)
+│   └── lib/                     # common.sh (shared helpers) + lab-context.sh (lab-specific init)
 ├── adapters/
 │   ├── runtime/dotnet/           # metrics.sh, capture.sh, normalize.sh, versions.sh, evidence-extra.sh, diagnostics/Dockerfile
 │   ├── dependency/{postgres,redis,rabbitmq}/  # reset/sample-midload/snapshot.sh (generic; config-parameterized)
@@ -53,6 +97,29 @@ auto-discovers the sole lab; with several, select one via `PERFLAB_LAB=<name>`.
 With more than one lab present, **every command needs a lab selected**, e.g.
 `PERFLAB_LAB=ecommerce ./harness/core/run/run-multiple.sh E02,E03 20`.
 
+## Components and local ports
+
+All ports bind to loopback (`127.0.0.1`) and all datasets are synthetic. Both
+labs use the **same** host ports; `ecommerce` simply omits Redis and RabbitMQ.
+
+| Component | Purpose | Host address | Lab |
+|---|---|---|---|
+| API | Workload endpoints | `http://127.0.0.1:8080` | both |
+| Grafana | Dashboards, Explore, trace/log correlation | `http://127.0.0.1:3000` (`admin` / `admin`) | both |
+| Prometheus | Metrics query API | `http://127.0.0.1:9090` | both |
+| Loki | Log query API | `http://127.0.0.1:3100` | both |
+| Tempo | Trace query API | `http://127.0.0.1:3200` | both |
+| Pyroscope | Profiles backend — reachable but empty (see note) | `http://127.0.0.1:4040` | both |
+| OTLP ingest | Collector gRPC / HTTP | `127.0.0.1:4317` / `4318` | both |
+| dotnet-monitor | Diagnostic API (trace/gcdump/stacks/dump) | `http://127.0.0.1:18323` | both |
+| PostgreSQL | Lab database (`perflab` / `perflab`) | `127.0.0.1:5432` | both |
+| Redis | Lab cache (`allkeys-lru`) | `127.0.0.1:6379` | scenariolab |
+| RabbitMQ | Broker + management (`perflab` / `perflab`) | `127.0.0.1:5672`, mgmt `:15672`, metrics `:15692` | scenariolab |
+
+CPU profiling in this lab comes from the `dotnet-monitor` sidecar (captured and
+converted to Speedscope), **not** Pyroscope: no application sends Pyroscope
+profiles, so treat that port as available-but-empty.
+
 ## Prerequisites
 
 - **Docker + Docker Compose** (runs the whole stack; also hosts `jq` — no host jq needed).
@@ -75,8 +142,11 @@ are shell environment variables.
 ./harness/core/run/run-single.sh S01 30
 ```
 
-Brings up the stack, warms up, measures `S01` for 30s with k6, and writes an
-evidence package under `artifacts/runs/<run-id>/`. Then, optionally:
+Brings up the stack, warms up for 10s, measures `S01` for 30s with k6, captures
+runtime diagnostics, and writes an evidence package under
+`artifacts/runs/<run-id>/`. Open Grafana at `http://127.0.0.1:3000` and pick the
+provisioned dashboard for live dashboards, Tempo traces, and Loki logs. Then,
+optionally, hand a package to the AI phase:
 
 ```bash
 ./harness/ai/scripts/analyze-with-claude.sh artifacts/runs/<run-id>/scenarios/S01
@@ -152,6 +222,17 @@ or per-request datasets ships its own `loadgen/<gen>.js` instead of editing the
 shared default. The defaults also accept an optional `PERF_HEADERS` env var (a JSON
 object of extra headers, e.g. a pre-minted bearer token).
 
+**The 10-second warm-up is a known bound.** `run-scenario.sh` warms up for 10s,
+which is not enough for a light endpoint to reach steady state (tiered JIT
+promotion, PostgreSQL plan caching, and pool fill are still in progress), so
+absolute throughput for *fast* endpoints — the control above all — is understated
+and an `S00`-vs-`Sxx` ratio understates the injected defect. It is
+generator-independent, so it does not affect wrk↔k6 comparability, and it is
+invisible on server-bound scenarios that never approach the warm-up ceiling.
+Lengthening it would break comparability with all prior evidence, so it is left
+alone; when an absolute ceiling is the question, use `run-repeat.sh` and read the
+converged repetitions.
+
 ## Load profiles
 
 By default a scenario runs a **steady** closed-loop load (constant VUs =
@@ -184,7 +265,7 @@ form of `capacity` — both under **Performance-engineering tests** below. All s
 derive from the scenario's own `connections`/duration; the knobs above override
 the defaults.
 The profile is recorded in `manifest.json` and the exact k6 executor in
-`benchmark/k6-profile.json`. `--with-runtime` always captures under a **steady**
+`benchmark/k6-profile.json`. Runtime capture always runs under a **steady**
 load regardless of profile, so a trace reflects a stable state rather than a ramp.
 
 ## Performance-engineering tests
@@ -336,6 +417,41 @@ Seeded at `smoke` scale (20k products / 200 users / 20k orders).
 
 ## Evidence package
 
+Each run is a self-contained package — the single input to the AI phase. A suite
+(`run-single/multiple/all`) nests one full package per scenario under
+`scenarios/<ID>/`:
+
+```
+artifacts/runs/<run-id>/                 # a suite run
+├── manifest.json                        # suite status + scenario index (profile, loadGenerator, git rev)
+├── facts.json                           # aggregate index across scenarios
+└── scenarios/<ID>/                       # one self-contained scenario package:
+    ├── manifest.json                    # scenario, workload, loadGenerator, profile, telemetryRunId
+    ├── facts.json                       # this scenario's observations (an index, not conclusions)
+    ├── benchmark/
+    │   ├── observations.json            # normalized SLIs: req/s, latency p50/p90/p99, error/dropped
+    │   ├── k6-summary.json  k6.txt       # measure phase (or wrk.txt)
+    │   ├── k6-warmup.json  k6-warmup.txt
+    │   └── diagnostic-k6-*.{json,txt}    # the separate diagnose-mode load
+    ├── telemetry/
+    │   ├── metrics/                      # Prometheus range (gauges) + instant (counters)
+    │   ├── traces/                       # Tempo search + the slowest traces
+    │   └── logs/                         # Loki range query
+    ├── dependencies/                     # live snapshots (files present depend on the lab):
+    │   ├── postgres-{statements,activity,connections,deadlocks,query-plan}.*   # + *-midload
+    │   ├── redis-{info,latency,clients}.*                    # scenariolab only
+    │   ├── rabbitmq-{queues,channels,connections,broker-metrics}.*   # scenariolab only
+    │   └── container-stats-midload.ndjson  api-net-tcp*.txt  docker-compose-ps.json
+    ├── runtime/                          # dotnet-monitor capture (on by default)
+    │   ├── capture.json                  # requested vs effective diagnostic
+    │   ├── processes.json  processes-diagnostic.json
+    │   └── api/ | worker/                # cpu.nettrace, before/after.gcdump, stacks.json, process.dmp
+    ├── source/                           # tool-versions, git-status, git-diff-stat
+    └── analysis/
+        ├── trend-report.json            # leak/trend: least-squares slope + growth, GROWING flags
+        └── runtime/                     # normalized: cpu.speedscope.json, *-gcdump/dump-report.txt
+```
+
 `facts.json` is an **index** — observations with units and raw-source paths, not
 conclusions. The suite index carries, per scenario, both a pipeline `status`
 (did the run complete) and a workload `health`/`errorRate` (`degraded` when the
@@ -344,7 +460,7 @@ that ran green while most requests failed — a saturated pool, say — no longe
 reads as clean. HTTP metrics still cannot see async loss: for broker-backed
 scenarios cross-check `dependencies/rabbitmq-queues.json`. Binary runtime dumps
 stay local; the AI normally reads normalized summaries. See
-[`BLUEPRINT.md`](BLUEPRINT.md) for the full layout.
+[`BLUEPRINT.md`](BLUEPRINT.md) for the full contract.
 
 ## AI diagnosis
 
@@ -392,6 +508,54 @@ existing:
 It opens an interactive edit session, implements the minimal change from the
 approved diagnosis, and builds via the descriptor's build command. Intentionally
 not an unattended auto-fix.
+
+## Validation protocol
+
+For a defensible before/after comparison, hold everything constant except the
+proposed fix:
+
+1. Same source revision except the fix; same lab, scenario, endpoint, request
+   body, connection count, duration, and Docker resources.
+2. Same `SEED_SCALE` — and reseed (`down -v` + bring-up) when a write scenario or
+   a data-scale test has mutated the dataset.
+3. Same **load generator** — wrk and k6 numbers are not comparable, so hold
+   `PERFLAB_LOAD_GENERATOR` constant across the pair.
+4. Reset Redis, RabbitMQ queues, and `pg_stat_statements` before each measurement
+   (the harness does this at the start of every scenario).
+5. Warm up, then take **repeated** measurements rather than one: `run-repeat.sh`
+   reports median / stddev / CV, and `compare-runs.sh` flags a candidate only when
+   the delta is significant.
+6. Keep diagnostic captures **separate** from the reported numbers (`--no-runtime`
+   for the measurement; read the diagnostic run only for the mechanism).
+7. Check response correctness and error count **before** comparing speed.
+8. Require a **mechanism-specific gate**: the hotspot disappears, the thread-pool
+   queue stays bounded, live heap plateaus, DB spans collapse, the plan uses the
+   intended access path, pool timeouts vanish, cache refreshes coalesce, the
+   RabbitMQ backlog drains, or the deadlock/409s stop.
+
+Docker Desktop measurements are comparative numbers for this machine, not
+production capacity claims.
+
+## Safety limits
+
+- API: 1 CPU, 768 MiB. Worker: 0.75 CPU, 512 MiB.
+- Normal PostgreSQL pool: 20 connections, 5-second connect/command timeout.
+- Pool experiments (deliberately unsafe extremes, not a fixed pair): Npgsql 2
+  (`S21`) vs 64 (`S22`); Redis pseudo-pool 1 (`S23`) vs 32 (`S24`); HTTP 2
+  (`S25`) vs 128 (`S26`) — each below the local server/socket limits.
+- Redis: `allkeys-lru` eviction. RabbitMQ work queue is length-capped
+  (`x-max-length`), so `S17` overflow dead-letters rather than growing unbounded.
+- Poison-message requeue: local cap of 50 before dead-lettering (`S18`).
+- Only one injected behavior is active per process start; a suite runs scenarios
+  sequentially in fresh containers, never several defects at once.
+- All datasets are synthetic and every published port is loopback-only.
+
+Stop a lab's stack while preserving volumes, or reset everything:
+
+```bash
+docker compose -f labs/scenariolab/compose.yaml down       # stop; keep data
+docker compose -f labs/scenariolab/compose.yaml down -v    # full reset (deletes db/cache/broker/telemetry volumes)
+```
 
 ## Operational cautions
 
