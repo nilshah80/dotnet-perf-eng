@@ -48,3 +48,25 @@ k6_write_profile_config() {
   printf '{"scenarios":{"measure":%s},"summaryTrendStats":["avg","min","med","max","p(50)","p(90)","p(99)"],"discardResponseBodies":true}\n' \
     "${sc}" > "${out}"
 }
+
+# k6_profile_effective_duration <profile> <connections> <duration> -> the seconds
+# the MEASURE phase actually runs, which is NOT always the requested duration:
+# soak stretches to >=600s and spike adds fixed 5s surge/recover segments. The
+# caller uses this single value for the manifest, the mid-load snapshot delay,
+# and the fault window so metadata and scheduling cannot diverge. Kept in lockstep
+# with the stage math above (soak line and spike stages).
+k6_profile_effective_duration() {
+  local profile="$1" c="$2" d="$3"
+  local q=$(( d / 4 > 0 ? d / 4 : 1 ))
+  local half=$(( d / 2 > 0 ? d / 2 : 1 ))
+  # Return the exact sum of the stage lengths above -- with integer division a
+  # 30s ramp is 4x7=28s and a 30s spike is 15+3x7=36s, so the effective duration
+  # differs from the requested one and the caller records THIS as durationSeconds.
+  case "${profile}" in
+    ramp)   printf '%s' "$(( q + q + q + q ))" ;;            # four q stages
+    stress) printf '%s' "$(( half + half ))" ;;             # two half stages
+    spike)  printf '%s' "$(( 5 + q + 5 + q + 5 + q ))" ;;    # three 5s edges + three q holds
+    soak)   printf '%s' "${PERFLAB_SOAK_DURATION_SECONDS:-$(( d > 600 ? d : 600 ))}" ;;
+    *)      printf '%s' "${d}" ;;                            # steady, capacity, arrival == d
+  esac
+}

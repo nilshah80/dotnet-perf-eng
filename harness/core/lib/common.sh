@@ -81,8 +81,12 @@ fi
 
 resolve_repo_path() {
   local p="$1"
+  # Absolute if POSIX (/...) or a forward-slash Windows drive path (C:/...), the
+  # form Git Bash uses. A backslash drive path (C:\...) is not matched -- MSYS
+  # glob backslash-escaping makes it unreliable -- so pass absolute overrides
+  # (PERFLAB_ARTIFACTS_ROOT, compose, scenario, script paths) with forward slashes.
   case "$p" in
-    /* | [A-Za-z]:[/\]*) printf '%s' "$p" ;;
+    /* | [A-Za-z]:/*) printf '%s' "$p" ;;
     *) printf '%s/%s' "${repo_root}" "$p" ;;
   esac
 }
@@ -186,6 +190,21 @@ loadgen_script() {
 loadgen_warmup() { "$(loadgen_dir)/run.sh" "$1" warmup; }
 loadgen_measure() { "$(loadgen_dir)/run.sh" "$1" "$2"; }
 
+# loadgen_effective_duration <connections> <requested-duration> -> the seconds the
+# measure phase will ACTUALLY run. Most profiles == the requested duration, but a
+# k6 soak stretches to >=600s and a spike adds fixed surge/recover segments, so
+# the manifest, the mid-load snapshot delay, and the fault window must use this,
+# not the raw CLI value. The k6 adapter owns the stage math (profiles.sh).
+loadgen_effective_duration() {
+  if [[ "${load_generator}" == "k6" && "${load_profile}" != "steady" ]]; then
+    # shellcheck disable=SC1090
+    source "$(loadgen_dir)/profiles.sh"
+    k6_profile_effective_duration "${load_profile}" "$1" "$2"
+  else
+    printf '%s' "$2"
+  fi
+}
+
 # Run a lab's project-specific dependency probe for <dep> <phase>, if the lab
 # provides one under <lab>/dependencies/<dep>/<phase>.sh. Additive: the shared
 # adapter has ALREADY done the generic capture before calling this. Best-effort
@@ -195,8 +214,12 @@ run_lab_dependency_hook() {
   local dep="$1" phase="$2" artifact_dir="$3"
   local hook="${lab_dep_hooks_dir}/${dep}/${phase}.sh"
   [[ -f "${hook}" ]] || return 0
-  bash "${hook}" "${artifact_dir}" \
-    || echo "WARNING: lab dependency hook ${dep}/${phase} failed; its evidence is MISSING, not empty." >&2
+  # Propagate the hook's failure (return non-zero) so the caller can mark the
+  # package partial (snapshot) or abort (reset) -- a failed hook must not be
+  # silently converted to success.
+  bash "${hook}" "${artifact_dir}" && return 0
+  echo "WARNING: lab dependency hook ${dep}/${phase} failed; its evidence is MISSING, not empty." >&2
+  return 1
 }
 
 # diag_target <app-service> -> process identity from PERFLAB_DIAG_TARGETS.

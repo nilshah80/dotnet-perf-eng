@@ -15,7 +15,16 @@ manifest="${artifact_dir}/manifest.json"
 # Read the manifest fields we need in one jqd call (standalone-safe).
 IFS=$'\t' read -r run_id telemetry_run_id scenario_id load_gen start_epoch < <(
   jqd -r '[.runId,(.telemetryRunId//.runId),.scenarioId,(.workload.loadGenerator//"wrk"),(.startedEpoch//0)] | @tsv' < "${manifest}")
-end_epoch="$(date -u +%s)"
+# Prefer the measurement window (exported by run-scenario) so telemetry, traces,
+# logs, and the trend analysis cover the measured load only -- not Compose
+# startup, the warm-up, or the post-load cooldown. Fall back to the manifest
+# start and "now" for a standalone/legacy invocation.
+start_epoch="${PERFLAB_MEASURE_START_EPOCH:-${start_epoch}}"
+end_epoch="${PERFLAB_MEASURE_END_EPOCH:-$(date -u +%s)}"
+# Track whether a required backend capture failed, so the manifest can finalize
+# "partial" instead of "captured" and an incomplete package is not read as clean.
+# run-scenario may pre-set it (a failed reset-stats or a fault that did not apply).
+capture_incomplete="${PERFLAB_CAPTURE_INCOMPLETE:-0}"
 
 mkdir -p "${artifact_dir}/telemetry/metrics" "${artifact_dir}/telemetry/traces/details" \
          "${artifact_dir}/telemetry/logs" "${artifact_dir}/dependencies" \
@@ -25,12 +34,14 @@ mkdir -p "${artifact_dir}/telemetry/metrics" "${artifact_dir}/telemetry/traces/d
 # instant query after load stops reports an idle process and hides the peak.
 capture_prometheus_query() {
   curl -fsS --max-time 20 --get --data-urlencode "query=$2" \
-    "${prometheus_url}/api/v1/query" > "${artifact_dir}/telemetry/metrics/$1.json" || true
+    "${prometheus_url}/api/v1/query" > "${artifact_dir}/telemetry/metrics/$1.json" \
+    || { echo "WARNING: Prometheus instant query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; }
 }
 capture_prometheus_range() {
   curl -fsS --max-time 30 --get --data-urlencode "query=$2" \
     --data-urlencode "start=${start_epoch}" --data-urlencode "end=${end_epoch}" --data-urlencode "step=5" \
-    "${prometheus_url}/api/v1/query_range" > "${artifact_dir}/telemetry/metrics/$1.json" || true
+    "${prometheus_url}/api/v1/query_range" > "${artifact_dir}/telemetry/metrics/$1.json" \
+    || { echo "WARNING: Prometheus range query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; }
 }
 
 # Application (<app_metric_prefix>_*) metrics: the app's own instrumentation,
@@ -122,7 +133,8 @@ grep -q '"values":\[\[' "${log_file}" 2>/dev/null || \
 
 # Dependency snapshots (per adapter) + the app's own socket table + compose ps.
 for dep in ${dependencies}; do
-  "$(dependency_dir "${dep}")/snapshot.sh" "${artifact_dir}" || true
+  "$(dependency_dir "${dep}")/snapshot.sh" "${artifact_dir}" \
+    || { echo "WARNING: ${dep} snapshot failed; its evidence is MISSING." >&2; capture_incomplete=1; }
 done
 compose exec -T "${primary_app_service}" sh -c 'cat /proc/net/tcp /proc/net/tcp6' \
   > "${artifact_dir}/dependencies/${primary_app_service}-net-tcp.txt" 2>/dev/null || true
@@ -157,8 +169,21 @@ printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","loadGenerator":"%
   "$(json_escape "${load_gen}")" "$(cat "${obs_file}")" \
   > "${artifact_dir}/facts.json"
 
-# Finalize the manifest (append top-level fields to our own JSON, no jq).
+# Finalize the manifest (append top-level fields to our own JSON, no jq). Status
+# is "partial" when a required backend capture failed, so an incomplete package
+# is not mistaken for a clean one. measurementStartedEpoch/EndedEpoch record the
+# exact window the telemetry above was queried over.
 content="$(cat "${manifest}")"; content="${content%\}}"
-printf '%s,"measurementEndedEpoch":%s,"completedAt":"%s","completedEpoch":%s,"status":"captured"}\n' \
-  "${content}" "${end_epoch}" "$(json_escape "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" "$(date -u +%s)" \
+capture_status="captured"; [[ "${capture_incomplete}" -eq 1 ]] && capture_status="partial"
+# Record whether the fault took effect AND whether the dependency recovered in the
+# window (run-scenario sets these for a fault run), so a resilience package whose
+# injection or recovery failed is self-describing.
+fault_applied_field=""
+[[ -n "${PERFLAB_FAULT_APPLIED:-}" ]]  && fault_applied_field="${fault_applied_field},\"faultApplied\":${PERFLAB_FAULT_APPLIED}"
+[[ -n "${PERFLAB_FAULT_RESTORED:-}" ]] && fault_applied_field="${fault_applied_field},\"faultRestored\":${PERFLAB_FAULT_RESTORED}"
+printf '%s,"measurementStartedEpoch":%s,"measurementEndedEpoch":%s,"completedAt":"%s","completedEpoch":%s,"status":"%s"%s}\n' \
+  "${content}" "${start_epoch}" "${end_epoch}" "$(json_escape "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" "$(date -u +%s)" "${capture_status}" "${fault_applied_field}" \
   > "${manifest}"
+if [[ "${capture_incomplete}" -eq 1 ]]; then
+  echo "NOTE: package finalized status:\"partial\" -- a required capture failed (see WARNINGs above)." >&2
+fi

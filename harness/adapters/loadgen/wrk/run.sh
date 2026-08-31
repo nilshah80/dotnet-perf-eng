@@ -53,8 +53,14 @@ case "${phase}" in
     # (connect/read/write/timeout) appears only when there ARE transport errors.
     # Emit requests.total + transport_errors + error_rate so the suite health
     # signal is load-generator-agnostic; without a total it could only guess.
-    total="$(awk '/requests in/ {print $1}' "${f}" | tail -1)"; total="${total:-0}"
+    completed="$(awk '/requests in/ {print $1}' "${f}" | tail -1)"; completed="${completed:-0}"
     transport="$(awk '/Socket errors:/ {print $4 + $6 + $8 + $10}' "${f}" | tail -1)"; transport="${transport:-0}"
+    # Total ATTEMPTS = completed responses + transport failures (connect/read/
+    # write/timeout). Counting only completed responses made a run with zero
+    # responses but many connection errors report requests.total=0 -> the suite
+    # health read "unknown" instead of "degraded"; including transport makes a
+    # total transport failure compute error_rate 1.0.
+    total="$(awk -v c="${completed}" -v tr="${transport}" 'BEGIN { print c + tr }')"
     errrate="$(awk -v e="$((non2xx + transport))" -v t="${total}" 'BEGIN { if (t + 0 > 0) printf "%.6f", e / (t + 0); else print 0 }')"
     # wrk latency percentiles are unit-suffixed strings (e.g. "1.23ms") -> tagged
     # wrk-duration; the counts and rates are numeric.

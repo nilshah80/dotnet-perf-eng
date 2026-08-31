@@ -56,6 +56,12 @@ flowchart TD
 loopback ports, so only one runs at a time — the harness stops the other lab's
 stack automatically on bring-up.
 
+**Single-operator by design:** because the labs share one set of host ports and a
+single Compose project per lab, running **two harness invocations at once is
+unsupported** — a second run recreates the app containers under a different
+scenario mid-measurement and corrupts both. Run one scenario/suite/sweep at a
+time (the pe-test runners already drive their scenarios sequentially).
+
 ## Repository layout
 
 ```
@@ -139,7 +145,7 @@ are shell environment variables.
 ## Quick start
 
 ```bash
-./harness/core/run/run-single.sh S01 30
+PERFLAB_LAB=scenariolab ./harness/core/run/run-single.sh S01 30
 ```
 
 Brings up the stack, warms up for 10s, measures `S01` for 30s with k6, captures
@@ -248,7 +254,7 @@ run-time choice layered on any scenario:
 | `stress` | closed | VUs ramp past `connections` → `PERFLAB_MAX_VUS` (4×) | the breaking point / saturation |
 | `spike` | closed | baseline → sudden `PERFLAB_SPIKE_VUS` (4×) → recover | surge tolerance and recovery |
 | `soak` | closed | constant VUs for `PERFLAB_SOAK_DURATION_SECONDS` (≥10 min) | leaks, GC/socket drift over time |
-| `capacity` | open | arrival rate ramps to `PERFLAB_TARGET_RPS` | the throughput knee (max sustainable RPS) |
+| `capacity` | open | arrival rate ramps `PERFLAB_START_RPS` (1) → `PERFLAB_TARGET_RPS` | the throughput knee (max sustainable RPS) |
 | `arrival` | open | constant `PERFLAB_TARGET_RPS` | latency at a fixed throughput (coordinated-omission-safe) |
 
 ```bash
@@ -276,8 +282,8 @@ compose with the load profiles above (`--profile`). k6 only.
 
 | Runner | Question it answers | Output |
 |---|---|---|
-| `run-sweep.sh <scen> [s/level] --rates R1,R2,…` | Capacity: the throughput↔latency knee / max sustainable RPS | per-level curve + `sweep.json` (`kneeRps`) |
-| `run-repeat.sh <scen> [dur] --repeats N` | Trustworthy numbers: median / stddev / CV across N runs | `stats.json` |
+| `run-sweep.sh <scen> [s/level] --rates R1,R2,…` | Capacity: the throughput↔latency knee / max sustainable RPS | per-level curve + `sweep.json` (`kneeRps` = first saturated, `maxSustainedRps` = highest sustained) |
+| `run-repeat.sh <scen> [dur] --repeats N [--reseed]` | Run-to-run spread across N runs: median / stddev / CV (needs ≥2 reps; `stddev`/`cv` are `null` below that). Reps share the DB by default — pass `--reseed` for **write** scenarios so each rep starts from a fresh seed | `stats.json` |
 | `compare-runs.sh <baseline> <candidate>` | Regression: is the candidate **significantly** worse than the baseline? | per-metric deltas, significance-aware flags (exit 1 on regression) |
 | `run-mix.sh <mix-name> [dur]` | Realistic blended traffic (e.g. 70% list / 20% search / 10% checkout) | one package; mixes live in `labs/<lab>/loadgen/mixes/*.json` |
 | `run-data-scale.sh <scen> --scales smoke,demo` | How perf degrades with data volume (reseeds the DB per scale) | `data-scale.json` |
@@ -296,7 +302,7 @@ PERFLAB_LAB=ecommerce  ./harness/core/analyze/compare-runs.sh <baseline-dir> <ca
 PERFLAB_LAB=ecommerce  ./harness/core/pe-tests/run-mix.sh browse-and-buy 60 --connections 64 --profile stress
 PERFLAB_LAB=ecommerce  ./harness/core/pe-tests/run-data-scale.sh E05 30 --scales smoke,demo
 PERFLAB_LAB=scenariolab ./harness/core/pe-tests/run-fault.sh S00 30 --dependency postgres --kind pause --at 10 --for 10
-PERFLAB_LAB=ecommerce  ./harness/core/run/run-single.sh E14 600 --no-runtime --  # soak: PERFLAB_PROFILE=soak
+PERFLAB_LAB=ecommerce  PERFLAB_PROFILE=soak ./harness/core/run/run-single.sh E14 600 --no-runtime  # soak (runs >=600s)
 ```
 
 ## Runtime diagnostics

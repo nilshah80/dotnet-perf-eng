@@ -35,6 +35,19 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "${kind}" == "pause" || "${kind}" == "stop" ]] || { echo "--kind must be 'pause' or 'stop'." >&2; exit 1; }
 [[ "${at}" =~ ^[0-9]+$ && "${for_s}" =~ ^[1-9][0-9]*$ ]] || { echo "--at/--for must be whole seconds." >&2; exit 1; }
+# The fault must land inside the measured window, else it fires during the
+# post-load cooldown/capture (or never) and measures nothing. Validate against the
+# EFFECTIVE run length: a profile can stretch (soak) or shrink (ramp) the measure
+# phase, so use the profile just parsed from --profile, not the requested duration.
+fault_profile="${PERFLAB_PROFILE:-steady}"
+effective_duration="${duration}"
+if [[ "${load_generator}" == "k6" && "${fault_profile}" != "steady" ]]; then
+  # shellcheck disable=SC1090
+  source "$(loadgen_dir)/profiles.sh"
+  effective_duration="$(k6_profile_effective_duration "${fault_profile}" "$(scenario_value "${scenario_id}" connections)" "${duration}")"
+fi
+[[ $(( at + for_s )) -le effective_duration ]] || {
+  echo "--at (${at}s) + --for (${for_s}s) = $(( at + for_s ))s exceeds the ${effective_duration}s run (profile ${fault_profile}); the fault window must fit inside it." >&2; exit 1; }
 # The dependency must be a compose service this lab actually runs.
 case " ${dependencies} ${app_services} " in
   *" ${dep} "*) : ;;

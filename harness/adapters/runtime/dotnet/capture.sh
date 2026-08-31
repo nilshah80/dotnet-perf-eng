@@ -57,32 +57,55 @@ fi
 run_load() { loadgen_measure "${artifact_dir}" diagnostic; }
 out="${artifact_dir}/runtime/${target}"
 
+# The capture runs a background load while curl pulls the artifact. If curl fails,
+# `set -e` aborts before the `wait`, so a cleanup trap kills the background load on
+# ANY exit (else it keeps hammering the app after the run). And every binary is
+# staged through a .tmp so a failed fetch cannot leave a partial artifact that
+# looks like a real capture.
+load_pid=""
+cleanup_load() {
+  if [[ -n "${load_pid}" ]]; then
+    kill "${load_pid}" 2>/dev/null || true
+    wait "${load_pid}" 2>/dev/null || true
+  fi
+}
+trap cleanup_load EXIT INT TERM
+
+pull() {  # pull <dest-file> <curl-arg>...
+  local dest="$1"; shift
+  if curl -fsS "$@" > "${dest}.tmp"; then
+    mv "${dest}.tmp" "${dest}"
+  else
+    rm -f "${dest}.tmp"
+    echo "Diagnostic fetch failed for ${target} (${dest##*/}); the capture is incomplete." >&2
+    exit 1   # the EXIT trap stops the background load; capture.json stays "running"
+  fi
+}
+
 case "${kind}" in
   trace)
     run_load & load_pid=$!
-    curl -fsS --get \
-      --data-urlencode "uid=${runtime_uid}" \
-      --data-urlencode "durationSeconds=${duration_seconds}" \
-      --data-urlencode "profile=cpu" \
-      "${diagnostics_url}/trace" > "${out}/cpu.nettrace"
-    wait "${load_pid}"
+    pull "${out}/cpu.nettrace" --get --data-urlencode "uid=${runtime_uid}" \
+      --data-urlencode "durationSeconds=${duration_seconds}" --data-urlencode "profile=cpu" \
+      "${diagnostics_url}/trace"
+    wait "${load_pid}"; load_pid=""
     ;;
   gcdump)
-    curl -fsS --get --data-urlencode "uid=${runtime_uid}" "${diagnostics_url}/gcdump" > "${out}/before.gcdump"
+    pull "${out}/before.gcdump" --get --data-urlencode "uid=${runtime_uid}" "${diagnostics_url}/gcdump"
     run_load
-    curl -fsS --get --data-urlencode "uid=${runtime_uid}" "${diagnostics_url}/gcdump" > "${out}/after.gcdump"
+    pull "${out}/after.gcdump" --get --data-urlencode "uid=${runtime_uid}" "${diagnostics_url}/gcdump"
     ;;
   stacks)
     run_load & load_pid=$!
     sleep 5
-    curl -fsS --get --data-urlencode "uid=${runtime_uid}" "${diagnostics_url}/stacks" > "${out}/stacks.json"
-    wait "${load_pid}"
+    pull "${out}/stacks.json" --get --data-urlencode "uid=${runtime_uid}" "${diagnostics_url}/stacks"
+    wait "${load_pid}"; load_pid=""
     ;;
   dump)
     run_load & load_pid=$!
     sleep 5
-    curl -fsS --get --data-urlencode "uid=${runtime_uid}" --data-urlencode "type=Heap" "${diagnostics_url}/dump" > "${out}/process.dmp"
-    wait "${load_pid}"
+    pull "${out}/process.dmp" --get --data-urlencode "uid=${runtime_uid}" --data-urlencode "type=Heap" "${diagnostics_url}/dump"
+    wait "${load_pid}"; load_pid=""
     ;;
   *)
     echo "Unknown diagnostic '${kind}'. Use trace, gcdump, stacks, or dump." >&2

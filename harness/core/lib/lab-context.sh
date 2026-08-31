@@ -66,9 +66,10 @@ lab_dir="$(cd "$(dirname "${lab_config}")" && pwd)"
 #   <lab>/dependencies/<dep>/<phase>.sh   (phase = reset|sample-midload|snapshot)
 lab_dep_hooks_dir="${PERFLAB_DEP_HOOKS_DIR:-${lab_dir}/dependencies}"
 
-# wrk stays the default load generator. k6 is opt-in, and the two are not
-# numerically comparable, so the generator is recorded in the manifest and must
-# be held constant across a before/after comparison.
+# Load generator: PERFLAB_LOAD_GENERATOR (per-run) > the lab's
+# PERFLAB_LOAD_GENERATOR_DEFAULT (both labs set k6) > the built-in wrk fallback.
+# k6 and wrk are not numerically comparable, so the generator is recorded in the
+# manifest and must be held constant across a before/after comparison.
 load_generator="${PERFLAB_LOAD_GENERATOR:-${PERFLAB_LOAD_GENERATOR_DEFAULT:-wrk}}"
 if [[ "${load_generator}" != "wrk" && "${load_generator}" != "k6" ]]; then
   echo "PERFLAB_LOAD_GENERATOR must be 'wrk' or 'k6'; received '${load_generator}'." >&2
