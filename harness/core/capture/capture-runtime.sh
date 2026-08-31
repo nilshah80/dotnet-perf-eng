@@ -4,7 +4,7 @@
 # specific capture is delegated to the runtime adapter's capture.sh.
 set -euo pipefail
 # shellcheck disable=SC1091
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 
 artifact_dir="${1:?Usage: capture-runtime.sh <artifact-directory> [trace|gcdump|stacks|dump] [duration-seconds]}"
 manifest="${artifact_dir}/manifest.json"
@@ -47,4 +47,4 @@ if [[ ! -f "${capture}" ]]; then
 fi
 "${capture}" "${artifact_dir}" "${requested_kind}" "${duration_seconds}" "${target}"
 
-echo "Normalize it with: ${harness_core_dir}/normalize-runtime.sh ${artifact_dir}"
+echo "Normalize it with: ${harness_core_dir}/capture/normalize-runtime.sh ${artifact_dir}"

@@ -4,7 +4,7 @@
 # jq); only the final cross-scenario facts aggregation uses dockerized jq (jqd).
 set -euo pipefail
 # shellcheck disable=SC1091
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 
 require_loadgen
 
@@ -113,9 +113,9 @@ write_suite_manifest() {
     [[ "${s_status[i]}" == "failed" ]] && failed=$((failed + 1))
   done
   {
-    printf '{"runId":"%s","kind":"scenario-suite","selector":"%s","status":"%s","startedAt":"%s","startedEpoch":%s,"durationSeconds":%s,"loadGenerator":"%s","withRuntimeDiagnostics":%s,"scenarioCount":%s,"completedCount":%s,"failedCount":%s,"source":{"gitRevision":"%s"}' \
+    printf '{"runId":"%s","kind":"scenario-suite","selector":"%s","status":"%s","startedAt":"%s","startedEpoch":%s,"durationSeconds":%s,"loadGenerator":"%s","profile":"%s","withRuntimeDiagnostics":%s,"scenarioCount":%s,"completedCount":%s,"failedCount":%s,"source":{"gitRevision":"%s"}' \
       "$(json_escape "${suite_run_id}")" "$(json_escape "${selector}")" "$(json_escape "${suite_status}")" \
-      "$(json_escape "${started_at}")" "${started_epoch}" "${duration_seconds}" "$(json_escape "${load_generator}")" \
+      "$(json_escape "${started_at}")" "${started_epoch}" "${duration_seconds}" "$(json_escape "${load_generator}")" "$(json_escape "${load_profile}")" \
       "${with_runtime}" "${scenario_count}" "${completed}" "${failed}" "$(json_escape "${git_revision}")"
     [[ -n "${completed_at}" ]] && printf ',"completedAt":"%s","completedEpoch":%s' "$(json_escape "${completed_at}")" "${completed_epoch}"
     printf ',"scenarios":['
@@ -145,7 +145,9 @@ build_suite_facts() {
   # index (env-overridable). A scenario can be pipeline-"completed" yet have most
   # requests fail -- e.g. a saturated connection pool returning timeouts -- which
   # the raw status hides; health surfaces that without conflating it with a
-  # harness/pipeline failure.
+  # harness/pipeline failure. errRate is computed from non_2xx + transport_errors
+  # over requests.total; when a load generator does not emit requests.total the
+  # rate is unknowable, so health is "unknown" rather than a false "ok".
   local health_threshold="${PERFLAB_MAX_HTTP_ERROR_RATE:-0.05}"
   [[ "${health_threshold}" =~ ^[0-9]*\.?[0-9]+$ ]] || health_threshold="0.05"
   # Build the scenario list from the suite's OWN arrays so the terminal status is
@@ -178,13 +180,14 @@ build_suite_facts() {
          | ((($x|map(select(.name=="http.responses.non_2xx_3xx"))|.[0].value) // 0)
             + (($x|map(select(.name=="http.transport_errors"))|.[0].value) // 0)) as $err
          | (($x|map(select(.name=="http.requests.total"))|.[0].value) // 0) as $tot
-         | if $tot > 0 then ($err / $tot) else 0 end);
+         | if $tot > 0 then ($err / $tot) else null end);
        {runId:$runId,kind:"scenario-suite",scenarioCount:($meta|length),
         scenarios:($meta|map(
           ($obs[.scenarioId] // null) as $o
+          | errRate($o) as $er
           | . + {observations:$o,
-                 errorRate:(if $o == null then null else (errRate($o)*10000|round/10000) end),
-                 health:(if $o == null then "unknown" elif errRate($o) > $threshold then "degraded" else "ok" end)}))}' \
+                 errorRate:(if $er == null then null else ($er*10000|round/10000) end),
+                 health:(if $er == null then "unknown" elif $er > $threshold then "degraded" else "ok" end)}))}' \
     > "${suite_facts}"
 }
 
@@ -231,12 +234,12 @@ for ((i = 0; i < scenario_count; i++)); do
   PERFLAB_PACKAGE_RUN_ID="${suite_run_id}" \
   PERFLAB_TELEMETRY_RUN_ID="${s_telemetry[i]}" \
   PERFLAB_ARTIFACT_DIR="${scenario_dir}" \
-    "${harness_core_dir}/run-scenario.sh" "${sid}" "${duration_seconds}" || scenario_exit=$?
+    "${harness_core_dir}/run/run-scenario.sh" "${sid}" "${duration_seconds}" || scenario_exit=$?
 
   if [[ "${scenario_exit}" -eq 0 && "${with_runtime}" == "true" ]]; then
     echo "[$((i + 1))/${scenario_count}] Capturing ${s_diag[i]} for ${sid}..."
-    "${harness_core_dir}/capture-runtime.sh" "${scenario_dir}" "${s_diag[i]}" "${duration_seconds}" || scenario_exit=$?
-    [[ "${scenario_exit}" -eq 0 ]] && { "${harness_core_dir}/normalize-runtime.sh" "${scenario_dir}" || scenario_exit=$?; }
+    "${harness_core_dir}/capture/capture-runtime.sh" "${scenario_dir}" "${s_diag[i]}" "${duration_seconds}" || scenario_exit=$?
+    [[ "${scenario_exit}" -eq 0 ]] && { "${harness_core_dir}/capture/normalize-runtime.sh" "${scenario_dir}" || scenario_exit=$?; }
   fi
 
   if [[ "${scenario_exit}" -eq 0 ]]; then

@@ -27,7 +27,12 @@ drifting copies. Instead:
 ```
 repo root
 ├── harness/               # the reusable toolkit (never edited per project)
-│   ├── core/              # orchestration, capture, normalize, lib/common.sh
+│   ├── core/              # orchestration -- never edited per project:
+│   │   ├── run/               # run-single/multiple/all wrappers + run-scenario(s) orchestrators
+│   │   ├── pe-tests/          # perf-engineering runners: sweep/repeat/mix/data-scale/fault
+│   │   ├── capture/           # capture-evidence + capture/normalize-runtime
+│   │   ├── analyze/           # analyze-trends (leak/trend) + compare-runs (A/B regression)
+│   │   └── lib/               # common.sh (shared helpers) + lab-context.sh (lab-specific init)
 │   ├── adapters/
 │   │   ├── runtime/<rt>/     # metrics.sh, capture.sh, normalize.sh, versions.sh, evidence-extra.sh
 │   │   ├── dependency/<dep>/ # reset/sample-midload/snapshot.sh (generic; connection config from the descriptor)

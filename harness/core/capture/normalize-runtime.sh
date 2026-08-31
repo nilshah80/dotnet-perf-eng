@@ -4,7 +4,7 @@
 # ->text). A runtime without a normalizer is a no-op, not an error.
 set -euo pipefail
 # shellcheck disable=SC1091
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 
 artifact_dir="${1:?Usage: normalize-runtime.sh <artifact-directory>}"
 [[ -d "${artifact_dir}" ]] || { echo "Artifact directory '${artifact_dir}' does not exist." >&2; exit 1; }

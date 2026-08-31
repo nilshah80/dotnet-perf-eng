@@ -1,0 +1,6 @@
+[
+  {"method": "GET",  "path": "/api/catalog/recommendations?categoryId=1&take=20", "weight": 40},
+  {"method": "GET",  "path": "/api/customers/1/orders?page=1&pageSize=25",         "weight": 30},
+  {"method": "GET",  "path": "/api/cache/catalog/1",                               "weight": 20},
+  {"method": "POST", "path": "/api/orders", "body": "{\"customerId\":1,\"productId\":1,\"quantity\":1,\"poison\":false}", "weight": 10}
+]

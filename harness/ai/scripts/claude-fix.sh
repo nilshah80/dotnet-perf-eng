@@ -4,6 +4,10 @@
 # comes from the descriptor so this stays project-agnostic.
 set -euo pipefail
 HARNESS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Unlike print-ai-prompt / analyze-with-claude, this script BUILDS after editing,
+# so it needs the lab descriptor's PERFLAB_BUILD_DIR/PERFLAB_BUILD_COMMAND -- it
+# must NOT run in helpers-only mode. With more than one lab, select it explicitly:
+# PERFLAB_LAB=<name> ./harness/ai/scripts/claude-fix.sh <evidence-dir>
 # shellcheck disable=SC1091
 source "${HARNESS_ROOT}/core/lib/common.sh"
 require_command claude

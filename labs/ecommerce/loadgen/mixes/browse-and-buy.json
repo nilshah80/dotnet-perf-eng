@@ -1,0 +1,7 @@
+[
+  {"method": "GET",  "path": "/api/products?page=1&pageSize=25",              "weight": 50},
+  {"method": "GET",  "path": "/api/products?page=1&pageSize=25&search=feature-3", "weight": 20},
+  {"method": "GET",  "path": "/api/products/1234",                            "weight": 15},
+  {"method": "GET",  "path": "/api/orders?page=1&pageSize=25",                "weight": 10},
+  {"method": "POST", "path": "/api/orders", "body": "{\"items\":[{\"productId\":1,\"quantity\":2},{\"productId\":2,\"quantity\":1}]}", "weight": 5}
+]
