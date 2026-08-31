@@ -22,14 +22,32 @@ mkdir -p "${artifact_dir}/benchmark"
 script="$(loadgen_script)"
 script_dir="$(cd "$(dirname "${script}")" && pwd)"
 script_base="$(basename "${script}")"
+# Local target: join the compose network and hit the app's INTERNAL url. Remote
+# target: no compose network -- run on Docker's default bridge and hit base_url
+# (the app's external url). A host-loopback base_url (127.0.0.1) is NOT reachable
+# from inside the container, so a host-local remote target must use k6, not wrk.
+if [[ "${target_mode:-local}" == "remote" ]]; then
+  network_args=()
+  url="${base_url}"
+  # wrk runs in a container: its 127.0.0.1 is the container's own loopback, not the
+  # host, so a host-loopback remote base_url yields an all-transport-errors run. Fail
+  # fast with the fix rather than emitting a misleading 100%-error result.
+  case "${url}" in
+    *"://127.0.0.1"*|*"://localhost"*|*"://[::1]"*)
+      echo "wrk cannot reach a host-loopback remote target (${url}) from inside its container. Use PERFLAB_LOAD_GENERATOR=k6 for a host-local remote target, or point PERFLAB_BASE_URL at a routable host." >&2
+      exit 1 ;;
+  esac
+else
+  network_args=(--network "${compose_network}")
+  url="${internal_base_url}"
+fi
 wrk_run() {
-  MSYS_NO_PATHCONV=1 docker run --rm --network "${compose_network}" \
+  MSYS_NO_PATHCONV=1 docker run --rm "${network_args[@]}" \
     -e PERF_METHOD -e PERF_PATH -e PERF_BODY -e PERF_RUN_ID -e PERF_HEADERS \
     -v "${script_dir}:/lab:ro" \
     "${wrk_image}" "$@"
 }
 lua="/lab/${script_base}"
-url="${internal_base_url}"
 
 case "${phase}" in
   warmup)

@@ -1,0 +1,15 @@
+# Scenario catalog (TAB-separated) for the REMOTE-TARGET example. Parsed by
+# harness/core/lib/common.sh with awk -- no jq.
+# Columns: id	name	method	path	body	target	diagnostic	connections
+# 'body' is empty for GET rows (two adjacent tabs). Fields never contain a tab.
+# 'target'/'diagnostic' are unused for a plain black-box or remote-observed run, but
+# STANDALONE remote diagnostics (PERFLAB_REMOTE_DIAGNOSTICS=1) do read them: 'target'
+# maps to a PERFLAB_DIAG_TARGETS entry (service -> assembly) and 'diagnostic' is the
+# default kind. For those, set 'target' to a real mapping key and 'diagnostic' to
+# trace/gcdump (not 'none'). Repoint 'path' at your deployment's real routes.
+# (The sample paths below match the scenariolab app, so pointing this lab at a
+# locally brought-up scenariolab stack on 127.0.0.1:8080 returns 200s -- the
+# simplest way to exercise remote mode without a separate deployment.)
+R00	remote-health-ready	GET	/health/ready		remote	none	32
+R01	remote-catalog-ranking	GET	/api/catalog/recommendations?categoryId=1&take=20		remote	none	64
+R02	remote-runtime-threading	GET	/api/runtime/threading		remote	none	96

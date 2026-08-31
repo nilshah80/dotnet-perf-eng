@@ -28,6 +28,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ "${repeats}" =~ ^[1-9][0-9]*$ ]] || { echo "--repeats must be a positive integer." >&2; exit 1; }
+# Plain repeat is load-only and works against any target. --reseed wipes the OWNED
+# DB volume between reps, so it is local-only; a remote target cannot reseed.
+if [[ "${reseed_between_reps}" == "true" && "${target_mode:-local}" != "local" ]]; then
+  echo "run-repeat.sh --reseed needs a local target (PERFLAB_TARGET=local): it wipes the OWNED DB volume between reps. Drop --reseed to repeat load-only against a remote target." >&2
+  exit 1
+fi
 
 run_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 rep_id="repeat-${run_stamp}"

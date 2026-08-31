@@ -40,8 +40,12 @@ suite_run_id="${PERFLAB_SUITE_RUN_ID:-}"
 suite_scenario_index="${PERFLAB_SUITE_SCENARIO_INDEX:-}"
 suite_scenario_count="${PERFLAB_SUITE_SCENARIO_COUNT:-}"
 
-mkdir -p "${artifact_dir}/benchmark" "${artifact_dir}/telemetry" \
-         "${artifact_dir}/dependencies" "${artifact_dir}/runtime" "${artifact_dir}/analysis"
+mkdir -p "${artifact_dir}/benchmark" "${artifact_dir}/analysis"
+# telemetry/dependencies/runtime hold OWNED-target captures; a remote package has
+# none, so creating them would leave misleading empty stubs. Local target only.
+if [[ "${target_mode}" == "local" ]]; then
+  mkdir -p "${artifact_dir}/telemetry" "${artifact_dir}/dependencies" "${artifact_dir}/runtime"
+fi
 
 git_revision="unversioned"
 if git -C "${repo_root}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -69,9 +73,13 @@ if [[ -n "${suite_run_id}" ]]; then
   suite_field="$(printf ',"suite":{"runId":"%s","index":%s,"count":%s}' \
     "$(json_escape "${suite_run_id}")" "${suite_scenario_index}" "${suite_scenario_count}")"
 fi
-printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","mode":"measure","workload":{"loadGenerator":"%s","baseUrl":"%s","method":"%s","path":"%s","durationSeconds":%s,"requestedDurationSeconds":%s,"connections":%s,"profile":"%s"},"startedAt":"%s","startedEpoch":%s,"source":{"gitRevision":"%s"}%s%s}\n' \
-  "$(json_escape "${package_run_id}")" "$(json_escape "${telemetry_run_id}")" "$(json_escape "${scenario_id}")" \
-  "$(json_escape "${load_generator}")" "$(json_escape "${base_url}")" "$(json_escape "${method}")" "$(json_escape "${path}")" \
+# remoteTelemetry records whether this remote run was "remote-observed" (window-
+# scoped Prometheus/Tempo/Loki also read) so capture-evidence knows authoritatively
+# what to capture even on a standalone re-invocation. Always false for local.
+remote_telemetry_json=false; [[ "${remote_telemetry:-0}" == "1" ]] && remote_telemetry_json=true
+printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","mode":"measure","target":"%s","remoteTelemetry":%s,"workload":{"loadGenerator":"%s","baseUrl":"%s","readyUrl":"%s","method":"%s","path":"%s","durationSeconds":%s,"requestedDurationSeconds":%s,"connections":%s,"profile":"%s"},"startedAt":"%s","startedEpoch":%s,"source":{"gitRevision":"%s"}%s%s}\n' \
+  "$(json_escape "${package_run_id}")" "$(json_escape "${telemetry_run_id}")" "$(json_escape "${scenario_id}")" "$(json_escape "${target_mode}")" "${remote_telemetry_json}" \
+  "$(json_escape "${load_generator}")" "$(json_escape "${base_url}")" "$(json_escape "${ready_url}")" "$(json_escape "${method}")" "$(json_escape "${path}")" \
   "${effective_duration}" "${duration_seconds}" "${connections}" "$(json_escape "${load_profile}")" "$(json_escape "${started_at}")" "${started_epoch}" \
   "$(json_escape "${git_revision}")" "${suite_field}" "${fault_field}" \
   > "${artifact_dir}/manifest.json"
@@ -80,17 +88,44 @@ export PERF_SCENARIO="${perf_scenario}" PERF_RUN_ID="${telemetry_run_id}" PERF_R
 export PERF_METHOD="${method}" PERF_PATH="${path}" PERF_BODY="${body}" PERF_BASE_URL="${base_url}"
 export PERFLAB_CONNECTIONS="${connections}" PERFLAB_DURATION_SECONDS="${duration_seconds}" PERFLAB_PROFILE="${load_profile}"
 
-echo "Starting local stack for ${scenario_id} (${telemetry_run_id})..."
-# Free the shared host ports first: other labs bind the same 8080/5432/etc.
-stop_conflicting_lab_stacks
-# shellcheck disable=SC2086
-compose up -d --build ${app_services}
-wait_for_api
+if [[ "${target_mode}" == "remote" ]]; then
+  # Remote target: the app is already deployed and is NOT owned here. No Compose
+  # lifecycle, no dependency resets -- a black-box load test against base_url whose
+  # only evidence is the load generator's own SLIs. Just confirm it is reachable.
+  echo "Remote target ${base_url} for ${scenario_id} (${telemetry_run_id}) -- no lifecycle/reset."
+  # The workload is REAL traffic against a live target: a non-GET method mutates
+  # remote data. The tiers never touch lifecycle or owned dependencies, but the load
+  # itself is not "read-only" for a write scenario -- say so loudly.
+  case "${method}" in
+    GET|HEAD) : ;;
+    *) echo "WARNING: scenario ${scenario_id} uses ${method} -- this drives REAL ${method} traffic and may MUTATE data on the remote target ${base_url}." >&2 ;;
+  esac
+  # Fail CLOSED on an unreachable target: generating load against a down or unhealthy
+  # staging/production endpoint can deepen an outage. Override deliberately with
+  # PERFLAB_REMOTE_ALLOW_UNHEALTHY=1 to load a target expected to be degraded (or when
+  # the readiness endpoint itself requires auth this bare check cannot supply).
+  if ! curl -fsS --max-time 10 "${ready_url}" >/dev/null 2>&1; then
+    if [[ "${PERFLAB_REMOTE_ALLOW_UNHEALTHY:-0}" == "1" ]]; then
+      echo "WARNING: remote readiness check failed at ${ready_url}; PERFLAB_REMOTE_ALLOW_UNHEALTHY=1 set, measuring anyway." >&2
+      export PERFLAB_CAPTURE_INCOMPLETE=1
+    else
+      echo "ERROR: remote readiness check failed at ${ready_url}. Refusing to generate load against an unhealthy target; set PERFLAB_REMOTE_ALLOW_UNHEALTHY=1 to override." >&2
+      exit 1
+    fi
+  fi
+else
+  echo "Starting local stack for ${scenario_id} (${telemetry_run_id})..."
+  # Free the shared host ports first: other labs bind the same 8080/5432/etc.
+  stop_conflicting_lab_stacks
+  # shellcheck disable=SC2086
+  compose up -d --build ${app_services}
+  wait_for_api
 
-# Dependency resets so the run is scenario-scoped.
-for dep in ${dependencies}; do
-  "$(dependency_dir "${dep}")/reset.sh" "${artifact_dir}"
-done
+  # Dependency resets so the run is scenario-scoped.
+  for dep in ${dependencies}; do
+    "$(dependency_dir "${dep}")/reset.sh" "${artifact_dir}"
+  done
+fi
 
 echo "Warming up for 10 seconds with ${load_generator}..."
 loadgen_warmup "${artifact_dir}"
@@ -100,13 +135,16 @@ loadgen_warmup "${artifact_dir}"
 # MEASURE phase only. The range-gauge telemetry is already windowed to the measure
 # phase, but these counters would otherwise accumulate from the pre-warm-up reset
 # and fold ~10s of warm-up traffic into the evidence. Data/cache is left intact.
-for dep in ${dependencies}; do
-  reset_stats="$(dependency_dir "${dep}")/reset-stats.sh"
-  if [[ -f "${reset_stats}" ]]; then
-    bash "${reset_stats}" "${artifact_dir}" \
-      || { echo "WARNING: ${dep} reset-stats failed; its cumulative counters still include warm-up." >&2; export PERFLAB_CAPTURE_INCOMPLETE=1; }
-  fi
-done
+# Local-only: a remote target's dependencies are not owned or reachable here.
+if [[ "${target_mode}" == "local" ]]; then
+  for dep in ${dependencies}; do
+    reset_stats="$(dependency_dir "${dep}")/reset-stats.sh"
+    if [[ -f "${reset_stats}" ]]; then
+      bash "${reset_stats}" "${artifact_dir}" \
+        || { echo "WARNING: ${dep} reset-stats failed; its cumulative counters still include warm-up." >&2; export PERFLAB_CAPTURE_INCOMPLETE=1; }
+    fi
+  done
+fi
 
 # Mid-load sampling: dependency live state at the halfway point, plus the app's
 # own socket table and per-container resource use. This is BEST-EFFORT / OPTIONAL
@@ -192,15 +230,21 @@ restore_fault_dep() {
 }
 
 echo "Measuring for ${effective_duration}s at ${connections} connections with ${load_generator}..."
-# Arm the fault-cleanup trap only for a fault run, so a normal run adds no trap.
-[[ -n "${PERFLAB_FAULT_DEP:-}" ]] && trap restore_fault_dep INT TERM EXIT
-sample_midload & midload_pid=$!
-inject_fault & fault_pid=$!
+midload_pid=""; fault_pid=""
+if [[ "${target_mode}" == "local" ]]; then
+  # Arm the fault-cleanup trap only for a fault run, so a normal run adds no trap.
+  [[ -n "${PERFLAB_FAULT_DEP:-}" ]] && trap restore_fault_dep INT TERM EXIT
+  # Mid-load sampling and fault injection both act on OWNED dependencies/compose,
+  # so they run only for a local target. A remote target measures the load
+  # generator's SLIs against base_url with no dependency/compose probing.
+  sample_midload & midload_pid=$!
+  inject_fault & fault_pid=$!
+fi
 measure_started_epoch="$(date -u +%s)"
 loadgen_measure "${artifact_dir}" measure
 measure_ended_epoch="$(date -u +%s)"
-wait "${midload_pid}" 2>/dev/null || true
-fault_rc=0; wait "${fault_pid}" 2>/dev/null || fault_rc=$?
+[[ -n "${midload_pid}" ]] && { wait "${midload_pid}" 2>/dev/null || true; }
+fault_rc=0; [[ -n "${fault_pid}" ]] && { wait "${fault_pid}" 2>/dev/null || fault_rc=$?; }
 # Record whether the fault applied AND whether the dependency recovered within the
 # measured window. Either failing makes the resilience package incomplete, so mark
 # it partial rather than let a not-injected or not-recovered run read as a success.
@@ -228,5 +272,12 @@ export PERFLAB_MEASURE_START_EPOCH="${measure_started_epoch}" PERFLAB_MEASURE_EN
 "${harness_core_dir}/analyze/analyze-trends.sh" "${artifact_dir}" || true
 
 echo "Evidence package: ${artifact_dir}"
-echo "Next (optional runtime diagnostics): ${harness_core_dir}/capture/capture-runtime.sh ${artifact_dir}"
+# Runtime diagnostics (nettrace/gcdump/stacks) need a dotnet-monitor endpoint: a
+# local target owns its sidecar; a remote target must opt in (PERFLAB_REMOTE_
+# DIAGNOSTICS=1 + ack) and point at a reachable remote dotnet-monitor.
+if [[ "${target_mode}" == "local" ]]; then
+  echo "Next (optional runtime diagnostics): ${harness_core_dir}/capture/capture-runtime.sh ${artifact_dir}"
+elif [[ "${remote_diagnostics:-0}" == "1" ]]; then
+  echo "Next (optional REMOTE runtime diagnostics, separate perturbing run): ${harness_core_dir}/capture/capture-runtime.sh ${artifact_dir} <trace|gcdump|stacks> <seconds>"
+fi
 echo "Then analyze: ${harness_root}/ai/scripts/analyze-with-claude.sh ${artifact_dir}"
