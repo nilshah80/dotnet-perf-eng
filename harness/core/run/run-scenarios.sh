@@ -52,6 +52,17 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+# Effective runtime-diagnostics decision. Diagnostics need OWNERSHIP (local): a
+# remote target's captures are raw (normalization needs the local tools container),
+# and a suite should not auto-perturb a live target for every scenario -- so remote
+# diagnostics are STANDALONE-only (use capture-runtime.sh directly). do_runtime is
+# the effective value (recorded in the suite manifest so it is self-describing).
+do_runtime="${with_runtime}"
+if [[ "${with_runtime}" == "true" && "${target_mode}" != "local" ]]; then
+  do_runtime="false"
+  echo "NOTE: runtime diagnostics are standalone-only for a remote target; running measurement-only. Use capture-runtime.sh directly for a single remote diagnostic (PERFLAB_REMOTE_DIAGNOSTICS=1 + ack)."
+fi
+
 normalized_selector="$(printf '%s' "${selector}" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
 [[ -n "${normalized_selector}" ]] || { echo "At least one scenario must be selected." >&2; exit 1; }
 
@@ -116,7 +127,7 @@ write_suite_manifest() {
     printf '{"runId":"%s","kind":"scenario-suite","selector":"%s","status":"%s","startedAt":"%s","startedEpoch":%s,"durationSeconds":%s,"loadGenerator":"%s","profile":"%s","withRuntimeDiagnostics":%s,"scenarioCount":%s,"completedCount":%s,"failedCount":%s,"source":{"gitRevision":"%s"}' \
       "$(json_escape "${suite_run_id}")" "$(json_escape "${selector}")" "$(json_escape "${suite_status}")" \
       "$(json_escape "${started_at}")" "${started_epoch}" "${duration_seconds}" "$(json_escape "${load_generator}")" "$(json_escape "${load_profile}")" \
-      "${with_runtime}" "${scenario_count}" "${completed}" "${failed}" "$(json_escape "${git_revision}")"
+      "${do_runtime}" "${scenario_count}" "${completed}" "${failed}" "$(json_escape "${git_revision}")"
     [[ -n "${completed_at}" ]] && printf ',"completedAt":"%s","completedEpoch":%s' "$(json_escape "${completed_at}")" "${completed_epoch}"
     printf ',"scenarios":['
     for ((i = 0; i < scenario_count; i++)); do
@@ -236,7 +247,7 @@ for ((i = 0; i < scenario_count; i++)); do
   PERFLAB_ARTIFACT_DIR="${scenario_dir}" \
     "${harness_core_dir}/run/run-scenario.sh" "${sid}" "${duration_seconds}" || scenario_exit=$?
 
-  if [[ "${scenario_exit}" -eq 0 && "${with_runtime}" == "true" ]]; then
+  if [[ "${scenario_exit}" -eq 0 && "${do_runtime}" == "true" ]]; then
     echo "[$((i + 1))/${scenario_count}] Capturing ${s_diag[i]} for ${sid}..."
     "${harness_core_dir}/capture/capture-runtime.sh" "${scenario_dir}" "${s_diag[i]}" "${duration_seconds}" || scenario_exit=$?
     [[ "${scenario_exit}" -eq 0 ]] && { "${harness_core_dir}/capture/normalize-runtime.sh" "${scenario_dir}" || scenario_exit=$?; }

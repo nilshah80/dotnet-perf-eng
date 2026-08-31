@@ -12,6 +12,8 @@ require_loadgen
 # k6 only: this emits a numeric per-scale curve (rps/p50/p90/p99); wrk's
 # unit-suffixed latency strings would produce invalid numeric JSON.
 [[ "${load_generator}" == "k6" ]] || { echo "run-data-scale.sh needs PERFLAB_LOAD_GENERATOR=k6 (numeric latency percentiles; wrk emits unit-suffixed strings)." >&2; exit 1; }
+# Local-only: each scale wipes and reseeds the OWNED DB volume (down -v + SEED_SCALE).
+[[ "${target_mode:-local}" == "local" ]] || { echo "run-data-scale.sh needs a local target (PERFLAB_TARGET=local): it wipes and reseeds the OWNED database volume, which a remote target does not have." >&2; exit 1; }
 
 scenario_id="${1:?run-data-scale.sh <scenario-id> [duration] [--scales smoke,demo]}"; shift
 require_scenario "${scenario_id}"

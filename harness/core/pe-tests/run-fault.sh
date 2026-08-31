@@ -12,6 +12,9 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 require_loadgen
+# Local-only: fault injection pauses/stops OWNED compose dependencies, which a
+# remote target does not have (and must never be attempted against).
+[[ "${target_mode:-local}" == "local" ]] || { echo "run-fault.sh needs a local target (PERFLAB_TARGET=local): it pauses/stops OWNED compose dependencies. A remote target has none to fault." >&2; exit 1; }
 
 scenario_id="${1:?run-fault.sh <scenario> [duration] [--dependency D] [--kind pause|stop] [--at N] [--for N]}"; shift
 require_scenario "${scenario_id}"

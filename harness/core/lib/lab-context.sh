@@ -12,14 +12,88 @@
 project="${PERFLAB_PROJECT:?PERFLAB_PROJECT not set in ${lab_config}}"
 runtime="${PERFLAB_RUNTIME:?PERFLAB_RUNTIME not set in ${lab_config}}"
 
-compose_file="$(resolve_repo_path "${PERFLAB_COMPOSE_FILE:?PERFLAB_COMPOSE_FILE not set}")"
-app_services="${PERFLAB_APP_SERVICES:?PERFLAB_APP_SERVICES not set}"
-primary_app_service="${PERFLAB_PRIMARY_APP_SERVICE:-${app_services%% *}}"
+# Target mode: "local" (default) = the harness OWNS the app under test (Compose
+# lifecycle, dependency resets, dotnet-monitor, run-id-scoped telemetry).
+# "remote" = the app is already deployed elsewhere and is NOT owned here; the
+# harness only drives load against base_url and records the load generator's SLIs
+# -- no lifecycle, no resets, no runtime diagnostics, no run-id-scoped telemetry.
+target_mode="${PERFLAB_TARGET:-local}"
+case "${target_mode}" in
+  local|remote) : ;;
+  *) echo "PERFLAB_TARGET must be 'local' or 'remote'; received '${target_mode}'." >&2; exit 1 ;;
+esac
+
+# Remote observability tiers -- opt-in, and only meaningful when target is remote
+# (a local target already owns everything). Two independent axes on top of the
+# black-box default:
+#   PERFLAB_REMOTE_TELEMETRY=1  -> "remote-observed": ALSO read the deployed app's
+#     Prometheus/Tempo/Loki, scoped by the measurement WINDOW (the deployed app
+#     does not carry our perf.run.id, so exact run-id isolation is impossible and
+#     other traffic in the window is swept in). Needs the endpoint URLs + the
+#     deployed env's job/service label names.
+#   PERFLAB_REMOTE_DIAGNOSTICS=1 -> allow capture-runtime.sh against a remote
+#     dotnet-monitor endpoint. It PERTURBS the target and can expose PII from
+#     process memory, so capture-runtime additionally requires an explicit ack
+#     (PERFLAB_REMOTE_DIAG_ACK, see remote_diag_ack_phrase below).
+remote_diag_ack_phrase="i-understand-perturbation"
+# A remote DIAGNOSTIC replay of a write scenario (POST/PUT/PATCH/DELETE) mutates real
+# data on the target, which the perturbation/PII ack above does not cover -- it needs
+# this separate, explicit acknowledgement.
+remote_write_ack_phrase="i-understand-data-mutation"
+remote_telemetry=0
+remote_diagnostics=0
+if [[ "${target_mode}" == "remote" ]]; then
+  case "${PERFLAB_REMOTE_TELEMETRY:-0}" in
+    1|true|yes|on) remote_telemetry=1 ;;
+    0|false|no|off|"") remote_telemetry=0 ;;
+    *) echo "PERFLAB_REMOTE_TELEMETRY must be 1/true or 0/false; received '${PERFLAB_REMOTE_TELEMETRY}'." >&2; exit 1 ;;
+  esac
+  case "${PERFLAB_REMOTE_DIAGNOSTICS:-0}" in
+    1|true|yes|on) remote_diagnostics=1 ;;
+    0|false|no|off|"") remote_diagnostics=0 ;;
+    *) echo "PERFLAB_REMOTE_DIAGNOSTICS must be 1/true or 0/false; received '${PERFLAB_REMOTE_DIAGNOSTICS}'." >&2; exit 1 ;;
+  esac
+  # A remote tier must point at the DEPLOYED environment's backends EXPLICITLY: the
+  # observability/diagnostics URLs below otherwise default to localhost, which would
+  # silently read a stale LOCAL stack as if it were the remote target. Require the
+  # URLs for whichever tier is enabled (an explicit localhost is still allowed, for a
+  # deliberately local-backed test -- what is forbidden is inheriting it by default).
+  if [[ "${remote_telemetry}" == "1" && ( -z "${PERFLAB_PROMETHEUS_URL:-}" || -z "${PERFLAB_TEMPO_URL:-}" || -z "${PERFLAB_LOKI_URL:-}" ) ]]; then
+    echo "PERFLAB_REMOTE_TELEMETRY=1 requires PERFLAB_PROMETHEUS_URL, PERFLAB_TEMPO_URL and PERFLAB_LOKI_URL set to the deployed environment backends; a remote target must not inherit the localhost defaults." >&2
+    exit 1
+  fi
+  if [[ "${remote_diagnostics}" == "1" && -z "${PERFLAB_DIAGNOSTICS_URL:-}" ]]; then
+    echo "PERFLAB_REMOTE_DIAGNOSTICS=1 requires PERFLAB_DIAGNOSTICS_URL set to the deployed dotnet-monitor endpoint; a remote target must not inherit the localhost default." >&2
+    exit 1
+  fi
+fi
+
 base_url="${PERFLAB_BASE_URL:?PERFLAB_BASE_URL not set}"
 ready_url="${PERFLAB_READY_URL:?PERFLAB_READY_URL not set}"
 
-prom_job_regex="${PERFLAB_PROM_JOB_REGEX:?PERFLAB_PROM_JOB_REGEX not set}"
-service_name_regex="${PERFLAB_SERVICE_NAME_REGEX:?PERFLAB_SERVICE_NAME_REGEX not set}"
+# The Compose file + app services are LOCAL-only (a remote target owns no
+# lifecycle). The Prometheus/service scoping is required for a LOCAL target and
+# for a REMOTE-OBSERVED one (PERFLAB_REMOTE_TELEMETRY=1, which reads the deployed
+# env's backends), but omitted for a plain black-box remote target.
+if [[ "${target_mode}" == "local" ]]; then
+  compose_file="$(resolve_repo_path "${PERFLAB_COMPOSE_FILE:?PERFLAB_COMPOSE_FILE not set (required for a local target)}")"
+  app_services="${PERFLAB_APP_SERVICES:?PERFLAB_APP_SERVICES not set (required for a local target)}"
+  prom_job_regex="${PERFLAB_PROM_JOB_REGEX:?PERFLAB_PROM_JOB_REGEX not set (required for a local target)}"
+  service_name_regex="${PERFLAB_SERVICE_NAME_REGEX:?PERFLAB_SERVICE_NAME_REGEX not set (required for a local target)}"
+else
+  compose_file="$(resolve_repo_path "${PERFLAB_COMPOSE_FILE:-/dev/null}")"
+  app_services="${PERFLAB_APP_SERVICES:-}"
+  prom_job_regex="${PERFLAB_PROM_JOB_REGEX:-}"
+  service_name_regex="${PERFLAB_SERVICE_NAME_REGEX:-}"
+  # Remote-observed reads the deployed environment's backends, so it needs that
+  # environment's Prometheus job label and service.name. Validate explicitly (a
+  # plain check, not ${VAR:?...}, whose message-parsing mishandles apostrophes).
+  if [[ "${remote_telemetry}" == "1" && ( -z "${prom_job_regex}" || -z "${service_name_regex}" ) ]]; then
+    echo "PERFLAB_REMOTE_TELEMETRY=1 needs PERFLAB_PROM_JOB_REGEX and PERFLAB_SERVICE_NAME_REGEX set to the deployed environment Prometheus job label and service.name." >&2
+    exit 1
+  fi
+fi
+primary_app_service="${PERFLAB_PRIMARY_APP_SERVICE:-${app_services%% *}}"
 run_id_attr="${PERFLAB_RUN_ID_ATTR:-perf.run.id}"
 # OTEL resource attribute perf.run.id becomes Prometheus label perf_run_id
 # (dots to underscores). Loki/Tempo keep the dotted attribute.

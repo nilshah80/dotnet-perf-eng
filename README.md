@@ -99,9 +99,114 @@ auto-discovers the sole lab; with several, select one via `PERFLAB_LAB=<name>`.
 |---|---|---|---|
 | `scenariolab` | `source/dotnet/scenariolab` (`PerfLab.Api` + worker) | postgres, redis, rabbitmq | the reference planted-defect catalog (`S00`–`S27`) |
 | `ecommerce` | `source/dotnet/ecommerce` (`ECommerce.Api`) | postgres | a JWT-protected CRUD API (`E00`–`E14`); per-lab k6 workload that logs in via `setup()`, and postgres db/user `ecommerce` (parameterized dependency adapter) |
+| `remote-example` | *already-deployed endpoint* (not owned here) | none | the **remote target mode** (`PERFLAB_TARGET=remote`): a black-box load/capacity test against a URL, no Compose/telemetry ownership (`R00`–`R02`) |
 
 With more than one lab present, **every command needs a lab selected**, e.g.
 `PERFLAB_LAB=ecommerce ./harness/core/run/run-multiple.sh E02,E03 20`.
+
+## Target modes — local vs remote
+
+A lab declares `PERFLAB_TARGET` (default `local`). It decides whether the harness
+**owns** the app under test.
+
+| | `local` (default) | `remote` |
+|---|---|---|
+| App lifecycle | harness runs `compose up/down`, rebuilds, waits for ready | app is **already deployed**; harness never touches lifecycle |
+| Dependencies | reset/reseed/fault the owned postgres/redis/rabbitmq | none owned — dependencies are off-limits |
+| Warm-up + measure window | yes | yes |
+| Load generator SLIs → `facts.json` | yes | yes — **the entire evidence** |
+| Telemetry (Prometheus/Tempo/Loki) | captured, **run-id-scoped** | off by default; opt-in `PERFLAB_REMOTE_TELEMETRY=1` reads it **window-scoped** |
+| Runtime diagnostics (dotnet-monitor nettrace/gcdump/stacks) | available | off by default; opt-in `PERFLAB_REMOTE_DIAGNOSTICS=1` **+ ack** |
+| `manifest.json` | `"target":"local"` | `"target":"remote"` (+ `"remoteTelemetry"`) |
+
+**Remote** turns the harness into a black-box load/capacity tool against a URL:
+it health-checks `PERFLAB_READY_URL`, warms up, measures against `PERFLAB_BASE_URL`,
+and records the load generator's own throughput / latency-percentile / error-rate
+SLIs. It is the mode for hitting a staging or production endpoint you do **not**
+control.
+
+```bash
+# Point the example lab at your deployment (or edit labs/remote-example/lab.config.sh):
+PERFLAB_LAB=remote-example \
+PERFLAB_BASE_URL=https://staging.example.com \
+PERFLAB_READY_URL=https://staging.example.com/health/ready \
+  ./harness/core/run/run-scenario.sh R01 30
+```
+
+Works against a remote target: `run-scenario`, **`run-sweep`** (capacity knee),
+`run-mix`, `run-repeat` (without `--reseed`), every load profile
+(`steady`/`ramp`/`stress`/`spike`/`soak`/`capacity`/`arrival`), `compare-runs`,
+`analyze-trends`. Refused (they mutate owned state, with a clear error):
+`run-fault`, `run-data-scale`, `run-repeat --reseed`.
+
+Caveats: k6 (a host process) is the recommended generator. **wrk runs in Docker**,
+so a host-loopback `PERFLAB_BASE_URL` (`127.0.0.1`) is unreachable from inside the
+container — use k6 for a host-local target; wrk is fine against a genuinely remote
+host. For a protected endpoint, pass a pre-minted token per run via a **JSON**
+`PERF_HEADERS='{"Authorization":"Bearer <token>"}'` (both workloads parse it as a
+JSON object, not a raw header string; never commit tokens). Remote SLIs are measured
+**from this machine**, so they include client-to-server network latency — keep the
+generator close to the target and hold it constant across an A/B.
+
+### Remote with more access: observed + diagnostics
+
+`remote` is really a spectrum of how much of the deployed environment you can
+reach. The plain mode assumes only a URL; two independent opt-ins add back
+evidence when you have more:
+
+**Remote-observed** (`PERFLAB_REMOTE_TELEMETRY=1`) — you have **read access** to
+the deployed env's Prometheus/Tempo/Loki. The harness reads them too, but scoped by
+the **measurement time window** instead of a run id (the deployed app was not
+started by us, so it carries no `perf.run.id`). The catch: without run-id
+isolation, everything else serving traffic in that window is swept in — trust it
+only where your load dominates or the environment is isolated (a dedicated
+staging). Requires the env's endpoint URLs and its own job/service label names:
+
+```bash
+PERFLAB_LAB=remote-example PERFLAB_REMOTE_TELEMETRY=1 \
+PERFLAB_PROMETHEUS_URL=https://prom.staging PERFLAB_TEMPO_URL=https://tempo.staging \
+PERFLAB_LOKI_URL=https://loki.staging \
+PERFLAB_PROM_JOB_REGEX='staging-api-.*' PERFLAB_SERVICE_NAME_REGEX='checkout-api' \
+  ./harness/core/run/run-scenario.sh R01 30
+```
+
+**Remote + diagnostics** (`PERFLAB_REMOTE_DIAGNOSTICS=1` **+ ack**) — the deployed
+app exposes a reachable **dotnet-monitor** endpoint, so `capture-runtime` can pull
+a nettrace/gcdump against it. Because attaching a profiler or pulling a gcdump/dump
+**perturbs the live process** (a gcdump pauses the GC; a dump freezes it) and can
+expose secrets/PII from process memory, it demands an explicit acknowledgement and
+should be a **separate run from measurement**, on staging where possible:
+
+```bash
+PERFLAB_LAB=remote-example PERFLAB_REMOTE_DIAGNOSTICS=1 \
+PERFLAB_REMOTE_DIAG_ACK=i-understand-perturbation \
+PERFLAB_DIAGNOSTICS_URL=http://staging-host:18323 PERFLAB_DIAG_TARGETS='remote:MyApp.Api' \
+  ./harness/core/capture/capture-runtime.sh artifacts/runs/<run-id> trace 20
+```
+
+Without the ack (or with `PERFLAB_REMOTE_DIAGNOSTICS` unset), `capture-runtime`
+refuses on a remote target. Remote diagnostics are **standalone-only** — a suite
+(`run-scenarios`) skips them (it should not auto-perturb a live target, and the raw
+capture is normalized offline), so run `capture-runtime` directly for one scenario.
+It reads the endpoint, readiness URL and workload from the **manifest** (not the
+current catalog), so it can't profile the remote process while loading somewhere else.
+
+Both tiers leave the app's **lifecycle and owned dependencies untouched** — but the
+*load itself is real traffic*: a write scenario (POST/PUT/PATCH/DELETE) **mutates real
+data** on the target. `run-scenario` warns on a non-GET method; a **diagnostic**
+write is refused outright unless you also set `PERFLAB_REMOTE_WRITE_ACK=i-understand-data-mutation`.
+Prefer read scenarios against production, or a disposable/staging dataset for writes.
+
+More remote guardrails: a failed readiness check **fails closed** (refuses to load an
+unhealthy target unless `PERFLAB_REMOTE_ALLOW_UNHEALTHY=1` — also the escape hatch when
+the readiness URL itself requires auth this bare check can't supply, so point
+`PERFLAB_READY_URL` at an **unauthenticated** health route where you can); a remote
+tier will not inherit the localhost telemetry/diagnostics defaults (set the deployed
+env's URLs explicitly); and re-capturing a package standalone must re-supply its
+matching lab/env or `capture-evidence` hard-fails rather than query localhost. **Security:** dotnet-monitor is a powerful
+endpoint (it can dump process memory); reach it over a **secured tunnel or
+authenticating proxy** (e.g. `kubectl port-forward` to a local `PERFLAB_DIAGNOSTICS_URL`)
+rather than exposing it, and never put credentials in a URL (they would be logged).
 
 ## Components and local ports
 
@@ -318,11 +423,14 @@ an existing package:
 ./harness/core/capture/normalize-runtime.sh artifacts/runs/<run-id>         # binaries -> Speedscope JSON / text
 ```
 
-`capture-runtime` recreates the app in `diagnose` mode before applying load
-(clearing leaks/pools left by the measurement) and resolves the target by runtime
-identity, not container PID. For .NET, a `stacks` request records a `trace`
-fallback by default (the dotnet-monitor profiler channel is unreliable in this
-sidecar topology) and documents it in `runtime/capture.json`.
+On a **local** target, `capture-runtime` recreates the app in `diagnose` mode before
+applying load (clearing leaks/pools left by the measurement) and resolves the target
+by runtime identity, not container PID. On a **remote** target it does **not**
+recreate the app (it is not owned) — it drives the manifest-recorded workload against
+the deployed dotnet-monitor and leaves a **raw** capture (normalize it offline; the
+in-place normalizer needs the local tools container). For .NET, a `stacks` request
+records a `trace` fallback by default (the dotnet-monitor profiler channel is
+unreliable in this sidecar topology) and documents it in `runtime/capture.json`.
 
 ## Scenario catalog
 
