@@ -31,7 +31,7 @@ repo_root="$(cd "${harness_root}/.." && pwd)"
 # via jqd and the harness emits its own JSON with printf.)
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*)
-    export MSYS2_ENV_CONV_EXCL='PERF_BASE_URL;PERF_METHOD;PERF_PATH;PERF_BODY;PERF_RUN_ID;PERF_SCENARIO;PERF_RUN_MODE;PERF_HEADERS'
+    export MSYS2_ENV_CONV_EXCL='PERF_BASE_URL;PERF_METHOD;PERF_PATH;PERF_BODY;PERF_RUN_ID;PERF_SCENARIO;PERF_RUN_MODE;PERF_HEADERS;PERF_MIX'
     ;;
 esac
 
@@ -154,6 +154,24 @@ fi
 internal_base_url="${PERFLAB_INTERNAL_BASE_URL:-http://api:8080}"
 compose_network="${PERFLAB_COMPOSE_NETWORK:-perflab_default}"
 wrk_image="${PERFLAB_WRK_IMAGE:-}"
+
+# Load profile: the SHAPE of the measure-phase load. "steady" (default) is the
+# constant-VU test the harness has always run; the others drive k6 executors so
+# the harness answers capacity/limits/endurance questions instead of a single
+# point -- ramp/stress/spike/soak are closed-model VU shapes, capacity/arrival
+# are open-model arrival-rate. Executors are k6-only (wrk does "steady" only).
+# Tuning knobs (all optional, k6 adapter reads them): PERFLAB_MAX_VUS,
+# PERFLAB_SPIKE_VUS, PERFLAB_TARGET_RPS, PERFLAB_START_RPS,
+# PERFLAB_SOAK_DURATION_SECONDS.
+load_profile="${PERFLAB_PROFILE:-steady}"
+case " steady ramp stress spike soak capacity arrival " in
+  *" ${load_profile} "*) : ;;
+  *) echo "PERFLAB_PROFILE must be one of: steady ramp stress spike soak capacity arrival; received '${load_profile}'." >&2; exit 1 ;;
+esac
+if [[ "${load_profile}" != "steady" && "${load_generator}" != "k6" ]]; then
+  echo "PERFLAB_PROFILE='${load_profile}' needs PERFLAB_LOAD_GENERATOR=k6 (load-shape executors are k6-only; wrk supports 'steady')." >&2
+  exit 1
+fi
 require_loadgen() {
   case "${load_generator}" in
     k6) require_command k6 ;;

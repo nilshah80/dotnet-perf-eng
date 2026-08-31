@@ -1,5 +1,6 @@
 import http from 'k6/http';
 import { Counter } from 'k6/metrics';
+import { mixEnabled, pickRequest } from '../../../harness/adapters/loadgen/k6/mix.js';
 
 // eCommerce k6 workload. The endpoints are JWT-protected, so this per-lab script
 // authenticates ONCE in setup() and sends the bearer token on every request.
@@ -55,7 +56,11 @@ export function setup() {
 }
 
 export default function (data) {
-  const sendsBody = method === 'POST' || method === 'PUT' || method === 'PATCH';
+  // One request from the PERF_* contract, unless PERF_MIX blends several
+  // endpoints (weighted). The bearer token below applies to every mix request.
+  let m = method, p = path, b = body;
+  if (mixEnabled) { const r = pickRequest(); m = r.method; p = r.path; b = r.body; }
+  const sendsBody = m === 'POST' || m === 'PUT' || m === 'PATCH';
   const params = {
     headers: {
       Accept: 'application/json',
@@ -69,7 +74,7 @@ export default function (data) {
 
   let requestBody = null;
   if (sendsBody) {
-    requestBody = body;
+    requestBody = b;
     if (requestBody.indexOf('__PERF_SEQ__') !== -1) {
       iterationSeq += 1;
       // VU-scoped so concurrent VUs never collide, monotonic so this VU's
@@ -80,8 +85,8 @@ export default function (data) {
   }
 
   const response = http.request(
-    method,
-    `${baseUrl}${path}`,
+    m,
+    `${baseUrl}${p}`,
     requestBody,
     params);
 

@@ -6,7 +6,7 @@
 # parsed with dockerized jq (jqd) or grep; facts.json is emitted with printf.
 set -euo pipefail
 # shellcheck disable=SC1091
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 
 artifact_dir="${1:?Usage: capture-evidence.sh <artifact-directory>}"
 manifest="${artifact_dir}/manifest.json"

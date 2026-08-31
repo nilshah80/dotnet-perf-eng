@@ -26,15 +26,32 @@ case "${phase}" in
   measure | diagnostic)
     conns="${PERFLAB_CONNECTIONS:?PERFLAB_CONNECTIONS not set}"
     dur="${PERFLAB_DURATION_SECONDS:?PERFLAB_DURATION_SECONDS not set}"
+    profile="${PERFLAB_PROFILE:-steady}"
     if [[ "${phase}" == "measure" ]]; then
       summary="k6-summary.json"; txt="k6.txt"
     else
       summary="diagnostic-k6-summary.json"; txt="diagnostic-k6.txt"
     fi
-    k6 run --vus "${conns}" --duration "${dur}s" \
-      --summary-export "${artifact_dir}/benchmark/${summary}" \
-      --quiet --no-color "${js}" \
-      > "${artifact_dir}/benchmark/${txt}"
+    # The MEASURE phase honors the load profile via a generated k6 config
+    # (--config carries the executor; the workload script stays untouched). The
+    # DIAGNOSTIC phase always uses a steady load so a captured trace reflects a
+    # stable state rather than a ramp.
+    if [[ "${phase}" == "measure" && "${profile}" != "steady" ]]; then
+      # shellcheck disable=SC1091
+      source "${HARNESS_ROOT}/adapters/loadgen/k6/profiles.sh"
+      cfg="${artifact_dir}/benchmark/k6-profile.json"
+      k6_write_profile_config "${profile}" "${conns}" "${dur}" "${cfg}"
+      echo "Load profile: ${profile} (executor recorded in benchmark/k6-profile.json)"
+      k6 run --config "${cfg}" \
+        --summary-export "${artifact_dir}/benchmark/${summary}" \
+        --quiet --no-color "${js}" \
+        > "${artifact_dir}/benchmark/${txt}"
+    else
+      k6 run --vus "${conns}" --duration "${dur}s" \
+        --summary-export "${artifact_dir}/benchmark/${summary}" \
+        --quiet --no-color "${js}" \
+        > "${artifact_dir}/benchmark/${txt}"
+    fi
 
     [[ "${phase}" == "measure" ]] || exit 0
     sfile="${artifact_dir}/benchmark/${summary}"
@@ -54,7 +71,8 @@ case "${phase}" in
         {name:"http.responses.non_2xx_3xx",value:($m.perflab_http_non_2xx_3xx.count // 0),unit:"response",source:"benchmark/k6-summary.json"},
         {name:"http.transport_errors",value:($m.perflab_http_transport_errors.count // 0),unit:"error",source:"benchmark/k6-summary.json"},
         {name:"http.requests.total",value:($m.http_reqs.count // 0),unit:"request",source:"benchmark/k6-summary.json"},
-        {name:"http.error_rate",value:((($m.perflab_http_non_2xx_3xx.count // 0) + ($m.perflab_http_transport_errors.count // 0)) / (if ($m.http_reqs.count // 0) > 0 then $m.http_reqs.count else 1 end)),unit:"ratio",source:"benchmark/k6-summary.json"}
+        {name:"http.error_rate",value:((($m.perflab_http_non_2xx_3xx.count // 0) + ($m.perflab_http_transport_errors.count // 0)) / (if ($m.http_reqs.count // 0) > 0 then $m.http_reqs.count else 1 end)),unit:"ratio",source:"benchmark/k6-summary.json"},
+        {name:"http.dropped_iterations",value:($m.dropped_iterations.count // 0),unit:"iteration",source:"benchmark/k6-summary.json"}
       ]' < "${sfile}" > "${artifact_dir}/benchmark/observations.json"
     ;;
   *)

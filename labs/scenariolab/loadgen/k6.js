@@ -1,5 +1,6 @@
 import http from 'k6/http';
 import { Counter } from 'k6/metrics';
+import { mixEnabled, pickRequest } from '../../../harness/adapters/loadgen/k6/mix.js';
 
 // scenariolab k6 workload. scenariolab's endpoints are unauthenticated and each
 // scenario is a single stateless request, so this is intentionally identical to
@@ -47,11 +48,16 @@ if (extraHeaders) {
 const sendsBody = method === 'POST' || method === 'PUT' || method === 'PATCH';
 
 export default function () {
-  const response = http.request(
-    method,
-    `${baseUrl}${path}`,
-    sendsBody ? body : null,
-    params);
+  // One request from the PERF_* contract, unless PERF_MIX blends several
+  // endpoints (weighted); Content-Type is decided per request.
+  let m = method, p = path, b = body;
+  if (mixEnabled) { const r = pickRequest(); m = r.method; p = r.path; b = r.body; }
+  const sends = m === 'POST' || m === 'PUT' || m === 'PATCH';
+  const rp = sends
+    ? { headers: Object.assign({}, params.headers, { 'Content-Type': 'application/json' }) }
+    : params;
+
+  const response = http.request(m, `${baseUrl}${p}`, sends ? b : null, rp);
 
   if (response.status === 0) {
     transportErrors.add(1);

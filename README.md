@@ -16,7 +16,12 @@ defects (scenarios `S00`–`S27`). Onboarding another project or runtime means
 
 ```
 harness/                          # reusable toolkit (never edited per project)
-├── core/                         # run-scenario(s), capture-evidence, capture/normalize-runtime, lib/common.sh
+├── core/
+│   ├── run/                     # run-single/multiple/all wrappers + run-scenario(s) orchestrators
+│   ├── pe-tests/                # perf-engineering runners: run-sweep/mix/repeat/data-scale/fault
+│   ├── capture/                 # capture-evidence + capture/normalize-runtime (the evidence pipeline)
+│   ├── analyze/                 # analyze-trends (leak/trend), compare-runs (A/B regression)
+│   └── lib/common.sh            # shared library (descriptor + adapters + JSON/loadgen helpers)
 ├── adapters/
 │   ├── runtime/dotnet/           # metrics.sh, capture.sh, normalize.sh, versions.sh, evidence-extra.sh, diagnostics/Dockerfile
 │   ├── dependency/{postgres,redis,rabbitmq}/  # reset/sample-midload/snapshot.sh (generic; config-parameterized)
@@ -46,7 +51,7 @@ auto-discovers the sole lab; with several, select one via `PERFLAB_LAB=<name>`.
 | `ecommerce` | `source/dotnet/ecommerce` (`ECommerce.Api`) | postgres | a JWT-protected CRUD API (`E00`–`E14`); per-lab k6 workload that logs in via `setup()`, and postgres db/user `ecommerce` (parameterized dependency adapter) |
 
 With more than one lab present, **every command needs a lab selected**, e.g.
-`PERFLAB_LAB=ecommerce ./harness/core/run-multiple.sh E02,E03 20`.
+`PERFLAB_LAB=ecommerce ./harness/core/run/run-multiple.sh E02,E03 20`.
 
 ## Prerequisites
 
@@ -67,7 +72,7 @@ are shell environment variables.
 ## Quick start
 
 ```bash
-./harness/core/run-single.sh S01 30
+./harness/core/run/run-single.sh S01 30
 ```
 
 Brings up the stack, warms up, measures `S01` for 30s with k6, and writes an
@@ -104,10 +109,12 @@ behind a human gate.
 
 | Goal | Command |
 |---|---|
-| Measure one scenario | `./harness/core/run-single.sh S07 30` |
-| Measure several under one run | `./harness/core/run-multiple.sh S07,S12,S17 30` |
-| Full sweep of all scenarios | `./harness/core/run-all.sh 30 --continue-on-error` |
-| Flat (non-suite) package | `./harness/core/run-scenario.sh S07 30` |
+| Measure one scenario | `./harness/core/run/run-single.sh S07 30` |
+| Measure several under one run | `./harness/core/run/run-multiple.sh S07,S12,S17 30` |
+| Full sweep of all scenarios | `./harness/core/run/run-all.sh 30 --continue-on-error` |
+| Flat (non-suite) package | `./harness/core/run/run-scenario.sh S07 30` |
+| Reshape the load (stress/spike/soak/…) | `PERFLAB_PROFILE=stress ./harness/core/run/run-single.sh E05 60` |
+| Capacity / regression / mix / data-scale / fault | see **Load profiles** and **Performance-engineering tests** below |
 
 `--no-runtime` and `--continue-on-error` work with **any** of `run-single`,
 `run-multiple`, and `run-all` — they all forward to the suite orchestrator.
@@ -116,9 +123,9 @@ normalized to Speedscope/text; roughly doubles wall-clock per scenario). Use
 `--no-runtime` (alias `--measure-only`) for a clean, un-perturbed baseline:
 
 ```bash
-./harness/core/run-multiple.sh S02,S07,S12 30              # with runtime diagnostics (default)
-./harness/core/run-multiple.sh S02,S07,S12 30 --no-runtime # clean measurement only
-./harness/core/run-all.sh 30 --continue-on-error
+./harness/core/run/run-multiple.sh S02,S07,S12 30              # with runtime diagnostics (default)
+./harness/core/run/run-multiple.sh S02,S07,S12 30 --no-runtime # clean measurement only
+./harness/core/run/run-all.sh 30 --continue-on-error
 ```
 
 The AI-diagnosis commands are covered under **AI diagnosis** below.
@@ -130,7 +137,7 @@ is opt-in and runs **via Docker** on the compose network — set
 `PERFLAB_WRK_IMAGE` to a wrk image and select it per run:
 
 ```bash
-PERFLAB_LOAD_GENERATOR=wrk ./harness/core/run-single.sh S01 30
+PERFLAB_LOAD_GENERATOR=wrk ./harness/core/run/run-single.sh S01 30
 ```
 
 The two are **not numerically comparable** (k6 reports latency as numeric ms;
@@ -145,6 +152,72 @@ or per-request datasets ships its own `loadgen/<gen>.js` instead of editing the
 shared default. The defaults also accept an optional `PERF_HEADERS` env var (a JSON
 object of extra headers, e.g. a pre-minted bearer token).
 
+## Load profiles
+
+By default a scenario runs a **steady** closed-loop load (constant VUs =
+`connections` for the duration) — a single-point smoke/load test. Set
+`PERFLAB_PROFILE` (k6 only) to reshape the measure phase into other
+performance-engineering tests **without changing the scenario** — the profile is a
+run-time choice layered on any scenario:
+
+| Profile | Model | Shape | Answers |
+|---|---|---|---|
+| `steady` (default) | closed | constant VUs = `connections` | SLIs at the expected load |
+| `ramp` | closed | VUs step `0 → connections` | where latency starts to degrade |
+| `stress` | closed | VUs ramp past `connections` → `PERFLAB_MAX_VUS` (4×) | the breaking point / saturation |
+| `spike` | closed | baseline → sudden `PERFLAB_SPIKE_VUS` (4×) → recover | surge tolerance and recovery |
+| `soak` | closed | constant VUs for `PERFLAB_SOAK_DURATION_SECONDS` (≥10 min) | leaks, GC/socket drift over time |
+| `capacity` | open | arrival rate ramps to `PERFLAB_TARGET_RPS` | the throughput knee (max sustainable RPS) |
+| `arrival` | open | constant `PERFLAB_TARGET_RPS` | latency at a fixed throughput (coordinated-omission-safe) |
+
+```bash
+PERFLAB_PROFILE=stress   ./harness/core/run/run-single.sh E05 60
+PERFLAB_PROFILE=arrival  PERFLAB_TARGET_RPS=300  ./harness/core/run/run-single.sh E00 60
+PERFLAB_PROFILE=capacity PERFLAB_TARGET_RPS=2000 ./harness/core/run/run-multiple.sh E00,E05 60
+```
+
+Closed-model profiles shape **VUs** (concurrency); open-model profiles (`capacity`,
+`arrival`) drive a fixed **arrival rate** and surface `http.dropped_iterations`
+(requests the system could not schedule at the target rate). `soak`'s payload is
+the automatic leak-detection, and `run-sweep.sh` is the discrete, curve-producing
+form of `capacity` — both under **Performance-engineering tests** below. All shapes
+derive from the scenario's own `connections`/duration; the knobs above override
+the defaults.
+The profile is recorded in `manifest.json` and the exact k6 executor in
+`benchmark/k6-profile.json`. `--with-runtime` always captures under a **steady**
+load regardless of profile, so a trace reflects a stable state rather than a ramp.
+
+## Performance-engineering tests
+
+Beyond a single load test, these runners answer the standard perf-engineering
+questions. Each produces evidence packages under `artifacts/runs/`, and they
+compose with the load profiles above (`--profile`). k6 only.
+
+| Runner | Question it answers | Output |
+|---|---|---|
+| `run-sweep.sh <scen> [s/level] --rates R1,R2,…` | Capacity: the throughput↔latency knee / max sustainable RPS | per-level curve + `sweep.json` (`kneeRps`) |
+| `run-repeat.sh <scen> [dur] --repeats N` | Trustworthy numbers: median / stddev / CV across N runs | `stats.json` |
+| `compare-runs.sh <baseline> <candidate>` | Regression: is the candidate **significantly** worse than the baseline? | per-metric deltas, significance-aware flags (exit 1 on regression) |
+| `run-mix.sh <mix-name> [dur]` | Realistic blended traffic (e.g. 70% list / 20% search / 10% checkout) | one package; mixes live in `labs/<lab>/loadgen/mixes/*.json` |
+| `run-data-scale.sh <scen> --scales smoke,demo` | How perf degrades with data volume (reseeds the DB per scale) | `data-scale.json` |
+| `run-fault.sh <scen> --dependency postgres --kind pause` | Resilience when a dependency stalls (`pause`) or fails (`stop`) mid-run, and whether it recovers | one package (error/latency spike, then recovery) |
+
+**Soak leak-detection** runs automatically on every measure (`analyze-trends.sh`
+→ `analysis/trend-report.json`): the least-squares slope and first→last growth of
+the heap, working set, thread-pool queue, and DB connections, flagging a
+`GROWING` series as a leak/drift candidate — the payload a `soak` run exists to
+produce.
+
+```bash
+PERFLAB_LAB=ecommerce  ./harness/core/pe-tests/run-sweep.sh E05 30 --rates 100,250,500,1000,2000
+PERFLAB_LAB=ecommerce  ./harness/core/pe-tests/run-repeat.sh E00 30 --repeats 7   # then compare two:
+PERFLAB_LAB=ecommerce  ./harness/core/analyze/compare-runs.sh <baseline-dir> <candidate-dir>
+PERFLAB_LAB=ecommerce  ./harness/core/pe-tests/run-mix.sh browse-and-buy 60 --connections 64 --profile stress
+PERFLAB_LAB=ecommerce  ./harness/core/pe-tests/run-data-scale.sh E05 30 --scales smoke,demo
+PERFLAB_LAB=scenariolab ./harness/core/pe-tests/run-fault.sh S00 30 --dependency postgres --kind pause --at 10 --for 10
+PERFLAB_LAB=ecommerce  ./harness/core/run/run-single.sh E14 600 --no-runtime --  # soak: PERFLAB_PROFILE=soak
+```
+
 ## Runtime diagnostics
 
 Measurement and runtime capture are **separate runs** — diagnostic tools perturb
@@ -153,9 +226,9 @@ scenario **by default** (skip with `--no-runtime`); you can also run it by hand 
 an existing package:
 
 ```bash
-./harness/core/capture-runtime.sh artifacts/runs/<run-id>            # scenario's recommended kind
-./harness/core/capture-runtime.sh artifacts/runs/<run-id> trace 30  # or choose: trace|gcdump|stacks|dump
-./harness/core/normalize-runtime.sh artifacts/runs/<run-id>         # binaries -> Speedscope JSON / text
+./harness/core/capture/capture-runtime.sh artifacts/runs/<run-id>            # scenario's recommended kind
+./harness/core/capture/capture-runtime.sh artifacts/runs/<run-id> trace 30  # or choose: trace|gcdump|stacks|dump
+./harness/core/capture/normalize-runtime.sh artifacts/runs/<run-id>         # binaries -> Speedscope JSON / text
 ```
 
 `capture-runtime` recreates the app in `diagnose` mode before applying load
