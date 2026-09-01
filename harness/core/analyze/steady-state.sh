@@ -26,14 +26,15 @@
 # server-side histogram_quantile over a rate() window IS window-local, and is captured
 # for every run (no dependency on k6 remote-write). It measures server processing time.
 #
-# CLIENT vs SERVER latency: the gate certifies the CLIENT p99, but k6's client
-# percentiles cannot be windowed (cumulative, above), so the client EXPERIENCE is
-# verified INDIRECTLY. In a closed-loop run (fixed VUs -- steady/soak) throughput =
-# VUs/client-latency, so a client-side latency drift (network/proxy/pre-server
-# queueing) lowers the completion rate, which the windowed THROUGHPUT signal here
-# catches -- the verdict requires throughput AND server p99 to be non-drifting. In an
-# open-loop (arrival) run the offered rate is pinned, so client-side latency drift is
-# NOT independently verifiable; that is recorded as clientLatencyCoupling in the output.
+# SCOPE -- this certifies SERVER-side steady state, NOT client-p99 steadiness. k6's
+# client percentiles cannot be windowed (cumulative, above), so client-side p99 TAIL
+# steadiness is not independently verified. The verdict requires windowed THROUGHPUT and
+# server p99 to be non-drifting; in a closed-loop run (fixed VUs) throughput =
+# VUs/MEAN-iteration-duration, so throughput drift tracks client MEAN latency -- but NOT
+# a p99/tail drift that leaves the mean (hence throughput) roughly unchanged. An open-
+# loop (arrival) run pins the offered rate, so throughput does not track client latency
+# at all. Both facts are emitted (clientLatencyCoupling, certifies) so a caller never
+# mistakes a server-steady verdict for a client-p99-steady guarantee.
 #
 # It reports; it does not change the measurement. Enforce with `gate.sh
 # --require-steady`. Writes analysis/steady-state.json and stamps a compact
@@ -213,7 +214,8 @@ json="$(awk \
     printf "{";
     printf "\"kind\":\"steady-state\",\"runId\":\"%s\",\"scenarioId\":\"%s\",\"profile\":\"%s\",", runid, scen, prof;
     printf "\"basis\":\"server-side windowed (http_server_request_duration histogram)\",\"scopedInstance\":\"%s\",", si;
-    printf "\"clientLatencyCoupling\":\"%s\",", (prof=="arrival"?"open-loop: client-side latency drift NOT independently verified (server p99 + offered rate only)":"closed-loop: throughput drift tracks client latency (fixed VUs)");
+    printf "\"clientLatencyCoupling\":\"%s\",", (prof=="arrival"?"open-loop: offered rate pinned; throughput does NOT track client latency":"closed-loop: throughput tracks client MEAN latency (fixed VUs), not the p99 tail");
+    printf "\"certifies\":\"server-side steady state (windowed throughput + server p99); client-side p99 TAIL steadiness is NOT independently verified (k6 client percentiles are cumulative)\",";
     printf "\"verdict\":\"%s\",\"windowSeconds\":%d,\"buckets\":%d,\"bucketWidthSeconds\":%d,", verdict, window, B, width;
     printf "\"warmup\":{\"onsetBucket\":%d,\"fraction\":%.3f,\"recommendedTrimSeconds\":%d,\"bucketsOutOfBand\":%d},", onset, ofrac, trim, oob;
     printf "\"tail\":{\"throughputDriftPerBucket\":%.4f,\"latencyDriftPerBucket\":%.4f,\"throughputCv\":%.4f,\"latencyCv\":%.4f},", driftR, driftL, cvR, cvL;

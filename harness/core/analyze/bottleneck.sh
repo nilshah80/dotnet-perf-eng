@@ -140,7 +140,11 @@ json="$(awk \
      # among shares, the largest slice of the request wins. Score in [0,~2]. -----
      n=0;
      if (dbp_sat){ cand[++n]="db-pool-saturated"; sc[n]=1.5 + (has(dbpending)?dbpending+0:0)/100 }
-     if (tpq_sat){ cand[++n]="threadpool-starved"; sc[n]=1.3 + (tpqpeak+0)/100 }
+     # A thread-pool queue is only its OWN bottleneck (sync-over-async / blocking
+     # starvation, threads parked not busy) when CPU is NOT saturated. When CPU is also
+     # saturated the queue is a SYMPTOM of CPU starvation, so cpu-bound must win -- do not
+     # add a competing threadpool-starved candidate whose queue score would overpower it.
+     if (tpq_sat && !cpu_sat){ cand[++n]="threadpool-starved"; sc[n]=1.3 + (tpqpeak+0)/100 }
      if (lock_sat){ cand[++n]="lock-bound"; sc[n]=1.2 + lock_per_req/10 }
      if (cpu_sat){ cand[++n]="cpu-bound"; sc[n]=1.0 + cpu_util }
      if (gc_sat){ cand[++n]="gc-bound"; sc[n]=1.0 + (gcpause+0) }

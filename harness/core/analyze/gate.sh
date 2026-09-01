@@ -147,7 +147,11 @@ if [[ "${require_steady}" == "true" ]]; then
   # stats.json. Fall back to the sibling analysis/steady-state.json only after the same
   # runId+scenario check, and only when the candidate's runId is actually known.
   cand_run="$(jqd -r '.telemetryRunId // .runId // ""' < "${facts}" 2>/dev/null || echo "")"
-  IFS=$'\t' read -r sv stamp_run stamp_scen < <(jqd -r '[.steadyState.verdict // "", .steadyState.runId // "", .steadyState.scenarioId // ""] | @tsv' < "${facts}" 2>/dev/null || printf '\t\t')
+  # IFS=tab collapses consecutive tabs, so a missing (empty) runId would shift
+  # every field after it -- per-field reads avoid that entirely.
+  sv="$(jqd -r '.steadyState.verdict // ""' < "${facts}" 2>/dev/null || echo "")"
+  stamp_run="$(jqd -r '.steadyState.runId // ""' < "${facts}" 2>/dev/null || echo "")"
+  stamp_scen="$(jqd -r '.steadyState.scenarioId // ""' < "${facts}" 2>/dev/null || echo "")"
   ss_src="stamped facts"
   if [[ -n "${sv}" && ( -z "${cand_run}" || "${stamp_run}" != "${cand_run}" || "${stamp_scen}" != "${scenario}" ) ]]; then
     echo "  ignoring stamped steady-state: it is for run '${stamp_run}'/'${stamp_scen}', not this candidate ('${cand_run}'/'${scenario}')." >&2
@@ -155,7 +159,9 @@ if [[ "${require_steady}" == "true" ]]; then
   fi
   if [[ -z "${sv}" && -s "${run_dir}/analysis/steady-state.json" ]]; then
     ss="${run_dir}/analysis/steady-state.json"
-    IFS=$'\t' read -r ss_v ss_run ss_scen < <(jqd -r '[.verdict // "", .runId // "", .scenarioId // ""] | @tsv' < "${ss}" 2>/dev/null || printf '\t\t')
+    ss_v="$(jqd -r '.verdict // ""' < "${ss}" 2>/dev/null || echo "")"
+    ss_run="$(jqd -r '.runId // ""' < "${ss}" 2>/dev/null || echo "")"
+    ss_scen="$(jqd -r '.scenarioId // ""' < "${ss}" 2>/dev/null || echo "")"
     if [[ -n "${cand_run}" && "${ss_run}" == "${cand_run}" && "${ss_scen}" == "${scenario}" ]]; then
       sv="${ss_v}"; ss_src="${ss}"
     else
@@ -163,7 +169,7 @@ if [[ "${require_steady}" == "true" ]]; then
     fi
   fi
   case "${sv}" in
-    steady) echo "  candidate verdict 'steady' (${ss_src}) -- system reached steady state (windowed throughput + server p99; in a closed-loop run throughput tracks client latency)." ;;
+    steady) echo "  candidate verdict 'steady' (${ss_src}) -- SERVER-side steady state (windowed throughput + server p99). NOTE: client-side p99 TAIL steadiness is NOT independently verified (k6 client percentiles are not windowable); throughput tracks client MEAN latency only." ;;
     not-applicable) echo "  candidate verdict 'not-applicable' -- steady state cannot be confirmed for a non-steady (ramp/surge) profile; --require-steady needs a steady-load run. Refusing." >&2; unsteady=1 ;;
     *) echo "  candidate steady-state verdict is '${sv:-missing}' (need 'steady'; source: ${ss_src}) -- window not in steady state; run analyze/steady-state.sh or settle/lengthen the run. Refusing." >&2; unsteady=1 ;;
   esac
@@ -172,9 +178,14 @@ if [[ "${require_steady}" == "true" ]]; then
   # candidate) but the SAME scenario, so validate the stamp is internally consistent (its
   # runId == the baseline's OWN runId) and for this scenario before trusting it.
   if [[ "${use_baseline}" == "true" && -s "${baseline}" ]]; then
-    IFS=$'\t' read -r bsv b_stamp_run b_stamp_scen b_ownrun < <(jqd -r '[.steadyState.verdict // "", .steadyState.runId // "", .steadyState.scenarioId // "", (.telemetryRunId // .runId // "")] | @tsv' < "${baseline}" 2>/dev/null || printf '\t\t\t')
-    if [[ -z "${bsv}" || "${b_stamp_scen}" != "${scenario}" || ( -n "${b_ownrun}" && "${b_stamp_run}" != "${b_ownrun}" ) ]]; then
-      echo "  baseline steady-state is missing or mismatched (verdict='${bsv:-missing}', scenario='${b_stamp_scen}', stampRun='${b_stamp_run}' vs baselineRun='${b_ownrun}') -- re-promote a steady baseline with update-baseline.sh. Refusing." >&2; unsteady=1
+    bsv="$(jqd -r '.steadyState.verdict // ""' < "${baseline}" 2>/dev/null || echo "")"
+    b_stamp_run="$(jqd -r '.steadyState.runId // ""' < "${baseline}" 2>/dev/null || echo "")"
+    b_stamp_scen="$(jqd -r '.steadyState.scenarioId // ""' < "${baseline}" 2>/dev/null || echo "")"
+    b_ownrun="$(jqd -r '.telemetryRunId // .runId // ""' < "${baseline}" 2>/dev/null || echo "")"
+    # Fail CLOSED when the baseline has no own runId: without it the stamp cannot be
+    # verified, so an unverifiable "steady" stamp must NOT satisfy the requirement.
+    if [[ -z "${bsv}" || "${b_stamp_scen}" != "${scenario}" || -z "${b_ownrun}" || "${b_stamp_run}" != "${b_ownrun}" ]]; then
+      echo "  baseline steady-state is missing or unverifiable (verdict='${bsv:-missing}', scenario='${b_stamp_scen}', stampRun='${b_stamp_run}' vs baselineRun='${b_ownrun:-missing}') -- re-promote a steady baseline with update-baseline.sh. Refusing." >&2; unsteady=1
     elif [[ "${bsv}" == "steady" ]]; then
       echo "  baseline verdict 'steady' -- the comparison reference is steady-state."
     else
@@ -192,4 +203,4 @@ if [[ "${fail}" -gt 0 || "${regressed}" -gt 0 || "${unsteady}" -gt 0 ]]; then
   echo "${msg}." >&2
   exit 1
 fi
-echo "GATE: PASS -- ${checked} SLO(s) met$([[ -s "${baseline}" ]] && echo ", no regression vs baseline" || echo "")$([[ "${require_steady}" == "true" ]] && echo ", steady-state confirmed" || echo "")."
+echo "GATE: PASS -- ${checked} SLO(s) met$([[ -s "${baseline}" ]] && echo ", no regression vs baseline" || echo "")$([[ "${require_steady}" == "true" ]] && echo ", server-side steady-state confirmed" || echo "")."

@@ -116,8 +116,11 @@ done
 agg_steady="steady"
 for v in "${rep_verdicts[@]}"; do [[ "${v}" == "steady" ]] || { agg_steady="unsteady"; break; }; done
 verdicts_json="$(printf '%s\n' "${rep_verdicts[@]}" | jqd -Rn '[inputs]' 2>/dev/null || echo '[]')"
+# Carry runId+scenarioId INTO the stamp (from stats.json's own fields) so gate.sh's
+# provenance check accepts a repeat candidate or a promoted repeat baseline -- without
+# them the embedded-id check rejects every repeat.
 if jqd --arg agg "${agg_steady}" --argjson reps "${verdicts_json}" \
-     '.steadyState={verdict:$agg, reps:$reps}' < "${rep_dir}/stats.json" > "${rep_dir}/stats.json.tmp" 2>/dev/null; then
+     '.steadyState={verdict:$agg, reps:$reps, runId:(.runId // ""), scenarioId:(.scenarioId // "")}' < "${rep_dir}/stats.json" > "${rep_dir}/stats.json.tmp" 2>/dev/null; then
   mv "${rep_dir}/stats.json.tmp" "${rep_dir}/stats.json"
 else
   rm -f "${rep_dir}/stats.json.tmp"
