@@ -32,13 +32,16 @@ git_rev="$(git -C "${repo_root}" rev-parse --short HEAD 2>/dev/null || echo unkn
 # recording happens automatically after every run). Every other change is still seen.
 git_dirty="false"; [[ -n "$(git -C "${repo_root}" status --porcelain -- . ':(exclude)perf-history' 2>/dev/null)" ]] && git_dirty="true"
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-profile="steady"; generator=""; status="unknown"
+# Capture status (captured|partial|unknown): initialize from facts.status so a BARE
+# facts.json keeps its own status (the documented bare-facts workflow), then override
+# from the sibling manifest when a run directory was passed. A partial run must be
+# visibly marked in history, not silently trended as if it were clean.
+status="$(jqd -r '.status // "unknown"' < "${facts}" 2>/dev/null || echo unknown)"
+profile="steady"; generator=""
 [[ -s "${manifest}" ]] && {
   profile="$(jqd -r '.workload.profile // "steady"' < "${manifest}" 2>/dev/null || echo steady)"
   generator="$(jqd -r '.workload.loadGenerator // ""' < "${manifest}" 2>/dev/null || echo "")"
-  # Capture status (captured|partial): a partial run must be visibly marked in
-  # history, not silently trended as if it were clean.
-  status="$(jqd -r '.status // "unknown"' < "${manifest}" 2>/dev/null || echo unknown)"
+  status="$(jqd -r --arg s "${status}" '.status // $s' < "${manifest}" 2>/dev/null || echo "${status}")"
 }
 
 mkdir -p "${repo_root}/perf-history"

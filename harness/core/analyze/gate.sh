@@ -47,10 +47,10 @@ scenario="$(jqd -r '(.scenarioId // .scenarios[0].scenarioId // "")' < "${facts}
 [[ -n "${scenario}" ]] || { echo "gate: could not read scenarioId from '${facts}'." >&2; exit 2; }
 
 # Reject a partial capture unless explicitly allowed: its available metrics may meet
-# the SLOs only because a required capture failed. Prefer facts.status; fall back to
-# the sibling manifest; a repeat-stats aggregate is captured (run-repeat drops bad
-# reps); anything else unknown is treated as not-captured.
-status="$(jqd -r 'if (.kind=="repeat-stats") then "captured" else (.status // "unknown") end' < "${facts}" 2>/dev/null || echo unknown)"
+# the SLOs only because a required capture failed. Read facts.status (which
+# capture-evidence stamps and run-repeat carries on stats.json); fall back to the
+# sibling manifest; a legacy file without a status is unknown -> not captured.
+status="$(jqd -r '.status // "unknown"' < "${facts}" 2>/dev/null || echo unknown)"
 if [[ "${status}" == "unknown" && -d "${run_arg}" && -s "${run_arg}/manifest.json" ]]; then
   status="$(jqd -r '.status // "unknown"' < "${run_arg}/manifest.json" 2>/dev/null || echo unknown)"
 fi
@@ -115,6 +115,13 @@ baseline="${baseline_override:-${lab_dir}/baselines/${scenario}.json}"
 if [[ "${use_baseline}" == "true" && -s "${baseline}" ]]; then
   echo ""
   echo "Regression vs baseline (${baseline}):"
+  # Validate the BASELINE's capture status too: a partial baseline yields a
+  # misleading regression verdict even when the candidate is clean.
+  base_status="$(jqd -r '.status // "unknown"' < "${baseline}" 2>/dev/null || echo unknown)"
+  if [[ "${base_status}" != "captured" && "${allow_partial}" != "true" ]]; then
+    echo "  gate: baseline capture status is '${base_status}' (not 'captured') -- refusing to compare against a partial/unknown baseline. Re-promote a captured baseline (update-baseline.sh) or pass --allow-partial." >&2
+    exit 2
+  fi
   if ! "${here}/compare-runs.sh" "${baseline}" "${facts}" --threshold "${threshold}" 2>&1 | sed 's/^/  /'; then
     regressed=1
   fi
