@@ -27,7 +27,10 @@ lab="${PERFLAB_PROJECT:-unknown}"
 git_rev="$(git -C "${repo_root}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 # --porcelain catches staged AND unstaged AND untracked changes; `git diff --quiet`
 # would miss staged/untracked and mislabel a non-HEAD working tree as clean.
-git_dirty="false"; [[ -n "$(git -C "${repo_root}" status --porcelain 2>/dev/null)" ]] && git_dirty="true"
+# Exclude perf-history/ itself: this recorder writes into it, so its own output must
+# not mark the NEXT measured run as dirty (which would break suites / run-repeat where
+# recording happens automatically after every run). Every other change is still seen.
+git_dirty="false"; [[ -n "$(git -C "${repo_root}" status --porcelain -- . ':(exclude)perf-history' 2>/dev/null)" ]] && git_dirty="true"
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 profile="steady"; generator=""; status="unknown"
 [[ -s "${manifest}" ]] && {

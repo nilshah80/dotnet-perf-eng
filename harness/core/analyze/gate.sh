@@ -16,8 +16,8 @@ source "${here}/../lib/common.sh"
 # shellcheck disable=SC1091
 source "${here}/../lib/slo-lib.sh"
 
-run_arg="${1:?gate.sh <run-dir|facts.json> [--baseline P] [--slos P] [--threshold R] [--no-baseline] [--allow-missing]}"; shift || true
-baseline_override=""; slos_override=""; threshold="0.10"; use_baseline="true"; allow_missing="false"
+run_arg="${1:?gate.sh <run-dir|facts.json|stats.json> [--baseline P] [--slos P] [--threshold R] [--no-baseline] [--allow-missing] [--allow-partial]}"; shift || true
+baseline_override=""; slos_override=""; threshold="0.10"; use_baseline="true"; allow_missing="false"; allow_partial="false"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --baseline) baseline_override="${2:?--baseline needs a path}"; shift 2 ;;
@@ -25,28 +25,55 @@ while [[ $# -gt 0 ]]; do
     --threshold) threshold="${2:?--threshold needs a value}"; shift 2 ;;
     --no-baseline) use_baseline="false"; shift ;;
     --allow-missing) allow_missing="true"; shift ;;
+    --allow-partial) allow_partial="true"; shift ;;
     *) echo "Unknown option '$1'." >&2; exit 2 ;;
   esac
 done
 
-facts="${run_arg}"; [[ -d "${run_arg}" ]] && facts="${run_arg}/facts.json"
-[[ -s "${facts}" ]] || { echo "gate: no facts.json at '${run_arg}'." >&2; exit 2; }
+# The candidate is a facts.json OR a run-repeat stats.json (kind=="repeat-stats"),
+# resolved from a directory the same way compare-runs.sh does (stats.json wins).
+if [[ -d "${run_arg}" ]]; then
+  facts="${run_arg}/facts.json"
+  [[ -s "${run_arg}/stats.json" ]] && facts="${run_arg}/stats.json"
+else
+  facts="${run_arg}"
+fi
+[[ -s "${facts}" ]] || { echo "gate: no facts.json/stats.json at '${run_arg}'." >&2; exit 2; }
+kind="$(jqd -r '.kind // ""' < "${facts}" 2>/dev/null || echo "")"
 
 n_scen="$(jqd -r '(.scenarios | length) // 0' < "${facts}" 2>/dev/null || echo 0)"
 [[ "${n_scen}" -gt 1 ]] && { echo "gate: '${facts}' is a ${n_scen}-scenario suite; point at .../scenarios/<id>." >&2; exit 2; }
 scenario="$(jqd -r '(.scenarioId // .scenarios[0].scenarioId // "")' < "${facts}" 2>/dev/null || echo "")"
 [[ -n "${scenario}" ]] || { echo "gate: could not read scenarioId from '${facts}'." >&2; exit 2; }
 
+# Reject a partial capture unless explicitly allowed: its available metrics may meet
+# the SLOs only because a required capture failed. Prefer facts.status; fall back to
+# the sibling manifest; a repeat-stats aggregate is captured (run-repeat drops bad
+# reps); anything else unknown is treated as not-captured.
+status="$(jqd -r 'if (.kind=="repeat-stats") then "captured" else (.status // "unknown") end' < "${facts}" 2>/dev/null || echo unknown)"
+if [[ "${status}" == "unknown" && -d "${run_arg}" && -s "${run_arg}/manifest.json" ]]; then
+  status="$(jqd -r '.status // "unknown"' < "${run_arg}/manifest.json" 2>/dev/null || echo unknown)"
+fi
+if [[ "${status}" != "captured" && "${allow_partial}" != "true" ]]; then
+  echo "gate: capture status is '${status}' (not 'captured') -- refusing to gate a partial/unknown package whose SLOs may pass only because a capture failed. Pass --allow-partial to override." >&2
+  exit 2
+fi
+
 slos_file="${slos_override:-${lab_dir}/slos.tsv}"
-echo "Gate for scenario ${scenario}"
+echo "Gate for scenario ${scenario}  (status: ${status}$([[ "${kind}" == "repeat-stats" ]] && echo ", repeat-stats median"))"
 echo "  facts: ${facts}"
 echo "  slos:  ${slos_file}"
 echo ""
 
 # Load every observation once (jqd is a container round-trip -- do not call per metric).
+# A run-repeat stats.json stores values under .metrics.<name>.median (not .observations),
+# so the absolute SLO check works on the median of a significance-aware baseline/candidate.
 declare -A OBS
 while IFS=$'\t' read -r n v; do [[ -n "${n}" ]] && OBS["${n}"]="${v}"; done < <(
-  jqd -r '(.observations // .scenarios[0].observations // [])[]? | select(.value != null) | [.name,(.value|tostring)] | @tsv' < "${facts}" 2>/dev/null || true)
+  jqd -r 'if (.kind=="repeat-stats")
+          then (.metrics // {} | to_entries[] | select(.value.median != null) | [.key,(.value.median|tostring)] | @tsv)
+          else ((.observations // .scenarios[0].observations // [])[]? | select(.value != null) | [.name,(.value|tostring)] | @tsv) end' \
+    < "${facts}" 2>/dev/null || true)
 
 # --- 1. Absolute SLO checks -------------------------------------------------
 fail=0; checked=0

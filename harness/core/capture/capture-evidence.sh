@@ -361,3 +361,13 @@ fi
 if [[ "${capture_incomplete}" -eq 1 ]]; then
   echo "NOTE: package finalized status:\"partial\" -- a required capture failed or a prior partial/fault outcome is sticky (see WARNINGs above)." >&2
 fi
+
+# Stamp the capture status onto facts.json too, so a single facts.json is
+# self-describing and gate.sh can refuse a partial package (whose available
+# metrics might meet SLOs only because a required capture failed) even when it is
+# handed the facts file directly, without the sibling manifest.
+if jqd --arg st "${capture_status}" '.status=$st' < "${artifact_dir}/facts.json" > "${artifact_dir}/facts.json.tmp" 2>/dev/null; then
+  mv "${artifact_dir}/facts.json.tmp" "${artifact_dir}/facts.json"
+else
+  rm -f "${artifact_dir}/facts.json.tmp"
+fi
