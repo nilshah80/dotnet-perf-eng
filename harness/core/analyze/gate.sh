@@ -141,37 +141,44 @@ unsteady=0
 if [[ "${require_steady}" == "true" ]]; then
   echo ""
   echo "Steady-state requirement (--require-steady):"
-  # Read the verdict from the CANDIDATE's OWN facts/stats (provenance-complete: the
-  # stamp lives in the same file, so it matches this runId/scenario by construction --
-  # run-repeat carries an aggregate onto stats.json). Fall back to the sibling
-  # analysis/steady-state.json ONLY after verifying its runId+scenarioId match this
-  # candidate, so a stale report from another run can never satisfy the gate.
-  sv="$(jqd -r '.steadyState.verdict // ""' < "${facts}" 2>/dev/null || echo "")"
+  # Read the verdict from the CANDIDATE's OWN facts/stats -- but the stamp is only trusted
+  # if its EMBEDDED runId+scenarioId match the candidate (a stamp copied from another run,
+  # or a stale one, must not satisfy the gate). run-repeat carries an aggregate onto
+  # stats.json. Fall back to the sibling analysis/steady-state.json only after the same
+  # runId+scenario check, and only when the candidate's runId is actually known.
+  cand_run="$(jqd -r '.telemetryRunId // .runId // ""' < "${facts}" 2>/dev/null || echo "")"
+  IFS=$'\t' read -r sv stamp_run stamp_scen < <(jqd -r '[.steadyState.verdict // "", .steadyState.runId // "", .steadyState.scenarioId // ""] | @tsv' < "${facts}" 2>/dev/null || printf '\t\t')
   ss_src="stamped facts"
+  if [[ -n "${sv}" && ( -z "${cand_run}" || "${stamp_run}" != "${cand_run}" || "${stamp_scen}" != "${scenario}" ) ]]; then
+    echo "  ignoring stamped steady-state: it is for run '${stamp_run}'/'${stamp_scen}', not this candidate ('${cand_run}'/'${scenario}')." >&2
+    sv=""
+  fi
   if [[ -z "${sv}" && -s "${run_dir}/analysis/steady-state.json" ]]; then
     ss="${run_dir}/analysis/steady-state.json"
-    ss_run="$(jqd -r '.runId // ""' < "${ss}" 2>/dev/null || echo "")"
-    ss_scen="$(jqd -r '.scenarioId // ""' < "${ss}" 2>/dev/null || echo "")"
-    cand_run="$(jqd -r '.telemetryRunId // .runId // ""' < "${facts}" 2>/dev/null || echo "")"
-    if [[ "${ss_scen}" == "${scenario}" && ( -z "${cand_run}" || "${ss_run}" == "${cand_run}" ) ]]; then
-      sv="$(jqd -r '.verdict // ""' < "${ss}" 2>/dev/null || echo "")"; ss_src="${ss}"
+    IFS=$'\t' read -r ss_v ss_run ss_scen < <(jqd -r '[.verdict // "", .runId // "", .scenarioId // ""] | @tsv' < "${ss}" 2>/dev/null || printf '\t\t')
+    if [[ -n "${cand_run}" && "${ss_run}" == "${cand_run}" && "${ss_scen}" == "${scenario}" ]]; then
+      sv="${ss_v}"; ss_src="${ss}"
     else
-      echo "  ignoring ${ss}: it is for run '${ss_run}'/'${ss_scen}', not this candidate ('${cand_run}'/'${scenario}')." >&2
+      echo "  ignoring ${ss}: run '${ss_run}'/'${ss_scen}' does not match candidate '${cand_run}'/'${scenario}' (or candidate runId is missing)." >&2
     fi
   fi
   case "${sv}" in
-    steady) echo "  candidate verdict 'steady' (${ss_src}) -- gated numbers are on steady-state data." ;;
+    steady) echo "  candidate verdict 'steady' (${ss_src}) -- system reached steady state (windowed throughput + server p99; in a closed-loop run throughput tracks client latency)." ;;
     not-applicable) echo "  candidate verdict 'not-applicable' -- steady state cannot be confirmed for a non-steady (ramp/surge) profile; --require-steady needs a steady-load run. Refusing." >&2; unsteady=1 ;;
     *) echo "  candidate steady-state verdict is '${sv:-missing}' (need 'steady'; source: ${ss_src}) -- window not in steady state; run analyze/steady-state.sh or settle/lengthen the run. Refusing." >&2; unsteady=1 ;;
   esac
   # The BASELINE must be steady too, else the regression check compares against a
-  # warm-up/drift-skewed reference (a partial baseline is already refused in section 2).
+  # warm-up/drift-skewed reference. Its stamp is a DIFFERENT run (runId differs from the
+  # candidate) but the SAME scenario, so validate the stamp is internally consistent (its
+  # runId == the baseline's OWN runId) and for this scenario before trusting it.
   if [[ "${use_baseline}" == "true" && -s "${baseline}" ]]; then
-    bsv="$(jqd -r '.steadyState.verdict // ""' < "${baseline}" 2>/dev/null || echo "")"
-    if [[ "${bsv}" == "steady" ]]; then
+    IFS=$'\t' read -r bsv b_stamp_run b_stamp_scen b_ownrun < <(jqd -r '[.steadyState.verdict // "", .steadyState.runId // "", .steadyState.scenarioId // "", (.telemetryRunId // .runId // "")] | @tsv' < "${baseline}" 2>/dev/null || printf '\t\t\t')
+    if [[ -z "${bsv}" || "${b_stamp_scen}" != "${scenario}" || ( -n "${b_ownrun}" && "${b_stamp_run}" != "${b_ownrun}" ) ]]; then
+      echo "  baseline steady-state is missing or mismatched (verdict='${bsv:-missing}', scenario='${b_stamp_scen}', stampRun='${b_stamp_run}' vs baselineRun='${b_ownrun}') -- re-promote a steady baseline with update-baseline.sh. Refusing." >&2; unsteady=1
+    elif [[ "${bsv}" == "steady" ]]; then
       echo "  baseline verdict 'steady' -- the comparison reference is steady-state."
     else
-      echo "  baseline steady-state verdict is '${bsv:-missing}' (need 'steady') -- re-promote a steady baseline with update-baseline.sh. Refusing." >&2; unsteady=1
+      echo "  baseline steady-state verdict is '${bsv}' (need 'steady') -- re-promote a steady baseline with update-baseline.sh. Refusing." >&2; unsteady=1
     fi
   fi
 fi

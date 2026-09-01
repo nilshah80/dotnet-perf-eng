@@ -24,8 +24,16 @@
 # for the whole run (one TrendSink per series, samples never reset), so they cannot be
 # treated as sub-window values -- they converge monotonically and mask tail drift. The
 # server-side histogram_quantile over a rate() window IS window-local, and is captured
-# for every run (no dependency on k6 remote-write). It measures server processing time
-# (client-side queueing shows up as the bottleneck classifier's thread-pool signal).
+# for every run (no dependency on k6 remote-write). It measures server processing time.
+#
+# CLIENT vs SERVER latency: the gate certifies the CLIENT p99, but k6's client
+# percentiles cannot be windowed (cumulative, above), so the client EXPERIENCE is
+# verified INDIRECTLY. In a closed-loop run (fixed VUs -- steady/soak) throughput =
+# VUs/client-latency, so a client-side latency drift (network/proxy/pre-server
+# queueing) lowers the completion rate, which the windowed THROUGHPUT signal here
+# catches -- the verdict requires throughput AND server p99 to be non-drifting. In an
+# open-loop (arrival) run the offered rate is pinned, so client-side latency drift is
+# NOT independently verifiable; that is recorded as clientLatencyCoupling in the output.
 #
 # It reports; it does not change the measurement. Enforce with `gate.sh
 # --require-steady`. Writes analysis/steady-state.json and stamps a compact
@@ -125,14 +133,18 @@ prom_instant() { # <query> <time-epoch> -> scalar or ""
     | jqd -r '.data.result[0].value[1] // empty' 2>/dev/null | head -1
 }
 
-# Per-bucket windowed throughput + p99. Each bucket end is an absolute epoch, and the
-# rate() window == the bucket width, so every value is LOCAL to that time bucket.
+# Per-bucket windowed throughput + p99. Buckets TILE the window exactly: bucket i is
+# [start+i*window/B, start+(i+1)*window/B], and the rate() range == that bucket's OWN
+# width (window/B rounds to 15 or 16s), evaluated at the bucket end. Using a single
+# floor(window/B) range would leave ~1s gaps between buckets and miss the window tail.
 data="$(mktemp)"; trap 'rm -f "${data}"' EXIT
 valid=0
 for ((i=0; i<B; i++)); do
+  bstart=$(( start + i*window/B ))
   bend=$(( start + (i+1)*window/B ))
-  tp="$(prom_instant "sum(rate(http_server_request_duration_seconds_count${sel}[${width}s]))" "${bend}")"
-  p99="$(prom_instant "1000*histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket${sel}[${width}s])))" "${bend}")"
+  brange=$(( bend - bstart )); (( brange < 1 )) && brange=1
+  tp="$(prom_instant "sum(rate(http_server_request_duration_seconds_count${sel}[${brange}s]))" "${bend}")"
+  p99="$(prom_instant "1000*histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket${sel}[${brange}s])))" "${bend}")"
   # No zero-fill: a bucket counts only if BOTH throughput (>0) and a real p99 are
   # present. Missing/NaN latency must NOT become 0 (that would fake a perfectly-steady
   # tail and let the gate pass on absent data).
@@ -174,9 +186,17 @@ json="$(awk \
   END {
     t0=int(B/2);
     refR=median(mr,t0,B); refL=median(m9,t0,B);
-    onset=0;
+    # in-band per bucket vs the robust (median) tail reference; count ALL out-of-band
+    # buckets so mid/late deviations are surfaced, not hidden by the onset value.
+    oob=0;
     for(b=0;b<B;b++){ dR=(refR>0?abs(mr[b]-refR)/refR:0); dL=(refL>0?abs(m9[b]-refL)/refL:0);
-      if(dR<=wtol && dL<=wtol){ onset=b; break } onset=b+1 }
+      inband[b]=(dR<=wtol && dL<=wtol)?1:0; if(!inband[b]) oob++ }
+    # warm-up onset = end of the LEADING transient: the first bucket that is in-band AND
+    # STAYS in-band through the next bucket, so a single lucky touch does not end warm-up
+    # early. Mid/late out-of-band buckets are noise (reported as bucketsOutOfBand) and are
+    # handled by the drift verdict, not folded into the trim.
+    onset=0;
+    for(b=0;b<B;b++){ if(inband[b] && (b+1>=B || inband[b+1])){ onset=b; break } onset=b+1 }
     if(onset>=B) onset=B-1;
     cvR=cv(mr,t0,B); cvL=cv(m9,t0,B);
     driftR=drift(mr,t0,B); driftL=drift(m9,t0,B);
@@ -193,8 +213,9 @@ json="$(awk \
     printf "{";
     printf "\"kind\":\"steady-state\",\"runId\":\"%s\",\"scenarioId\":\"%s\",\"profile\":\"%s\",", runid, scen, prof;
     printf "\"basis\":\"server-side windowed (http_server_request_duration histogram)\",\"scopedInstance\":\"%s\",", si;
+    printf "\"clientLatencyCoupling\":\"%s\",", (prof=="arrival"?"open-loop: client-side latency drift NOT independently verified (server p99 + offered rate only)":"closed-loop: throughput drift tracks client latency (fixed VUs)");
     printf "\"verdict\":\"%s\",\"windowSeconds\":%d,\"buckets\":%d,\"bucketWidthSeconds\":%d,", verdict, window, B, width;
-    printf "\"warmup\":{\"onsetBucket\":%d,\"fraction\":%.3f,\"recommendedTrimSeconds\":%d},", onset, ofrac, trim;
+    printf "\"warmup\":{\"onsetBucket\":%d,\"fraction\":%.3f,\"recommendedTrimSeconds\":%d,\"bucketsOutOfBand\":%d},", onset, ofrac, trim, oob;
     printf "\"tail\":{\"throughputDriftPerBucket\":%.4f,\"latencyDriftPerBucket\":%.4f,\"throughputCv\":%.4f,\"latencyCv\":%.4f},", driftR, driftL, cvR, cvL;
     printf "\"thresholds\":{\"throughputDrift\":%.3f,\"latencyDrift\":%.3f,\"latencyFloorMs\":%.1f,\"warmupFraction\":%.3f,\"warmupTol\":%.3f},", tdr, ldr, latfloor, wfrac, wtol;
     printf "\"wholeWindow\":{\"servedRps\":%.2f,\"serverP99Ms\":%.2f},", wR, wL;
@@ -214,14 +235,18 @@ printf '%s\n' "${json}" > "${out}"
 # as TRUE single windowed quantiles (histogram_quantile over one rate window), and base
 # the skew on those.
 onset_b="$(jqd -r '.warmup.onsetBucket' < "${out}" 2>/dev/null || echo 0)"
-steady_secs=$(( (B - onset_b) * width )); (( steady_secs < 8 )) && steady_secs="${width}"
+# Exact trim/steady lengths from the tiling endpoints (not a fixed floor(window/B),
+# which #3 showed drifts by several seconds over the run).
+trim_exact=$(( onset_b * window / B ))
+steady_secs=$(( window - trim_exact )); (( steady_secs < 8 )) && steady_secs=$(( window / B ))
 w_rps="$(prom_instant "sum(rate(http_server_request_duration_seconds_count${sel}[${window}s]))" "${end}")"
 w_p99="$(prom_instant "1000*histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket${sel}[${window}s])))" "${end}")"
 s_rps="$(prom_instant "sum(rate(http_server_request_duration_seconds_count${sel}[${steady_secs}s]))" "${end}")"
 s_p99="$(prom_instant "1000*histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket${sel}[${steady_secs}s])))" "${end}")"
 if [[ -n "${w_rps}" && -n "${w_p99}" && -n "${s_rps}" && -n "${s_p99}" && "${w_p99}" != "NaN" && "${s_p99}" != "NaN" ]]; then
-  patched="$(jqd --argjson wr "${w_rps}" --argjson wp "${w_p99}" --argjson sr "${s_rps}" --argjson sp "${s_p99}" '
-    .wholeWindow={servedRps:($wr*100|round/100),serverP99Ms:($wp*100|round/100)}
+  patched="$(jqd --argjson wr "${w_rps}" --argjson wp "${w_p99}" --argjson sr "${s_rps}" --argjson sp "${s_p99}" --argjson trim "${trim_exact}" '
+    .warmup.recommendedTrimSeconds=$trim
+    | .wholeWindow={servedRps:($wr*100|round/100),serverP99Ms:($wp*100|round/100)}
     | .steadyWindow={servedRps:($sr*100|round/100),serverP99Ms:($sp*100|round/100)}
     | .skewPct={servedRps:(if $sr!=0 then (($wr-$sr)/$sr*10000|round/100) else 0 end),
                 serverP99:(if $sp!=0 then (($wp-$sp)/$sp*10000|round/100) else 0 end)}' < "${out}" 2>/dev/null || cat "${out}")"
@@ -232,10 +257,11 @@ compact="$(jqd -c '{verdict,recommendedTrimSeconds:.warmup.recommendedTrimSecond
 stamp_facts "${compact}"
 
 verdict="$(jqd -r '.verdict' < "${out}" 2>/dev/null || echo "?")"
-read -r trim ofrac dR dL skew < <(jqd -r '[.warmup.recommendedTrimSeconds,.warmup.fraction,.tail.throughputDriftPerBucket,.tail.latencyDriftPerBucket,.skewPct.serverP99]|@tsv' < "${out}" 2>/dev/null || echo "0 0 0 0 0")
+read -r trim ofrac dR dL skew oob < <(jqd -r '[.warmup.recommendedTrimSeconds,.warmup.fraction,.tail.throughputDriftPerBucket,.tail.latencyDriftPerBucket,.skewPct.serverP99,.warmup.bucketsOutOfBand]|@tsv' < "${out}" 2>/dev/null || echo "0 0 0 0 0 0")
+oobnote=""; [[ "${oob:-0}" != "0" ]] && oobnote=" (${oob}/${B} buckets out-of-band -- noise, see CV)"
 echo "Steady-state for ${scenario} (run ${run_id}, profile ${profile:-steady})  [server-side windowed, ${B}x${width}s buckets]"
 case "${verdict}" in
-  steady)  echo "  verdict:  STEADY -- no tail trend (throughput drift=${dR}/bucket, server-p99 drift=${dL}/bucket); warm-up ~${trim}s (${ofrac} of the window)." ;;
+  steady)  echo "  verdict:  STEADY -- no tail trend (throughput drift=${dR}/bucket, server-p99 drift=${dL}/bucket); warm-up ~${trim}s (${ofrac} of the window)${oobnote}." ;;
   warming) echo "  verdict:  WARMING -- settled late: warm-up ~${trim}s (${ofrac} of the window). Trim the first ${trim}s or lengthen the run so steady state dominates." >&2 ;;
   unsteady)echo "  verdict:  UNSTEADY -- the tail is still trending (throughput drift=${dR}/bucket, server-p99 drift=${dL}/bucket); the run never reached, or is drifting away from, steady state. Cross-check analyze-trends.sh for a leak/degradation." >&2 ;;
   *)       echo "  verdict:  ${verdict}" >&2 ;;

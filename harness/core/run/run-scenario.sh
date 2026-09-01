@@ -273,8 +273,9 @@ export PERFLAB_MEASURE_START_EPOCH="${measure_started_epoch}" PERFLAB_MEASURE_EN
 
 # Steady-state validity: did the measure window actually settle, or did warm-up
 # transients (JIT, pool/cache fill, GC) skew the reported p99/throughput/efficiency?
-# Reads the k6 remote-write series over the window; best-effort and skippable
-# (PERFLAB_STEADY_STATE=0). It reports; gate.sh --require-steady enforces.
+# Reads window-local SERVER metrics (request-count rate + duration-histogram quantile);
+# best-effort and skippable (PERFLAB_STEADY_STATE=0). It reports; gate.sh
+# --require-steady enforces.
 if [[ "${PERFLAB_STEADY_STATE:-1}" != "0" ]]; then
   "${harness_core_dir}/analyze/steady-state.sh" "${artifact_dir}" || true
 fi

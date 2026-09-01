@@ -67,10 +67,12 @@ mstat_sum() { # <file> <max|avg>
     | if length==0 then empty elif \"$2\"==\"max\" then max else (add/length) end" < "${f}" 2>/dev/null | head -1
 }
 # DB pool utilisation must be used/max WITHIN a pool. A scenario can run a bounded pool
-# (e.g. Max Pool Size=2) beside the default (20); taking max(used) and max(size) across
-# ALL pools pairs used=2 with size=20 (10%) and hides a 2/2 saturation. Join by
-# db_client_connection_pool_name and report the MOST-saturated pool's own used/max/pending.
-dbpool_worst() { # -> "usedPeak\tmaxCfg\tpendingPeak" of the highest-utilisation pool
+# (e.g. Max Pool Size=2) beside the default (20); taking max(used)/max(size) across ALL
+# pools pairs used=2 with size=20 (10%) and hides a 2/2 saturation. Join by
+# db_client_connection_pool_name; rank by PENDING first (waiters are the actual
+# saturation signal), then utilisation -- so a 19/20 pool with 50 waiters is picked over
+# a full-but-idle 1/1 pool with none. Report that pool's own used/max/pending.
+dbpool_worst() { # -> "usedPeak\tmaxCfg\tpendingPeak" of the most-saturated pool
   local f="${mdir}/database_pool_metrics.json"; [[ -s "${f}" ]] || return 0
   jqd -r '
     [ .data.result[]?
@@ -83,7 +85,8 @@ dbpool_worst() { # -> "usedPeak\tmaxCfg\tpendingPeak" of the highest-utilisation
             maxc: ([ .[] | select(.nm=="db_client_connection_max") | .peak ] | max // 0),
             pend: ([ .[] | select(.nm | test("pending_requests")) | .peak ] | max // 0) })
     | map(. + {util: (if .maxc>0 then .used/.maxc else 0 end)})
-    | (max_by(.util)) // {used:0,maxc:0,pend:0}
+    # pending dominates the ranking; utilisation breaks ties.
+    | (sort_by([.pend, .util]) | last) // {used:0,maxc:0,pend:0}
     | "\(.used)\t\(.maxc)\t\(.pend)"' < "${f}" 2>/dev/null | head -1
 }
 
