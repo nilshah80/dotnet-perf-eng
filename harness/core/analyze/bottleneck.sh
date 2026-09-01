@@ -169,16 +169,26 @@ json="$(awk \
      # set, so they never disagree. Resources saturated OUTSIDE the band are listed
      # separately (saturatedResources + "also saturated" in the reason) -- surfaced, but
      # not conflated with the primary verdict.
-     ncontrib=0; nsec=0; composite=""; primlist=""; seclist=""; contribjson=""; satjson="";
+     ncontrib=0; composite=""; primlist=""; contribjson="";
      for(i=1;i<=n;i++){
-       satjson=satjson (i>1?",":"") "\"" cand[ord[i]] "\"";
        if(best>0 && sc[ord[i]] >= best*0.90){ ncontrib++;
          composite=composite (ncontrib>1?"+":"") cand[ord[i]];
          primlist=primlist (ncontrib>1?", ":"") cand[ord[i]];
-         contribjson=contribjson (ncontrib>1?",":"") "\"" cand[ord[i]] "\"" }
-       else { nsec++; seclist=seclist (nsec>1?", ":"") cand[ord[i]] } }
+         contribjson=contribjson (ncontrib>1?",":"") "\"" cand[ord[i]] "\"" } }
      concurrent=(ncontrib>=2 ? 1 : 0);
      if (bi>0) verdict=(ncontrib>=2 ? composite : cand[ord[1]]);
+     # saturatedResources is derived DIRECTLY from the hard-saturation booleans, NOT the
+     # ranked candidates: it MUST include a resource that is saturated even when it is not a
+     # bottleneck candidate (the thread-pool queue when CPU is also saturated is a CPU
+     # symptom, so not a candidate, but still saturated), and MUST EXCLUDE the utilisation
+     # fallbacks and dependency dominance, which never cross a saturation threshold. Names
+     # match the resources.<key> objects so the two always agree.
+     nsatres=0; satresjson=""; satreslist="";
+     if (cpu_sat){ nsatres++; satresjson=satresjson (nsatres>1?",":"") "\"cpu\"";        satreslist=satreslist (nsatres>1?", ":"") "cpu" }
+     if (tpq_sat){ nsatres++; satresjson=satresjson (nsatres>1?",":"") "\"threadPool\""; satreslist=satreslist (nsatres>1?", ":"") "threadPool" }
+     if (gc_sat) { nsatres++; satresjson=satresjson (nsatres>1?",":"") "\"gc\"";         satreslist=satreslist (nsatres>1?", ":"") "gc" }
+     if (lock_sat){ nsatres++; satresjson=satresjson (nsatres>1?",":"") "\"locks\"";     satreslist=satreslist (nsatres>1?", ":"") "locks" }
+     if (dbp_sat){ nsatres++; satresjson=satresjson (nsatres>1?",":"") "\"dbPool\"";     satreslist=satreslist (nsatres>1?", ":"") "dbPool" }
 
      # any resource signal captured at all?
      any = (cpu_util>=0) || has(tpqpeak) || has(gcpause) || (lock_per_req>=0) || has(dbpending) || (db_share>=0);
@@ -200,7 +210,7 @@ json="$(awk \
      if (tpq_sat && !cpu_sat) notes[++nn]="thread-pool queue is high while CPU is NOT saturated -- classic sync-over-async / blocking-call starvation (threads parked, not busy).";
      if (verdict=="dependency-bound-db" && dbp_sat) notes[++nn]="most request time is DB AND the pool is saturated -- the DB dependency is the bottleneck via pool exhaustion.";
      if (verdict=="no-clear-bottleneck" && any) notes[++nn]="no resource crossed a saturation gate -- the system has headroom at this load (push RPS with a capacity profile to find the knee).";
-     if (concurrent) notes[++nn]=sprintf("concurrent bottleneck -- primary: %s%s. Address them together, not just the top-scored one; see resources.* for each.", primlist, (nsec>0? sprintf("; also saturated: %s", seclist):""));
+     if (nsatres>=2) notes[++nn]=sprintf("%d resources saturated at once (%s); primary bottleneck(s): %s. Address them together, not just the top-scored one; see resources.* for each.", nsatres, satreslist, primlist);
 
      # ----- reason line: describe the PRIMARY (top) resource; a composite verdict lists
      # the concurrent ones as a prefix so nothing is hidden. -----
@@ -214,13 +224,16 @@ json="$(awk \
        else if (cand[bi]=="db-pool-saturated") reason=sprintf("%.0f request(s) peak waiting for a pooled DB connection (used %.0f/%.0f).", dbpending+0, (has(dbused)?dbused+0:0), (has(dbmax)?dbmax+0:0));
        else if (cand[bi]=="dependency-bound-db") reason=sprintf("~%.0f%% of a typical request is spent in the database (pool not saturated -- it is DB execution time, not pool waiting).", db_share*100);
        else reason="";
-       if (concurrent) reason=sprintf("Concurrent saturation of %d resources (%s)%s. Primary -> ", ncontrib, primlist, (nsec>0? sprintf("; also saturated: %s", seclist):"")) reason;
+       if (concurrent) reason=sprintf("Concurrent bottlenecks (%s). Primary -> ", primlist) reason;
+       # Surface EVERY saturated resource (from the booleans) whenever >=2 are saturated --
+       # including a secondary saturation next to a single primary, and the thread pool.
+       if (nsatres>=2) reason=reason sprintf(" [%d resources saturated: %s]", nsatres, satreslist);
      }
 
      # ----- emit JSON -----
      printf "{";
      printf "\"kind\":\"bottleneck\",\"runId\":\"%s\",\"scenarioId\":\"%s\",\"captureStatus\":\"%s\",", runid, scen, status;
-     printf "\"verdict\":\"%s\",\"confidence\":\"%s\",\"concurrent\":%s,\"contributors\":[%s],\"saturatedResources\":[%s],\"reason\":\"%s\",", verdict, conf, (concurrent?"true":"false"), contribjson, satjson, reason;
+     printf "\"verdict\":\"%s\",\"confidence\":\"%s\",\"concurrent\":%s,\"contributors\":[%s],\"saturatedResources\":[%s],\"reason\":\"%s\",", verdict, conf, (concurrent?"true":"false"), contribjson, satresjson, reason;
      printf "\"resources\":{";
      printf "\"cpu\":{\"coresBusyPeak\":%s,\"cpuCount\":%s,\"utilizationPct\":%s,\"msPerRequest\":%s,\"latencySharePct\":%s,\"saturated\":%s},", jnum(cpubusy), (has(cpucount)?sprintf("%d",cpucount+0):"null"), jpct(cpu_util), jnum(effcpu), jpct(cpu_share), (cpu_sat?"true":"false");
      printf "\"threadPool\":{\"queuePeak\":%s,\"queueAvg\":%s,\"threadCountPeak\":%s,\"saturated\":%s},", jnum(tpqpeak), jnum(tpqavg), jnum(threadpeak), (tpq_sat?"true":"false");
