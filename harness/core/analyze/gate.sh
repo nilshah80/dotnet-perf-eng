@@ -16,8 +16,8 @@ source "${here}/../lib/common.sh"
 # shellcheck disable=SC1091
 source "${here}/../lib/slo-lib.sh"
 
-run_arg="${1:?gate.sh <run-dir|facts.json|stats.json> [--baseline P] [--slos P] [--threshold R] [--no-baseline] [--allow-missing] [--allow-partial]}"; shift || true
-baseline_override=""; slos_override=""; threshold="0.10"; use_baseline="true"; allow_missing="false"; allow_partial="false"
+run_arg="${1:?gate.sh <run-dir|facts.json|stats.json> [--baseline P] [--slos P] [--threshold R] [--no-baseline] [--allow-missing] [--allow-partial] [--require-steady]}"; shift || true
+baseline_override=""; slos_override=""; threshold="0.10"; use_baseline="true"; allow_missing="false"; allow_partial="false"; require_steady="false"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --baseline) baseline_override="${2:?--baseline needs a path}"; shift 2 ;;
@@ -26,6 +26,7 @@ while [[ $# -gt 0 ]]; do
     --no-baseline) use_baseline="false"; shift ;;
     --allow-missing) allow_missing="true"; shift ;;
     --allow-partial) allow_partial="true"; shift ;;
+    --require-steady) require_steady="true"; shift ;;
     *) echo "Unknown option '$1'." >&2; exit 2 ;;
   esac
 done
@@ -35,8 +36,10 @@ done
 if [[ -d "${run_arg}" ]]; then
   facts="${run_arg}/facts.json"
   [[ -s "${run_arg}/stats.json" ]] && facts="${run_arg}/stats.json"
+  run_dir="${run_arg}"
 else
   facts="${run_arg}"
+  run_dir="$(dirname "${facts}")"
 fi
 [[ -s "${facts}" ]] || { echo "gate: no facts.json/stats.json at '${run_arg}'." >&2; exit 2; }
 kind="$(jqd -r '.kind // ""' < "${facts}" 2>/dev/null || echo "")"
@@ -130,10 +133,36 @@ elif [[ "${use_baseline}" == "true" ]]; then
   echo "Regression vs baseline: none stored at ${baseline} (record one with update-baseline.sh)."
 fi
 
+# --- 3. Steady-state requirement (opt-in) -----------------------------------
+# The absolute SLOs and the baseline compare a single p99/throughput number -- but
+# that number is only trustworthy if the measure window was in STEADY STATE. When
+# asked, refuse a run whose steady-state verdict is not "steady": warm-up or drift
+# would otherwise let a skewed number pass (or fail) the checks above.
+unsteady=0
+if [[ "${require_steady}" == "true" ]]; then
+  ss="${run_dir}/analysis/steady-state.json"
+  echo ""
+  echo "Steady-state requirement (--require-steady):"
+  if [[ ! -s "${ss}" ]]; then
+    echo "  no steady-state analysis at ${ss} -- run analyze/steady-state.sh (a normal run-scenario writes it). Refusing." >&2
+    unsteady=1
+  else
+    sv="$(jqd -r '.verdict // "unknown"' < "${ss}" 2>/dev/null || echo unknown)"
+    case "${sv}" in
+      steady)         echo "  verdict 'steady' -- the window settled; gated numbers are on steady-state data." ;;
+      not-applicable) echo "  verdict 'not-applicable' -- non-steady profile (ramp/surge); steady-state gate does not apply." ;;
+      *) echo "  verdict '${sv}' -- the measured window was NOT in steady state (warm-up/drift); the gated numbers may be skewed. See ${ss}." >&2; unsteady=1 ;;
+    esac
+  fi
+fi
+
 # --- Verdict ----------------------------------------------------------------
 echo ""
-if [[ "${fail}" -gt 0 || "${regressed}" -gt 0 ]]; then
-  echo "GATE: FAIL -- ${fail} SLO breach(es)$([[ ${regressed} -gt 0 ]] && echo " + baseline regression")." >&2
+if [[ "${fail}" -gt 0 || "${regressed}" -gt 0 || "${unsteady}" -gt 0 ]]; then
+  msg="GATE: FAIL -- ${fail} SLO breach(es)"
+  [[ ${regressed} -gt 0 ]] && msg="${msg} + baseline regression"
+  [[ ${unsteady} -gt 0 ]] && msg="${msg} + not steady-state"
+  echo "${msg}." >&2
   exit 1
 fi
-echo "GATE: PASS -- ${checked} SLO(s) met$([[ -s "${baseline}" ]] && echo ", no regression vs baseline" || echo "")."
+echo "GATE: PASS -- ${checked} SLO(s) met$([[ -s "${baseline}" ]] && echo ", no regression vs baseline" || echo "")$([[ "${require_steady}" == "true" ]] && echo ", steady-state confirmed" || echo "")."

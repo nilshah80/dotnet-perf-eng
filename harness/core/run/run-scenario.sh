@@ -271,6 +271,21 @@ export PERFLAB_MEASURE_START_EPOCH="${measure_started_epoch}" PERFLAB_MEASURE_EN
 # any run (short windows self-mark as low-confidence).
 "${harness_core_dir}/analyze/analyze-trends.sh" "${artifact_dir}" || true
 
+# Steady-state validity: did the measure window actually settle, or did warm-up
+# transients (JIT, pool/cache fill, GC) skew the reported p99/throughput/efficiency?
+# Reads the k6 remote-write series over the window; best-effort and skippable
+# (PERFLAB_STEADY_STATE=0). It reports; gate.sh --require-steady enforces.
+if [[ "${PERFLAB_STEADY_STATE:-1}" != "0" ]]; then
+  "${harness_core_dir}/analyze/steady-state.sh" "${artifact_dir}" || true
+fi
+
+# USE-method bottleneck classification (CPU / thread pool / GC / locks / DB pool /
+# dependency) from the captured evidence -- a reproducible "what is the bottleneck?"
+# answer next to the AI phase's. Best-effort and skippable (PERFLAB_BOTTLENECK=0).
+if [[ "${PERFLAB_BOTTLENECK:-1}" != "0" ]]; then
+  "${harness_core_dir}/analyze/bottleneck.sh" "${artifact_dir}" || true
+fi
+
 # Record this run's key facts to the committed cross-commit perf history
 # (perf-history/<lab>.jsonl) so trend-report.sh can show the metric per scenario
 # over time. Best-effort and skippable (PERFLAB_RECORD_TREND=0); never fails the run.

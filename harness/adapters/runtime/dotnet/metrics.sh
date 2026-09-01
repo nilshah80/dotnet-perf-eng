@@ -44,4 +44,15 @@ PERFLAB_METRIC_ROLES=(
   'gc_pause|range|rate(dotnet_gc_pause_time_seconds_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[1m])'
   'database_pool_metrics|range|{__name__=~"(db_client_connection_.*|db_client_operation_npgsql_.*|npgsql_.*)",service_instance_id=~"$SERVICE_INSTANCE"}'
   'http_client_metrics|range|{__name__=~"http_client_.*",service_instance_id=~"$SERVICE_INSTANCE"}'
+  # Saturation signals the USE-method classifier (analyze/bottleneck.sh) needs and
+  # nothing else captured yet. lock_contention is THE bottleneck for this lab's pool
+  # scenarios (S21-S26): a rate of Monitor contentions/sec. cpu_count normalizes CPU
+  # from "cores busy" (process_cpu) into a utilisation FRACTION (cores_busy/cpu_count),
+  # so the classifier can say "CPU-bound" without hardcoding the host core count.
+  # thread_count pairs with thread_pool_queue to tell "starved" (queue grows while
+  # threads plateau) from "just busy". A runtime without these emits empty files and
+  # the classifier degrades that dimension to "not captured" -- never a false verdict.
+  'lock_contention|range|rate(dotnet_monitor_lock_contentions_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[1m])'
+  'cpu_count|instant|dotnet_process_cpu_count{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
+  'thread_count|range|dotnet_thread_pool_thread_count_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
 )

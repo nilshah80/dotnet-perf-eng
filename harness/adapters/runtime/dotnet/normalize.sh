@@ -27,19 +27,25 @@ fi
 runtime_dir="${artifact_dir}/runtime"
 mkdir -p "${artifact_dir}/analysis/runtime"
 
+# NB: every `compose ... run` below redirects stdin from /dev/null. Without it a
+# `docker compose run` inside a `while read` loop fed by `< <(find ...)` consumes the
+# REST of find's output as its own stdin, so the loop runs only ONCE -- which silently
+# normalized just one of the gcdump diagnostic's before/after pair (it always captures
+# both). The tools read their input FILE from the argument, never stdin, so detaching
+# stdin is safe and simply stops the loop's pipe from being eaten.
 while IFS= read -r trace_file; do
   rel="${trace_file#"${artifacts_root}/"}"
   name="$(basename "${trace_file}" .nettrace)"
   compose --profile tools run --rm diagnostics \
     dotnet-trace convert "/artifacts/${rel}" --format Speedscope \
-    --output "/artifacts/${rel%/*}/${name}"
+    --output "/artifacts/${rel%/*}/${name}" </dev/null
 done < <(find "${runtime_dir}" -type f -name '*.nettrace' -print)
 
 while IFS= read -r gcdump_file; do
   rel="${gcdump_file#"${artifacts_root}/"}"
   out="${artifact_dir}/analysis/runtime/$(basename "${gcdump_file}" .gcdump)-gcdump-report.txt"
   compose --profile tools run --rm diagnostics \
-    dotnet-gcdump report "/artifacts/${rel}" > "${out}"
+    dotnet-gcdump report "/artifacts/${rel}" </dev/null > "${out}"
 done < <(find "${runtime_dir}" -type f -name '*.gcdump' -print)
 
 while IFS= read -r dump_file; do
@@ -47,7 +53,7 @@ while IFS= read -r dump_file; do
   out="${artifact_dir}/analysis/runtime/$(basename "${dump_file}" .dmp)-dump-report.txt"
   compose --profile tools run --rm diagnostics \
     dotnet-dump analyze "/artifacts/${rel}" \
-    -c "clrthreads" -c "clrstack -all" -c "dumpheap -stat" -c "exit" > "${out}"
+    -c "clrthreads" -c "clrstack -all" -c "dumpheap -stat" -c "exit" </dev/null > "${out}"
 done < <(find "${runtime_dir}" -type f -name '*.dmp' -print)
 
 echo "Normalized runtime evidence is under ${artifact_dir}/analysis/runtime."
