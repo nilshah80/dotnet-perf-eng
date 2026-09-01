@@ -136,23 +136,43 @@ fi
 # --- 3. Steady-state requirement (opt-in) -----------------------------------
 # The absolute SLOs and the baseline compare a single p99/throughput number -- but
 # that number is only trustworthy if the measure window was in STEADY STATE. When
-# asked, refuse a run whose steady-state verdict is not "steady": warm-up or drift
-# would otherwise let a skewed number pass (or fail) the checks above.
+# asked, refuse unless the candidate's verdict is exactly "steady".
 unsteady=0
 if [[ "${require_steady}" == "true" ]]; then
-  ss="${run_dir}/analysis/steady-state.json"
   echo ""
   echo "Steady-state requirement (--require-steady):"
-  if [[ ! -s "${ss}" ]]; then
-    echo "  no steady-state analysis at ${ss} -- run analyze/steady-state.sh (a normal run-scenario writes it). Refusing." >&2
-    unsteady=1
-  else
-    sv="$(jqd -r '.verdict // "unknown"' < "${ss}" 2>/dev/null || echo unknown)"
-    case "${sv}" in
-      steady)         echo "  verdict 'steady' -- the window settled; gated numbers are on steady-state data." ;;
-      not-applicable) echo "  verdict 'not-applicable' -- non-steady profile (ramp/surge); steady-state gate does not apply." ;;
-      *) echo "  verdict '${sv}' -- the measured window was NOT in steady state (warm-up/drift); the gated numbers may be skewed. See ${ss}." >&2; unsteady=1 ;;
-    esac
+  # Read the verdict from the CANDIDATE's OWN facts/stats (provenance-complete: the
+  # stamp lives in the same file, so it matches this runId/scenario by construction --
+  # run-repeat carries an aggregate onto stats.json). Fall back to the sibling
+  # analysis/steady-state.json ONLY after verifying its runId+scenarioId match this
+  # candidate, so a stale report from another run can never satisfy the gate.
+  sv="$(jqd -r '.steadyState.verdict // ""' < "${facts}" 2>/dev/null || echo "")"
+  ss_src="stamped facts"
+  if [[ -z "${sv}" && -s "${run_dir}/analysis/steady-state.json" ]]; then
+    ss="${run_dir}/analysis/steady-state.json"
+    ss_run="$(jqd -r '.runId // ""' < "${ss}" 2>/dev/null || echo "")"
+    ss_scen="$(jqd -r '.scenarioId // ""' < "${ss}" 2>/dev/null || echo "")"
+    cand_run="$(jqd -r '.telemetryRunId // .runId // ""' < "${facts}" 2>/dev/null || echo "")"
+    if [[ "${ss_scen}" == "${scenario}" && ( -z "${cand_run}" || "${ss_run}" == "${cand_run}" ) ]]; then
+      sv="$(jqd -r '.verdict // ""' < "${ss}" 2>/dev/null || echo "")"; ss_src="${ss}"
+    else
+      echo "  ignoring ${ss}: it is for run '${ss_run}'/'${ss_scen}', not this candidate ('${cand_run}'/'${scenario}')." >&2
+    fi
+  fi
+  case "${sv}" in
+    steady) echo "  candidate verdict 'steady' (${ss_src}) -- gated numbers are on steady-state data." ;;
+    not-applicable) echo "  candidate verdict 'not-applicable' -- steady state cannot be confirmed for a non-steady (ramp/surge) profile; --require-steady needs a steady-load run. Refusing." >&2; unsteady=1 ;;
+    *) echo "  candidate steady-state verdict is '${sv:-missing}' (need 'steady'; source: ${ss_src}) -- window not in steady state; run analyze/steady-state.sh or settle/lengthen the run. Refusing." >&2; unsteady=1 ;;
+  esac
+  # The BASELINE must be steady too, else the regression check compares against a
+  # warm-up/drift-skewed reference (a partial baseline is already refused in section 2).
+  if [[ "${use_baseline}" == "true" && -s "${baseline}" ]]; then
+    bsv="$(jqd -r '.steadyState.verdict // ""' < "${baseline}" 2>/dev/null || echo "")"
+    if [[ "${bsv}" == "steady" ]]; then
+      echo "  baseline verdict 'steady' -- the comparison reference is steady-state."
+    else
+      echo "  baseline steady-state verdict is '${bsv:-missing}' (need 'steady') -- re-promote a steady baseline with update-baseline.sh. Refusing." >&2; unsteady=1
+    fi
   fi
 fi
 

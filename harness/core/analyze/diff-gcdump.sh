@@ -70,7 +70,12 @@ diff_one() { # <baseline-report> <candidate-report> [header]
       sub(/[ ]+\[Module\(0x[0-9a-fA-F]+\)\][ ]*$/, "", t);
       sub(/[ ]+\(Bytes [^)]*\)[ ]*$/, "", t);
       sub(/[ ]+$/, "", t);
-      if (fn==1) { bB[t]+=b; bC[t]+=c } else { cB[t]+=b; cC[t]+=c }
+      # "Object Bytes" is the PER-OBJECT size of that type+bucket (every object in a
+      # "Bytes > 10K" row is itself >10K), so RETAINED bytes for the row = bytes * count.
+      # Summing bytes alone undercounts by ~count -- verified: sum(bytes*count) matches
+      # the report "GC Heap bytes" header (148,650,968 vs 148,888,072), sum(bytes) is
+      # ~70x too small (2,109,916).
+      if (fn==1) { bB[t]+=b*c; bC[t]+=c } else { cB[t]+=b*c; cC[t]+=c }
       all[t]=1 }
     END { for (t in all) {
       # newf FIRST: referencing bB[t] in an expression auto-vivifies the key, which
@@ -88,8 +93,8 @@ diff_one() { # <baseline-report> <candidate-report> [header]
 
   # Totals + percent.
   local btot ctot
-  btot="$(awk '{b=$1;c=$2; gsub(/,/,"",b); gsub(/,/,"",c); if (b ~ /^[0-9]+$/ && c ~ /^[0-9]+$/ && NF>=3) s+=b} END{print s+0}' "${base}")"
-  ctot="$(awk '{b=$1;c=$2; gsub(/,/,"",b); gsub(/,/,"",c); if (b ~ /^[0-9]+$/ && c ~ /^[0-9]+$/ && NF>=3) s+=b} END{print s+0}' "${cand}")"
+  btot="$(awk '{b=$1;c=$2; gsub(/,/,"",b); gsub(/,/,"",c); if (b ~ /^[0-9]+$/ && c ~ /^[0-9]+$/ && NF>=3) s+=b*c} END{print s+0}' "${base}")"
+  ctot="$(awk '{b=$1;c=$2; gsub(/,/,"",b); gsub(/,/,"",c); if (b ~ /^[0-9]+$/ && c ~ /^[0-9]+$/ && NF>=3) s+=b*c} END{print s+0}' "${cand}")"
   awk -v bt="${btot}" -v ct="${ctot}" "${_human_awk}"'
     BEGIN{ d=ct-bt; pct=(bt>0? d/bt*100 : 0);
       printf "# Differential managed heap (retained bytes per type)\n";

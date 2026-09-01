@@ -56,27 +56,46 @@ mstat() { # <file> <max|avg|last> -> scalar or "" if the file/series is absent/e
   local f="${mdir}/$1.json"; [[ -s "${f}" ]] || return 0
   jqd -r "${jq_points} | if length==0 then empty elif \"$2\"==\"max\" then max elif \"$2\"==\"avg\" then (add/length) else .[-1] end" < "${f}" 2>/dev/null | head -1
 }
-# db pool needs specific series (by __name__ / connection state), not an aggregate.
-dbstat() { # <name-regex> [state] <max|avg> -> peak/avg of matching series
+# Sum ACROSS series per timestamp before reducing. process_cpu.json carries separate
+# cpu_mode="user" and cpu_mode="system" series; total cores busy is user+system aligned
+# per timestamp, so taking max over the individual series (mstat) understates CPU and
+# can miss a saturated core (verified on S04: 75.8% single-series vs 98.6% summed).
+mstat_sum() { # <file> <max|avg>
+  local f="${mdir}/$1.json"; [[ -s "${f}" ]] || return 0
+  jqd -r "[ .data.result[]? as \$r | (\$r.values // (if \$r.value then [\$r.value] else [] end))[] | {t:.[0], v:(.[1]|tonumber)} ]
+    | group_by(.t) | map(reduce .[] as \$x (0; .+\$x.v))
+    | if length==0 then empty elif \"$2\"==\"max\" then max else (add/length) end" < "${f}" 2>/dev/null | head -1
+}
+# DB pool utilisation must be used/max WITHIN a pool. A scenario can run a bounded pool
+# (e.g. Max Pool Size=2) beside the default (20); taking max(used) and max(size) across
+# ALL pools pairs used=2 with size=20 (10%) and hides a 2/2 saturation. Join by
+# db_client_connection_pool_name and report the MOST-saturated pool's own used/max/pending.
+dbpool_worst() { # -> "usedPeak\tmaxCfg\tpendingPeak" of the highest-utilisation pool
   local f="${mdir}/database_pool_metrics.json"; [[ -s "${f}" ]] || return 0
-  local re="$1" st="${2:-}" agg="${3:-max}"
-  jqd -r --arg re "${re}" --arg st "${st}" "
-    [ .data.result[]? | select((.metric.__name__ // \"\") | test(\$re))
-      | select(\$st==\"\" or (.metric.db_client_connection_state // .metric.state // \"\")==\$st)
-      | (.values // (if .value then [.value] else [] end))[] | .[1] | tonumber ]
-    | if length==0 then empty elif \"${agg}\"==\"avg\" then (add/length) else max end" < "${f}" 2>/dev/null | head -1
+  jqd -r '
+    [ .data.result[]?
+      | { pool: (.metric.db_client_connection_pool_name // "default"),
+          nm:   (.metric.__name__ // ""),
+          st:   (.metric.db_client_connection_state // ""),
+          peak: ([ (.values // (if .value then [.value] else [] end))[] | .[1]|tonumber ] | if length==0 then 0 else max end) } ]
+    | group_by(.pool)
+    | map({ used: ([ .[] | select(.nm=="db_client_connection_count" and .st=="used") | .peak ] | max // 0),
+            maxc: ([ .[] | select(.nm=="db_client_connection_max") | .peak ] | max // 0),
+            pend: ([ .[] | select(.nm | test("pending_requests")) | .peak ] | max // 0) })
+    | map(. + {util: (if .maxc>0 then .used/.maxc else 0 end)})
+    | (max_by(.util)) // {used:0,maxc:0,pend:0}
+    | "\(.used)\t\(.maxc)\t\(.pend)"' < "${f}" 2>/dev/null | head -1
 }
 
-cpu_busy_peak="$(mstat process_cpu max)"
+cpu_busy_peak="$(mstat_sum process_cpu max)"
 cpu_count="$(mstat cpu_count last)"; [[ -z "${cpu_count}" ]] && cpu_count="$(mstat cpu_count max)"
 tpq_peak="$(mstat thread_pool_queue max)"; tpq_avg="$(mstat thread_pool_queue avg)"
 thread_peak="$(mstat thread_count max)"
 gc_pause_peak="$(mstat gc_pause max)"
 alloc_rate_peak="$(mstat gc_allocation_rate max)"
 lock_rate_peak="$(mstat lock_contention max)"
-db_pending_peak="$(dbstat 'pending_requests' '' max)"
-db_used_peak="$(dbstat 'db_client_connection_count' 'used' max)"
-db_max="$(dbstat 'db_client_connection_max' '' max)"
+db_used_peak=""; db_max=""; db_pending_peak=""
+IFS=$'\t' read -r db_used_peak db_max db_pending_peak < <(dbpool_worst)
 
 # --- decision + JSON (awk; -1 == not captured) ------------------------------
 d() { [[ -n "$1" ]] && printf '%s' "$1" || printf -- '-1'; }

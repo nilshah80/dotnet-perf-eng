@@ -25,3 +25,12 @@ if [[ ! -f "${normalizer}" ]]; then
   exit 0
 fi
 "${normalizer}" "${artifact_dir}"
+
+# If the gcdump diagnostic produced a before/after pair (it snapshots the SAME process
+# around the load), attribute the in-process growth to types automatically -- the
+# memory counterpart of the CPU profile diff. Best-effort; never fails normalization.
+if [[ -s "${artifact_dir}/analysis/runtime/before-gcdump-report.txt" \
+   && -s "${artifact_dir}/analysis/runtime/after-gcdump-report.txt" ]]; then
+  echo ""
+  "${harness_core_dir}/analyze/diff-gcdump.sh" "${artifact_dir}" || true
+fi

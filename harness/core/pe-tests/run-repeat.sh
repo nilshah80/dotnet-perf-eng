@@ -105,6 +105,24 @@ cat "${facts_files[@]}" | jqd -s --arg scen "${scenario_id}" --arg repId "${rep_
      status:"captured", includedReps:$inc, excludedReps:$excl, reps:$inc,
      metrics:($names | map({(.): stats($byname[.] // [])}) | add)}' > "${rep_dir}/stats.json"
 
+# Aggregate the reps' steady-state verdicts onto stats.json so a repeat-stats candidate
+# can be steady-gated (gate.sh --require-steady reads .steadyState.verdict). Each rep's
+# run-scenario stamped its own facts.steadyState; the aggregate is "steady" ONLY if
+# EVERY included rep was steady -- one non-steady rep makes the repeat non-steady.
+rep_verdicts=()
+for ff in "${facts_files[@]}"; do
+  rep_verdicts+=("$(jqd -r '.steadyState.verdict // "missing"' < "${ff}" 2>/dev/null || echo missing)")
+done
+agg_steady="steady"
+for v in "${rep_verdicts[@]}"; do [[ "${v}" == "steady" ]] || { agg_steady="unsteady"; break; }; done
+verdicts_json="$(printf '%s\n' "${rep_verdicts[@]}" | jqd -Rn '[inputs]' 2>/dev/null || echo '[]')"
+if jqd --arg agg "${agg_steady}" --argjson reps "${verdicts_json}" \
+     '.steadyState={verdict:$agg, reps:$reps}' < "${rep_dir}/stats.json" > "${rep_dir}/stats.json.tmp" 2>/dev/null; then
+  mv "${rep_dir}/stats.json.tmp" "${rep_dir}/stats.json"
+else
+  rm -f "${rep_dir}/stats.json.tmp"
+fi
+
 echo; echo "Repeat stats: ${rep_dir}/stats.json"
 jqd -r '.metrics | to_entries[] | "  \(.key): median=\(.value.median) mean=\(.value.mean) cv=\(.value.cv) (n=\(.value.n))"' \
   < "${rep_dir}/stats.json" 2>/dev/null || true
