@@ -1,0 +1,26 @@
+# Service-level objectives for the gate (harness/core/analyze/gate.sh).
+# TAB-separated. Columns: scenario  metric  op  threshold
+#   scenario   a scenario id (S00..S27) OR "default" (applies to every scenario
+#              that has no own row for that metric)
+#   metric     a facts.json observation name -- e.g. http.latency.p99 (ms),
+#              http.error_rate (ratio), http.requests_per_second (req/s), and the
+#              derived efficiency.* observations (see capture-evidence.sh)
+#   op         max  -> observed must be <= threshold (latency, errors, cost)
+#              min  -> observed must be >= threshold (throughput)
+#   threshold  the numeric bound
+#
+# The gate applies the "default" rows to every scenario, then lets a scenario's
+# own row override the default for that metric. Absolute SLOs catch "too slow /
+# too many errors / not enough throughput" outright; the stored baseline (see
+# labs/<lab>/baselines/) additionally catches statistically-significant regressions.
+# These values are lab defaults -- tune them to your own targets.
+default	http.error_rate	max	0.02
+default	http.dropped_iterations	max	0
+default	efficiency.cpu_ms_per_request	max	50
+# Control endpoint: fast catalog read, should hold a tight tail and real throughput.
+S00	http.latency.p99	max	250
+S00	http.requests_per_second	min	100
+# Cache-backed catalog read (S12): should be very fast on a warm cache.
+S12	http.latency.p99	max	150
+# Deep order-history pagination (S08): allowed a looser tail.
+S08	http.latency.p99	max	1500

@@ -743,6 +743,187 @@
           "legendFormat": "assemblies {{service_name}}"
         }
       ]
+    },
+    {
+      "id": 116,
+      "title": "Efficiency (per request)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "panels": []
+    },
+    {
+      "id": 117,
+      "title": "CPU-ms per request",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 37
+      },
+      "description": "CPU-milliseconds spent per served request -- rises when a change does more work per request even if latency holds.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "1000 * sum(rate(dotnet_process_cpu_time_seconds_total{service_name=~\"$service\",service_instance_id=~\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])), 1e-9)",
+          "refId": "A",
+          "legendFormat": "cpu ms/req"
+        }
+      ]
+    },
+    {
+      "id": 118,
+      "title": "Allocated bytes per request",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 37
+      },
+      "description": "Managed bytes allocated per request -- the driver of GC frequency, and a classic hidden regression.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(dotnet_gc_heap_allocated_bytes_total{service_name=~\"$service\",service_instance_id=~\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])), 1e-9)",
+          "refId": "A",
+          "legendFormat": "bytes/req"
+        }
+      ]
+    },
+    {
+      "id": 119,
+      "title": "GC-pause + dependency ms per request",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 37
+      },
+      "description": "Per-request GC-pause time and DB dependency time -- where the per-request cost actually goes.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "1000 * sum(rate(dotnet_gc_pause_time_seconds_total{service_name=~\"$service\",service_instance_id=~\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])), 1e-9)",
+          "refId": "A",
+          "legendFormat": "gc pause ms/req"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "1000 * sum(rate(db_client_operation_duration_seconds_sum{service_name=~\"$service\",service_instance_id=~\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])), 1e-9)",
+          "refId": "B",
+          "legendFormat": "db ms/req"
+        }
+      ]
     }
   ],
   "refresh": "5s",

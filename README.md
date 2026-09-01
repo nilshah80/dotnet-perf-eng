@@ -455,6 +455,33 @@ PERFLAB_LAB=scenariolab ./harness/core/pe-tests/run-fault.sh S00 30 --dependency
 PERFLAB_LAB=ecommerce  PERFLAB_PROFILE=soak ./harness/core/run/run-single.sh E14 600 --no-runtime  # soak (runs >=600s)
 ```
 
+## Gating, capacity, efficiency & trend
+
+These turn the lab from "run and inspect" into a guardrail that **decides**.
+
+| Tool | What it does |
+|---|---|
+| `analyze/gate.sh <run> [--threshold R]` | **Performance gate.** Judges a run against absolute SLOs from `labs/<lab>/slos.tsv` **and** a stored baseline (significance-aware regression, via `compare-runs.sh`). Prints a verdict table and **exits non-zero** on any SLO breach or regression — drops straight into CI. |
+| `analyze/update-baseline.sh <run>` | Promote a run to `labs/<lab>/baselines/<scenario>.json` (a `run-repeat` `stats.json` is preferred — it makes the regression check significance-aware). Commit it so future gates compare against it. |
+| `analyze/find-knee.sh <capacity-run>` | **Capacity knee from one continuous ramp.** Reads the k6 remote-write series of a `--profile capacity` (ramping-arrival-rate) run and reports the max sustained RPS before p99 breaches the SLO. Complements `run-sweep.sh` (discrete rate steps) with a single-run, client-observed knee → `analysis/capacity.json`. |
+| `analyze/diff-profile.sh <baseline-run> <candidate-run>` | **Differential flame graph.** For each Speedscope profile (from `--with-runtime`), reports the methods whose share of CPU grew/shrank the most — the "which method got hotter" answer. Runs the differ in a `python:3-alpine` container (like `jqd`), so no host Python. |
+| `analyze/trend-report.sh --scenario ID --metric M` | **Cross-commit trend.** Shows a metric per scenario across commits from `perf-history/<lab>.jsonl` (auto-appended after every measure by `record-trend.sh`; skip with `PERFLAB_RECORD_TREND=0`). |
+
+**Per-request efficiency** is captured automatically into every `facts.json` as
+`efficiency.cpu_ms_per_request`, `.alloc_bytes_per_request`, `.gc_pause_ms_per_request`
+and `.db_ms_per_request` (and shown on the Runtime board). It catches the regression
+absolute latency hides — *same p99, more CPU/allocations per request* — and is
+gate-able / comparable / trendable like any other observation.
+
+```bash
+PERFLAB_LAB=scenariolab ./harness/core/run/run-single.sh S00 60 --no-runtime
+PERFLAB_LAB=scenariolab ./harness/core/analyze/gate.sh artifacts/runs/<run>/scenarios/S00   # SLOs + regression, exit != 0 on fail
+PERFLAB_LAB=scenariolab ./harness/core/analyze/update-baseline.sh artifacts/runs/<run>/scenarios/S00
+PERFLAB_LAB=scenariolab PERFLAB_PROFILE=capacity PERFLAB_TARGET_RPS=800 ./harness/core/run/run-single.sh S00 40 --no-runtime
+PERFLAB_LAB=scenariolab ./harness/core/analyze/find-knee.sh artifacts/runs/<run>/scenarios/S00
+PERFLAB_LAB=scenariolab ./harness/core/analyze/trend-report.sh --scenario S00 --metric efficiency.cpu_ms_per_request
+```
+
 ## Runtime diagnostics
 
 Measurement and runtime capture are **separate runs** — diagnostic tools perturb

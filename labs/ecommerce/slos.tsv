@@ -1,0 +1,15 @@
+# Service-level objectives for the gate (harness/core/analyze/gate.sh).
+# TAB-separated. Columns: scenario  metric  op  threshold  (see the scenariolab
+# slos.tsv for the full format). "default" rows apply to every scenario; a
+# scenario's own row overrides the default for that metric.
+# These values are lab defaults -- tune them to your own targets.
+default	http.error_rate	max	0.02
+default	http.dropped_iterations	max	0
+default	efficiency.cpu_ms_per_request	max	60
+# Control product-list read.
+E00	http.latency.p99	max	400
+E00	http.requests_per_second	min	80
+# Login throughput (password hashing is deliberately CPU-heavy).
+E01	http.latency.p99	max	800
+# Product search (ILIKE): allowed a looser tail than the keyed reads.
+E05	http.latency.p99	max	1200
