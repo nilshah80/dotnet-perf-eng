@@ -154,9 +154,18 @@ json="$(awk \
      if (n==0 && gc_share>=0.3){ cand[++n]="gc-bound"; sc[n]=0.4+gc_share }
      if (n==0 && cpu_util>=0.6){ cand[++n]="cpu-bound"; sc[n]=0.3+cpu_util }
 
-     verdict="no-clear-bottleneck"; conf="low"; best=-1; bi=0;
-     for(i=1;i<=n;i++){ if(sc[i]>best){best=sc[i]; bi=i} }
-     if (bi>0) verdict=cand[bi];
+     # Rank by score (selection sort; n is tiny). The winner is the PRIMARY, but >=2 HARD
+     # saturations within 10% of the top are CONCURRENT bottlenecks -- report them together
+     # (composite verdict) and list every saturated resource, so an N+1 scenario saturating
+     # CPU AND the DB pool AND locks at once is not reduced to a single "cpu-bound".
+     for(i=1;i<=n;i++) ord[i]=i;
+     for(i=1;i<=n;i++){ mxj=i; for(j=i+1;j<=n;j++){ if(sc[ord[j]]>sc[ord[mxj]]) mxj=j } t2=ord[i]; ord[i]=ord[mxj]; ord[mxj]=t2 }
+     verdict="no-clear-bottleneck"; conf="low"; bi=(n>0?ord[1]:0); best=(n>0?sc[ord[1]]:0);
+     ncontrib=0; composite=""; satlist=""; contribjson="";
+     for(i=1;i<=n;i++){ satlist=satlist (i>1?", ":"") cand[ord[i]]; contribjson=contribjson (i>1?",":"") "\"" cand[ord[i]] "\"";
+       if(best>0 && sc[ord[i]] >= best*0.90){ ncontrib++; composite=composite (ncontrib>1?"+":"") cand[ord[i]] } }
+     concurrent=(n>=2 ? 1 : 0);
+     if (bi>0) verdict=(ncontrib>=2 ? composite : cand[ord[1]]);
 
      # any resource signal captured at all?
      any = (cpu_util>=0) || has(tpqpeak) || has(gcpause) || (lock_per_req>=0) || has(dbpending) || (db_share>=0);
@@ -178,21 +187,27 @@ json="$(awk \
      if (tpq_sat && !cpu_sat) notes[++nn]="thread-pool queue is high while CPU is NOT saturated -- classic sync-over-async / blocking-call starvation (threads parked, not busy).";
      if (verdict=="dependency-bound-db" && dbp_sat) notes[++nn]="most request time is DB AND the pool is saturated -- the DB dependency is the bottleneck via pool exhaustion.";
      if (verdict=="no-clear-bottleneck" && any) notes[++nn]="no resource crossed a saturation gate -- the system has headroom at this load (push RPS with a capacity profile to find the knee).";
+     if (concurrent) notes[++nn]=sprintf("%d resources saturated at once (%s) -- concurrent bottleneck; address them together, not just the top-scored one. See resources.* for each.", n, satlist);
 
-     # ----- reason line -----
-     if (verdict=="cpu-bound") reason=sprintf("CPU utilisation peaked at %.0f%% of %s core(s); ~%.0f%% of a typical request is on-CPU.", (cpu_util>=0?cpu_util*100:0), (has(cpucount)?sprintf("%d",cpucount+0):"?"), (cpu_share>=0?cpu_share*100:0));
-     else if (verdict=="threadpool-starved") reason=sprintf("thread-pool queue peaked at %.0f work items waiting for a worker thread.", tpqpeak+0);
-     else if (verdict=="lock-bound") reason=sprintf("~%.1f Monitor lock contention(s) per request (%.0f/s peak).", lock_per_req, (has(lockrate)?lockrate+0:0));
-     else if (verdict=="gc-bound") reason=sprintf("the GC paused ~%.0f%% of wall-clock (peak); ~%.0f%% of a request is GC pause.", (gcpause+0)*100, (gc_share>=0?gc_share*100:0));
-     else if (verdict=="db-pool-saturated") reason=sprintf("%.0f request(s) peak waiting for a pooled DB connection (used %.0f/%.0f).", dbpending+0, (has(dbused)?dbused+0:0), (has(dbmax)?dbmax+0:0));
-     else if (verdict=="dependency-bound-db") reason=sprintf("~%.0f%% of a typical request is spent in the database (pool not saturated -- it is DB execution time, not pool waiting).", db_share*100);
-     else if (verdict=="insufficient-data") reason="no runtime resource signals were captured (black-box run, or metrics missing) -- cannot classify.";
-     else reason="no resource crossed a saturation threshold at this load.";
+     # ----- reason line: describe the PRIMARY (top) resource; a composite verdict lists
+     # the concurrent ones as a prefix so nothing is hidden. -----
+     if (verdict=="insufficient-data") reason="no runtime resource signals were captured (black-box run, or metrics missing) -- cannot classify.";
+     else if (bi==0) reason="no resource crossed a saturation threshold at this load.";
+     else {
+       if (cand[bi]=="cpu-bound") reason=sprintf("CPU utilisation peaked at %.0f%% of %s core(s); ~%.0f%% of a typical request is on-CPU.", (cpu_util>=0?cpu_util*100:0), (has(cpucount)?sprintf("%d",cpucount+0):"?"), (cpu_share>=0?cpu_share*100:0));
+       else if (cand[bi]=="threadpool-starved") reason=sprintf("thread-pool queue peaked at %.0f work items waiting for a worker thread.", tpqpeak+0);
+       else if (cand[bi]=="lock-bound") reason=sprintf("~%.1f Monitor lock contention(s) per request (%.0f/s peak).", lock_per_req, (has(lockrate)?lockrate+0:0));
+       else if (cand[bi]=="gc-bound") reason=sprintf("the GC paused ~%.0f%% of wall-clock (peak); ~%.0f%% of a request is GC pause.", (gcpause+0)*100, (gc_share>=0?gc_share*100:0));
+       else if (cand[bi]=="db-pool-saturated") reason=sprintf("%.0f request(s) peak waiting for a pooled DB connection (used %.0f/%.0f).", dbpending+0, (has(dbused)?dbused+0:0), (has(dbmax)?dbmax+0:0));
+       else if (cand[bi]=="dependency-bound-db") reason=sprintf("~%.0f%% of a typical request is spent in the database (pool not saturated -- it is DB execution time, not pool waiting).", db_share*100);
+       else reason="";
+       if (concurrent) reason=sprintf("Concurrent saturation of %d resources (%s). Primary -> ", n, satlist) reason;
+     }
 
      # ----- emit JSON -----
      printf "{";
      printf "\"kind\":\"bottleneck\",\"runId\":\"%s\",\"scenarioId\":\"%s\",\"captureStatus\":\"%s\",", runid, scen, status;
-     printf "\"verdict\":\"%s\",\"confidence\":\"%s\",\"reason\":\"%s\",", verdict, conf, reason;
+     printf "\"verdict\":\"%s\",\"confidence\":\"%s\",\"concurrent\":%s,\"contributors\":[%s],\"reason\":\"%s\",", verdict, conf, (concurrent?"true":"false"), contribjson, reason;
      printf "\"resources\":{";
      printf "\"cpu\":{\"coresBusyPeak\":%s,\"cpuCount\":%s,\"utilizationPct\":%s,\"msPerRequest\":%s,\"latencySharePct\":%s,\"saturated\":%s},", jnum(cpubusy), (has(cpucount)?sprintf("%d",cpucount+0):"null"), jpct(cpu_util), jnum(effcpu), jpct(cpu_share), (cpu_sat?"true":"false");
      printf "\"threadPool\":{\"queuePeak\":%s,\"queueAvg\":%s,\"threadCountPeak\":%s,\"saturated\":%s},", jnum(tpqpeak), jnum(tpqavg), jnum(threadpeak), (tpq_sat?"true":"false");

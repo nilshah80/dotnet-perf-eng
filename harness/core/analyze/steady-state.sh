@@ -196,9 +196,10 @@ json="$(awk \
     # STAYS in-band through the next bucket, so a single lucky touch does not end warm-up
     # early. Mid/late out-of-band buckets are noise (reported as bucketsOutOfBand) and are
     # handled by the drift verdict, not folded into the trim.
-    onset=0;
-    for(b=0;b<B;b++){ if(inband[b] && (b+1>=B || inband[b+1])){ onset=b; break } onset=b+1 }
-    if(onset>=B) onset=B-1;
+    # Require a GENUINE two-in-a-row settling (b AND b+1 both in-band). The last bucket
+    # alone cannot be an onset -- there is no next bucket to confirm it stayed settled.
+    settled=0; onset=B;
+    for(b=0;b<B-1;b++){ if(inband[b] && inband[b+1]){ onset=b; settled=1; break } }
     cvR=cv(mr,t0,B); cvL=cv(m9,t0,B);
     driftR=drift(mr,t0,B); driftL=drift(m9,t0,B);
     # Fast endpoints: below the latency floor, a few ms of jitter is a large RELATIVE
@@ -206,10 +207,11 @@ json="$(awk \
     latDriftEff=(refL < latfloor ? 0 : driftL);
     wR=0;wL=0; for(b=0;b<B;b++){ wR+=mr[b]; wL+=m9[b] } wR/=B; wL/=B;
     eR=0;eL=0;ec=0; for(b=onset;b<B;b++){ eR+=mr[b]; eL+=m9[b]; ec++ } eR=(ec>0?eR/ec:0); eL=(ec>0?eL/ec:0);
-    trim=onset*width; ofrac=onset/B;
-    # steady = no systematic trend in throughput OR latency; warming = settled but late.
+    trim=(settled?onset*width:0); ofrac=(settled?onset/B:1);
+    # steady = no systematic trend AND a real 2-bucket settling; warming = settled but
+    # late; NO settling pair => the run never reached steady state, whatever the drift.
     steadyTail=(abs(driftR)<=tdr && abs(latDriftEff)<=ldr);
-    if(!steadyTail) verdict="unsteady"; else if(ofrac<=wfrac) verdict="steady"; else verdict="warming";
+    if(!steadyTail || !settled) verdict="unsteady"; else if(ofrac<=wfrac) verdict="steady"; else verdict="warming";
     skewR=pct(wR,eR); skewL=pct(wL,eL);
     printf "{";
     printf "\"kind\":\"steady-state\",\"runId\":\"%s\",\"scenarioId\":\"%s\",\"profile\":\"%s\",", runid, scen, prof;
@@ -217,7 +219,7 @@ json="$(awk \
     printf "\"clientLatencyCoupling\":\"%s\",", (prof=="arrival"?"open-loop: offered rate pinned; throughput does NOT track client latency":"closed-loop: throughput tracks client MEAN latency (fixed VUs), not the p99 tail");
     printf "\"certifies\":\"server-side steady state (windowed throughput + server p99); client-side p99 TAIL steadiness is NOT independently verified (k6 client percentiles are cumulative)\",";
     printf "\"verdict\":\"%s\",\"windowSeconds\":%d,\"buckets\":%d,\"bucketWidthSeconds\":%d,", verdict, window, B, width;
-    printf "\"warmup\":{\"onsetBucket\":%d,\"fraction\":%.3f,\"recommendedTrimSeconds\":%d,\"bucketsOutOfBand\":%d},", onset, ofrac, trim, oob;
+    printf "\"warmup\":{\"onsetBucket\":%s,\"settled\":%s,\"fraction\":%.3f,\"recommendedTrimSeconds\":%d,\"bucketsOutOfBand\":%d},", (settled?sprintf("%d",onset):"null"), (settled?"true":"false"), ofrac, trim, oob;
     printf "\"tail\":{\"throughputDriftPerBucket\":%.4f,\"latencyDriftPerBucket\":%.4f,\"throughputCv\":%.4f,\"latencyCv\":%.4f},", driftR, driftL, cvR, cvL;
     printf "\"thresholds\":{\"throughputDrift\":%.3f,\"latencyDrift\":%.3f,\"latencyFloorMs\":%.1f,\"warmupFraction\":%.3f,\"warmupTol\":%.3f},", tdr, ldr, latfloor, wfrac, wtol;
     printf "\"wholeWindow\":{\"servedRps\":%.2f,\"serverP99Ms\":%.2f},", wR, wL;
@@ -236,37 +238,58 @@ printf '%s\n' "${json}" > "${out}"
 # NOT itself a p99. Report the whole-window and steady-region (onset..end) p99/throughput
 # as TRUE single windowed quantiles (histogram_quantile over one rate window), and base
 # the skew on those.
-onset_b="$(jqd -r '.warmup.onsetBucket' < "${out}" 2>/dev/null || echo 0)"
-# Exact trim/steady lengths from the tiling endpoints (not a fixed floor(window/B),
-# which #3 showed drifts by several seconds over the run).
-trim_exact=$(( onset_b * window / B ))
-steady_secs=$(( window - trim_exact )); (( steady_secs < 8 )) && steady_secs=$(( window / B ))
+sverdict="$(jqd -r '.verdict' < "${out}" 2>/dev/null || echo "")"
+settled_f="$(jqd -r '.warmup.settled' < "${out}" 2>/dev/null || echo false)"
+onset_b="$(jqd -r '.warmup.onsetBucket // 0' < "${out}" 2>/dev/null || echo 0)"
+# The whole-window numbers are always meaningful; compute them as TRUE single windowed
+# quantiles (histogram_quantile over one rate window).
 w_rps="$(prom_instant "sum(rate(http_server_request_duration_seconds_count${sel}[${window}s]))" "${end}")"
 w_p99="$(prom_instant "1000*histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket${sel}[${window}s])))" "${end}")"
-s_rps="$(prom_instant "sum(rate(http_server_request_duration_seconds_count${sel}[${steady_secs}s]))" "${end}")"
-s_p99="$(prom_instant "1000*histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket${sel}[${steady_secs}s])))" "${end}")"
-if [[ -n "${w_rps}" && -n "${w_p99}" && -n "${s_rps}" && -n "${s_p99}" && "${w_p99}" != "NaN" && "${s_p99}" != "NaN" ]]; then
-  patched="$(jqd --argjson wr "${w_rps}" --argjson wp "${w_p99}" --argjson sr "${s_rps}" --argjson sp "${s_p99}" --argjson trim "${trim_exact}" '
-    .warmup.recommendedTrimSeconds=$trim
-    | .wholeWindow={servedRps:($wr*100|round/100),serverP99Ms:($wp*100|round/100)}
-    | .steadyWindow={servedRps:($sr*100|round/100),serverP99Ms:($sp*100|round/100)}
-    | .skewPct={servedRps:(if $sr!=0 then (($wr-$sr)/$sr*10000|round/100) else 0 end),
-                serverP99:(if $sp!=0 then (($wp-$sp)/$sp*10000|round/100) else 0 end)}' < "${out}" 2>/dev/null || cat "${out}")"
-  [[ -n "${patched}" ]] && printf '%s\n' "${patched}" > "${out}"
+if [[ "${settled_f}" == "true" && ( "${sverdict}" == "steady" || "${sverdict}" == "warming" ) ]]; then
+  # Settled: report the steady region (onset..end), exact trim from the tiling endpoint.
+  trim_exact=$(( onset_b * window / B ))
+  steady_secs=$(( window - trim_exact )); (( steady_secs < 8 )) && steady_secs=$(( window / B ))
+  s_rps="$(prom_instant "sum(rate(http_server_request_duration_seconds_count${sel}[${steady_secs}s]))" "${end}")"
+  s_p99="$(prom_instant "1000*histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket${sel}[${steady_secs}s])))" "${end}")"
+  if [[ -n "${w_rps}" && -n "${w_p99}" && -n "${s_rps}" && -n "${s_p99}" && "${w_p99}" != "NaN" && "${s_p99}" != "NaN" ]]; then
+    patched="$(jqd --argjson wr "${w_rps}" --argjson wp "${w_p99}" --argjson sr "${s_rps}" --argjson sp "${s_p99}" --argjson trim "${trim_exact}" '
+      .warmup.recommendedTrimSeconds=$trim
+      | .wholeWindow={servedRps:($wr*100|round/100),serverP99Ms:($wp*100|round/100)}
+      | .steadyWindow={servedRps:($sr*100|round/100),serverP99Ms:($sp*100|round/100)}
+      | .skewPct={servedRps:(if $sr!=0 then (($wr-$sr)/$sr*10000|round/100) else 0 end),
+                  serverP99:(if $sp!=0 then (($wp-$sp)/$sp*10000|round/100) else 0 end)}' < "${out}" 2>/dev/null || cat "${out}")"
+    [[ -n "${patched}" ]] && printf '%s\n' "${patched}" > "${out}"
+  fi
+else
+  # UNSTEADY / never-settled: there is NO steady sub-window, so do not report one or a
+  # trim. Keep the whole-window numbers for reference; null the steady fields.
+  if [[ -n "${w_rps}" && -n "${w_p99}" && "${w_p99}" != "NaN" ]]; then
+    patched="$(jqd --argjson wr "${w_rps}" --argjson wp "${w_p99}" '
+      .warmup.recommendedTrimSeconds=null
+      | .wholeWindow={servedRps:($wr*100|round/100),serverP99Ms:($wp*100|round/100)}
+      | .steadyWindow=null | .skewPct=null' < "${out}" 2>/dev/null || cat "${out}")"
+    [[ -n "${patched}" ]] && printf '%s\n' "${patched}" > "${out}"
+  fi
 fi
 
 compact="$(jqd -c '{verdict,recommendedTrimSeconds:.warmup.recommendedTrimSeconds,basis:"server-side windowed",serverP99SkewPct:.skewPct.serverP99,runId,scenarioId}' < "${out}" 2>/dev/null || echo '{}')"
 stamp_facts "${compact}"
 
 verdict="$(jqd -r '.verdict' < "${out}" 2>/dev/null || echo "?")"
-read -r trim ofrac dR dL skew oob < <(jqd -r '[.warmup.recommendedTrimSeconds,.warmup.fraction,.tail.throughputDriftPerBucket,.tail.latencyDriftPerBucket,.skewPct.serverP99,.warmup.bucketsOutOfBand]|@tsv' < "${out}" 2>/dev/null || echo "0 0 0 0 0 0")
+# Coalesce the now-nullable trim/skew to a token so an empty @tsv field can't shift the
+# rest under the default IFS.
+read -r trim ofrac dR dL skew oob < <(jqd -r '[(.warmup.recommendedTrimSeconds // "n/a"),.warmup.fraction,.tail.throughputDriftPerBucket,.tail.latencyDriftPerBucket,(.skewPct.serverP99 // "n/a"),.warmup.bucketsOutOfBand]|@tsv' < "${out}" 2>/dev/null || echo "n/a 0 0 0 n/a 0")
 oobnote=""; [[ "${oob:-0}" != "0" ]] && oobnote=" (${oob}/${B} buckets out-of-band -- noise, see CV)"
 echo "Steady-state for ${scenario} (run ${run_id}, profile ${profile:-steady})  [server-side windowed, ${B}x${width}s buckets]"
 case "${verdict}" in
   steady)  echo "  verdict:  STEADY -- no tail trend (throughput drift=${dR}/bucket, server-p99 drift=${dL}/bucket); warm-up ~${trim}s (${ofrac} of the window)${oobnote}." ;;
   warming) echo "  verdict:  WARMING -- settled late: warm-up ~${trim}s (${ofrac} of the window). Trim the first ${trim}s or lengthen the run so steady state dominates." >&2 ;;
-  unsteady)echo "  verdict:  UNSTEADY -- the tail is still trending (throughput drift=${dR}/bucket, server-p99 drift=${dL}/bucket); the run never reached, or is drifting away from, steady state. Cross-check analyze-trends.sh for a leak/degradation." >&2 ;;
+  unsteady)echo "  verdict:  UNSTEADY -- did not reach steady state (throughput drift=${dR}/bucket, server-p99 drift=${dL}/bucket; a drifting tail and/or no 2-bucket settling). No steady sub-window. Cross-check analyze-trends.sh for a leak/degradation." >&2 ;;
   *)       echo "  verdict:  ${verdict}" >&2 ;;
 esac
-echo "  skew:     server p99 over the whole window is ${skew}% vs the steady region (positive = warm-up inflated the reported number)."
+if [[ "${skew}" != "n/a" ]]; then
+  echo "  skew:     server p99 over the whole window is ${skew}% vs the steady region (positive = warm-up inflated the reported number)."
+else
+  echo "  window:   no steady sub-window (the run never settled) -- no trim or steady-region skew reported."
+fi
 echo "  wrote ${out} (verdict also stamped onto facts.json)"

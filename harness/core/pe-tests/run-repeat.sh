@@ -109,9 +109,17 @@ cat "${facts_files[@]}" | jqd -s --arg scen "${scenario_id}" --arg repId "${rep_
 # can be steady-gated (gate.sh --require-steady reads .steadyState.verdict). Each rep's
 # run-scenario stamped its own facts.steadyState; the aggregate is "steady" ONLY if
 # EVERY included rep was steady -- one non-steady rep makes the repeat non-steady.
+# Per-rep provenance filter, hoisted to a variable so the "$(...)" below carries only
+# simple double-quoted expansions (a single-quoted jq filter WITH inner "" quotes inside
+# the command substitution mis-parses in bash).
+_rep_filter='(.telemetryRunId // .runId // "") as $own | (.scenarioId // "") as $scen | if ($own != "" and (.steadyState.runId // "") == $own and (.steadyState.scenarioId // "") == $scen) then (.steadyState.verdict // "missing") else "unverified" end'
 rep_verdicts=()
 for ff in "${facts_files[@]}"; do
-  rep_verdicts+=("$(jqd -r '.steadyState.verdict // "missing"' < "${ff}" 2>/dev/null || echo missing)")
+  # Trust a rep's verdict ONLY if that rep's stamp belongs to that rep (runId+scenarioId
+  # match the rep's own facts). A mismatched/copied stamp could otherwise launder a bogus
+  # "steady" into the aggregate; it counts as "unverified" (not steady), so one bad rep
+  # makes the whole repeat non-steady.
+  rep_verdicts+=("$(jqd -r "${_rep_filter}" < "${ff}" 2>/dev/null || echo missing)")
 done
 agg_steady="steady"
 for v in "${rep_verdicts[@]}"; do [[ "${v}" == "steady" ]] || { agg_steady="unsteady"; break; }; done

@@ -25,19 +25,19 @@ the only thing the AI phase reads.
 
 ```mermaid
 flowchart TD
-    LG["Load generator<br/>k6 (default) or wrk<br/>+ scenario runner"] --> API["ASP.NET Core API<br/>.NET 10"]
+    LG["Load generator<br/>k6 default or wrk<br/>plus scenario runner"] --> API["ASP.NET Core API<br/>.NET 10"]
     API --> PG[("PostgreSQL")]
     API -. scenariolab .-> REDIS[("Redis")]
     API -. scenariolab .-> RABBIT[("RabbitMQ")]
-    RABBIT --> WORKER["Order worker<br/>.NET 10 · scenariolab"]
+    RABBIT --> WORKER["Order worker<br/>.NET 10 / scenariolab"]
 
-    API -- OTLP --> LGTM["Grafana OTEL-LGTM<br/>Prometheus · Loki · Tempo · Pyroscope"]
+    API -- OTLP --> LGTM["Grafana OTEL-LGTM<br/>Prometheus / Loki / Tempo / Pyroscope"]
     WORKER -- OTLP --> LGTM
     API -- diagnostic socket --> MON["dotnet-monitor"]
     WORKER -- diagnostic socket --> MON
     MON --> RT["nettrace / gcdump / stacks / dump"]
 
-    LG --> EV["Evidence package<br/>artifacts/runs/&lt;run-id&gt;"]
+    LG --> EV["Evidence package<br/>artifacts/runs/run-id"]
     LGTM --> EV
     PG --> EV
     REDIS --> EV
@@ -47,7 +47,7 @@ flowchart TD
 
     EV --> CLAUDE["Claude Code<br/>read-only structured diagnosis"]
     CLAUDE --> GATE{{"Human review gate"}}
-    GATE --> FIX["Interactive fix<br/>claude-fix.sh — the only editor"]
+    GATE --> FIX["Interactive fix<br/>claude-fix.sh - the only editor"]
     FIX --> VAL["Re-measure:<br/>same workload + mechanism gate"]
 ```
 
