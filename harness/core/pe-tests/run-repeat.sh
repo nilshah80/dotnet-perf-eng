@@ -105,6 +105,35 @@ cat "${facts_files[@]}" | jqd -s --arg scen "${scenario_id}" --arg repId "${rep_
      status:"captured", includedReps:$inc, excludedReps:$excl, reps:$inc,
      metrics:($names | map({(.): stats($byname[.] // [])}) | add)}' > "${rep_dir}/stats.json"
 
+# Aggregate the reps' steady-state verdicts onto stats.json so a repeat-stats candidate
+# can be steady-gated (gate.sh --require-steady reads .steadyState.verdict). Each rep's
+# run-scenario stamped its own facts.steadyState; the aggregate is "steady" ONLY if
+# EVERY included rep was steady -- one non-steady rep makes the repeat non-steady.
+# Per-rep provenance filter, hoisted to a variable so the "$(...)" below carries only
+# simple double-quoted expansions (a single-quoted jq filter WITH inner "" quotes inside
+# the command substitution mis-parses in bash).
+_rep_filter='(.telemetryRunId // .runId // "") as $own | (.scenarioId // "") as $scen | if ($own != "" and (.steadyState.runId // "") == $own and (.steadyState.scenarioId // "") == $scen) then (.steadyState.verdict // "missing") else "unverified" end'
+rep_verdicts=()
+for ff in "${facts_files[@]}"; do
+  # Trust a rep's verdict ONLY if that rep's stamp belongs to that rep (runId+scenarioId
+  # match the rep's own facts). A mismatched/copied stamp could otherwise launder a bogus
+  # "steady" into the aggregate; it counts as "unverified" (not steady), so one bad rep
+  # makes the whole repeat non-steady.
+  rep_verdicts+=("$(jqd -r "${_rep_filter}" < "${ff}" 2>/dev/null || echo missing)")
+done
+agg_steady="steady"
+for v in "${rep_verdicts[@]}"; do [[ "${v}" == "steady" ]] || { agg_steady="unsteady"; break; }; done
+verdicts_json="$(printf '%s\n' "${rep_verdicts[@]}" | jqd -Rn '[inputs]' 2>/dev/null || echo '[]')"
+# Carry runId+scenarioId INTO the stamp (from stats.json's own fields) so gate.sh's
+# provenance check accepts a repeat candidate or a promoted repeat baseline -- without
+# them the embedded-id check rejects every repeat.
+if jqd --arg agg "${agg_steady}" --argjson reps "${verdicts_json}" \
+     '.steadyState={verdict:$agg, reps:$reps, runId:(.runId // ""), scenarioId:(.scenarioId // "")}' < "${rep_dir}/stats.json" > "${rep_dir}/stats.json.tmp" 2>/dev/null; then
+  mv "${rep_dir}/stats.json.tmp" "${rep_dir}/stats.json"
+else
+  rm -f "${rep_dir}/stats.json.tmp"
+fi
+
 echo; echo "Repeat stats: ${rep_dir}/stats.json"
 jqd -r '.metrics | to_entries[] | "  \(.key): median=\(.value.median) mean=\(.value.mean) cv=\(.value.cv) (n=\(.value.n))"' \
   < "${rep_dir}/stats.json" 2>/dev/null || true

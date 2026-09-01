@@ -25,19 +25,19 @@ the only thing the AI phase reads.
 
 ```mermaid
 flowchart TD
-    LG["Load generator<br/>k6 (default) or wrk<br/>+ scenario runner"] --> API["ASP.NET Core API<br/>.NET 10"]
+    LG["Load generator<br/>k6 default or wrk<br/>plus scenario runner"] --> API["ASP.NET Core API<br/>.NET 10"]
     API --> PG[("PostgreSQL")]
     API -. scenariolab .-> REDIS[("Redis")]
     API -. scenariolab .-> RABBIT[("RabbitMQ")]
-    RABBIT --> WORKER["Order worker<br/>.NET 10 · scenariolab"]
+    RABBIT --> WORKER["Order worker<br/>.NET 10 / scenariolab"]
 
-    API -- OTLP --> LGTM["Grafana OTEL-LGTM<br/>Prometheus · Loki · Tempo · Pyroscope"]
+    API -- OTLP --> LGTM["Grafana OTEL-LGTM<br/>Prometheus / Loki / Tempo / Pyroscope"]
     WORKER -- OTLP --> LGTM
     API -- diagnostic socket --> MON["dotnet-monitor"]
     WORKER -- diagnostic socket --> MON
     MON --> RT["nettrace / gcdump / stacks / dump"]
 
-    LG --> EV["Evidence package<br/>artifacts/runs/&lt;run-id&gt;"]
+    LG --> EV["Evidence package<br/>artifacts/runs/run-id"]
     LGTM --> EV
     PG --> EV
     REDIS --> EV
@@ -47,7 +47,7 @@ flowchart TD
 
     EV --> CLAUDE["Claude Code<br/>read-only structured diagnosis"]
     CLAUDE --> GATE{{"Human review gate"}}
-    GATE --> FIX["Interactive fix<br/>claude-fix.sh — the only editor"]
+    GATE --> FIX["Interactive fix<br/>claude-fix.sh - the only editor"]
     FIX --> VAL["Re-measure:<br/>same workload + mechanism gate"]
 ```
 
@@ -70,7 +70,7 @@ harness/                          # reusable toolkit (never edited per project)
 │   ├── run/                     # run-single/multiple/all wrappers + run-scenario(s) orchestrators
 │   ├── pe-tests/                # perf-engineering runners: run-sweep/mix/repeat/data-scale/fault
 │   ├── capture/                 # capture-evidence + capture/normalize-runtime (the evidence pipeline)
-│   ├── analyze/                 # analyze-trends (leak/trend), compare-runs (A/B regression)
+│   ├── analyze/                 # trends/leak, A/B regression, gate (+steady), capacity knee, steady-state, USE bottleneck, CPU + heap diff, cross-commit trend
 │   └── lib/                     # common.sh (shared helpers) + lab-context.sh (lab-specific init)
 ├── adapters/
 │   ├── runtime/dotnet/           # metrics.sh, capture.sh, normalize.sh, versions.sh, evidence-extra.sh, diagnostics/Dockerfile
@@ -461,13 +461,16 @@ These turn the lab from "run and inspect" into a guardrail that **decides**.
 
 | Tool | What it does |
 |---|---|
-| `analyze/gate.sh <run> [--threshold R]` | **Performance gate.** Judges a run against absolute SLOs from `labs/<lab>/slos.tsv` **and** a stored baseline (regression, via `compare-runs.sh`). Prints a verdict table and **exits non-zero** on any SLO breach or regression — drops straight into CI. Refuses a `status:"partial"`/unknown package by default (`--allow-partial` to override); a missing required SLO metric fails (`--allow-missing` to skip). Accepts a `facts.json` **or** a `run-repeat` `stats.json` (SLOs are checked against the median). |
+| `analyze/gate.sh <run> [--threshold R]` | **Performance gate.** Judges a run against absolute SLOs from `labs/<lab>/slos.tsv` **and** a stored baseline (regression, via `compare-runs.sh`). Prints a verdict table and **exits non-zero** on any SLO breach or regression — drops straight into CI. Refuses a `status:"partial"`/unknown package by default (`--allow-partial` to override); a missing required SLO metric fails (`--allow-missing` to skip). `--require-steady` additionally fails a run whose steady-state verdict is not `steady` (so a warm-up/drift-skewed number cannot pass) — this certifies **server-side** steady state, not client-p99 tail steadiness, and validates the stamp's embedded runId/scenario against the candidate and baseline. Accepts a `facts.json` **or** a `run-repeat` `stats.json` (SLOs are checked against the median). |
 | `analyze/update-baseline.sh <run>` | Promote a run to `labs/<lab>/baselines/<scenario>.json`. Commit it so future gates compare against it. |
 
 > **Significance-aware gating (repeat vs repeat).** `compare-runs.sh` only uses statistical significance when *both* sides carry per-metric spread (`n>1`), i.e. both are `run-repeat` `stats.json`. So for a significance-aware gate: baseline **and** candidate must be repeat runs — promote a `run-repeat` directory as the baseline, and gate a `run-repeat` candidate directory (`gate.sh` resolves `stats.json` and now covers `efficiency.*` too). A single `facts.json` candidate (`n=1`) against any baseline falls back to the relative `--threshold`.
 | `analyze/find-knee.sh <capacity-run>` | **Capacity knee from one continuous ramp.** Reads the k6 remote-write series of a `--profile capacity` (ramping-arrival-rate) run and reports the max sustained RPS before p99 breaches the SLO. Complements `run-sweep.sh` (discrete rate steps) with a single-run, client-observed knee → `analysis/capacity.json`. |
 | `analyze/diff-profile.sh <baseline-run> <candidate-run>` | **Differential flame graph.** For each Speedscope profile (from `--with-runtime`), reports the methods whose share of CPU grew/shrank the most — the "which method got hotter" answer. Runs the differ in a `python:3-alpine` container (like `jqd`), so no host Python. |
 | `analyze/trend-report.sh --scenario ID --metric M` | **Cross-commit trend.** Shows a metric per scenario across commits from `perf-history/<lab>.jsonl` (auto-appended after every measure by `record-trend.sh`; skip with `PERFLAB_RECORD_TREND=0`). |
+| `analyze/steady-state.sh <run>` | **Steady-state validity.** Every reported number assumes the window was in steady state, but the harness only does a fixed warm-up. It buckets the window and, per bucket, reads genuinely window-local **server-side** metrics — `rate()` of the request count and `histogram_quantile` over the request-duration histogram (k6's remote-write percentiles are cumulative and can't be windowed). The verdict is **drift-based** (a systematic tail trend, not spread), reporting whether it settled (`steady` / `warming` / `unsteady`), the warm-up to trim, and the whole-vs-steady skew → `analysis/steady-state.json`. **Scope:** it certifies **server-side** steady state; client-side **p99 tail** steadiness is *not* independently verified (k6 client percentiles are cumulative/not windowable) — in a closed-loop run throughput tracks the client *mean*, not the tail (`clientLatencyCoupling`, `certifies`). Auto-run after every measure (skip `PERFLAB_STEADY_STATE=0`); enforce with `gate.sh --require-steady`. |
+| `analyze/bottleneck.sh <run>` | **USE-method bottleneck classifier.** Decomposes a typical request into CPU / GC / DB / other time and combines it with per-resource saturation (thread-pool queue, DB-pool pending, GC-pause fraction, lock contention, CPU utilisation) to name the dominant bottleneck — `cpu-bound`, `threadpool-starved`, `gc-bound`, `lock-bound`, `db-pool-saturated`, `dependency-bound-db` — with a confidence and the evidence → `analysis/bottleneck.json`. A reproducible answer next to the AI phase's. Auto-run after every measure (skip `PERFLAB_BOTTLENECK=0`). |
+| `analyze/diff-gcdump.sh <run>` or `<base> <cand>` | **Differential heap (leak attribution).** The memory counterpart of `diff-profile`: diffs two `dotnet-gcdump report`s and lists the types that grew / shrank / appeared — the "which type grew" answer that turns `analyze-trends`'s *"the heap is growing"* into a cause. Retained bytes are `Object Bytes × Count` per row (bucketed rows list per-object size). One run dir diffs its own `before`/`after` gcdump (same process, bracketing the load); two run dirs compare cross-commit. Pure awk — no container. **Auto-run** by `normalize-runtime` whenever a gcdump before/after pair is present (a plain measure has no gcdump, so — unlike steady-state/bottleneck — it runs on a diagnostic capture, not every measure). |
 
 **Per-request efficiency** is captured automatically into every `facts.json` as
 `efficiency.cpu_ms_per_request`, `.alloc_bytes_per_request`, `.gc_pause_ms_per_request`
@@ -482,6 +485,12 @@ PERFLAB_LAB=scenariolab ./harness/core/analyze/update-baseline.sh artifacts/runs
 PERFLAB_LAB=scenariolab PERFLAB_PROFILE=capacity PERFLAB_TARGET_RPS=800 ./harness/core/run/run-single.sh S00 40 --no-runtime
 PERFLAB_LAB=scenariolab ./harness/core/analyze/find-knee.sh artifacts/runs/<run>/scenarios/S00
 PERFLAB_LAB=scenariolab ./harness/core/analyze/trend-report.sh --scenario S00 --metric efficiency.cpu_ms_per_request
+PERFLAB_LAB=scenariolab ./harness/core/analyze/gate.sh artifacts/runs/<run>/scenarios/S00 --require-steady   # SLOs + regression + steady-state
+PERFLAB_LAB=scenariolab ./harness/core/analyze/bottleneck.sh artifacts/runs/<run>/scenarios/S00              # what IS the bottleneck?
+# Leak attribution: capture a gcdump (brackets the load with before/after), then diff the two heaps.
+PERFLAB_LAB=scenariolab ./harness/core/capture/capture-runtime.sh artifacts/runs/<run>/scenarios/S04 gcdump 30
+PERFLAB_LAB=scenariolab ./harness/core/capture/normalize-runtime.sh artifacts/runs/<run>/scenarios/S04
+PERFLAB_LAB=scenariolab ./harness/core/analyze/diff-gcdump.sh artifacts/runs/<run>/scenarios/S04             # which type grew
 ```
 
 ## Runtime diagnostics
