@@ -16,6 +16,37 @@ mkdir -p "${artifact_dir}/benchmark"
 # shared and identical across labs.
 js="$(loadgen_script)"
 
+# --- Optional k6 -> Prometheus remote-write (MEASURE phase only) --------------
+# Streams the load generator's own throughput/latency/error metrics into the
+# lab's Prometheus so the Grafana SLO panels show the CLIENT-observed view next
+# to server-side signals -- the two diverge exactly when the system is saturating
+# (client sees queueing the server never records). Series carry run=$PERF_RUN_ID
+# (== the app's perf_run_id) so a dashboard filters both sources by one variable.
+#
+# Guarded by a Prometheus readiness probe: when the endpoint is unreachable -- a
+# remote black-box target with no local stack, or the stack still starting -- it
+# is skipped with a warning and NEVER fails the run. Disable with PERFLAB_K6_PROM_RW=0.
+# NB: k6 reserves the `scenario` tag (its executor name), so the perf scenario is
+# carried as perf_scenario.
+K6_RW_OUT=()
+k6_enable_prom_rw() {
+  [[ "${PERFLAB_K6_PROM_RW:-1}" == "0" ]] && return 0
+  local base="${PERFLAB_PROMETHEUS_URL:-}"
+  [[ -z "${base}" ]] && return 0
+  base="${base%/}"
+  if ! curl -fsS --max-time 2 "${base}/-/ready" >/dev/null 2>&1; then
+    echo "k6->Prometheus remote-write skipped: ${base}/-/ready not reachable." >&2
+    return 0
+  fi
+  export K6_PROMETHEUS_RW_SERVER_URL="${base}/api/v1/write"
+  export K6_PROMETHEUS_RW_TREND_STATS="${K6_PROMETHEUS_RW_TREND_STATS:-p(50),p(90),p(95),p(99),avg,max}"
+  K6_RW_OUT=(--out experimental-prometheus-rw
+    --tag "perf_scenario=${PERF_SCENARIO:-unknown}"
+    --tag "run=${PERF_RUN_ID:-unknown}"
+    --tag "testid=${PERF_RUN_ID:-unknown}")
+  echo "k6->Prometheus remote-write -> ${K6_PROMETHEUS_RW_SERVER_URL} (run=${PERF_RUN_ID:-unknown})"
+}
+
 case "${phase}" in
   warmup)
     k6 run --vus 16 --duration 10s \
@@ -36,6 +67,11 @@ case "${phase}" in
     # (--config carries the executor; the workload script stays untouched). The
     # DIAGNOSTIC phase always uses a steady load so a captured trace reflects a
     # stable state rather than a ramp.
+    # Client metrics stream to Prometheus for the measure phase only (the diagnostic
+    # phase is a separate perturbing load and must not pollute the SLO panels).
+    K6_RW_OUT=()
+    [[ "${phase}" == "measure" ]] && k6_enable_prom_rw
+
     if [[ "${phase}" == "measure" && "${profile}" != "steady" ]]; then
       # shellcheck disable=SC1091
       source "${HARNESS_ROOT}/adapters/loadgen/k6/profiles.sh"
@@ -44,11 +80,13 @@ case "${phase}" in
       echo "Load profile: ${profile} (executor recorded in benchmark/k6-profile.json)"
       k6 run --config "${cfg}" \
         --summary-export "${artifact_dir}/benchmark/${summary}" \
+        "${K6_RW_OUT[@]}" \
         --quiet --no-color "${js}" \
         > "${artifact_dir}/benchmark/${txt}"
     else
       k6 run --vus "${conns}" --duration "${dur}s" \
         --summary-export "${artifact_dir}/benchmark/${summary}" \
+        "${K6_RW_OUT[@]}" \
         --quiet --no-color "${js}" \
         > "${artifact_dir}/benchmark/${txt}"
     fi

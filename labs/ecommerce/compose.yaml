@@ -35,6 +35,14 @@ services:
     environment:
       TEMPO_EXTRA_ARGS: --query-frontend.mcp-server.enabled=true
       PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=6h --storage.tsdb.retention.size=512MB
+      # Land on the eCommerce overview board (was previously stock Grafana -- the
+      # ecommerce lab shipped no provisioned dashboards at all).
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/grafana/conf/provisioning/dashboards/custom/00-overview.json
+      # Merge an additive collector overlay (infra/observability/otelcol-extra.yaml)
+      # so postgres-exporter metrics land in the SAME Prometheus as the app's OTLP
+      # metrics. Harmless when the exporter is down (it is gated behind the "obs"
+      # compose profile), so default measurement runs stay perturbation-free.
+      OTELCOL_EXTRA_ARGS: --config=file:/otel-lgtm/otelcol-extra.yaml
     ports:
       - "127.0.0.1:3000:3000"
       - "127.0.0.1:3100:3100"
@@ -45,6 +53,12 @@ services:
       - "127.0.0.1:4040:4040"
     volumes:
       - lgtm-data:/data
+      # Provision the whole dashboards/ folder -- one JSON per focused board
+      # (overview, runtime, http, dependencies). Regenerate with
+      # harness/adapters/observability/grafana/generate-dashboards.py.
+      - ./infra/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/custom.yaml:ro
+      - ./infra/grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/custom:ro
+      - ./infra/observability/otelcol-extra.yaml:/otel-lgtm/otelcol-extra.yaml:ro
     mem_limit: 4g
 
   dotnet-monitor:
@@ -85,6 +99,9 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
       OTEL_METRIC_EXPORT_INTERVAL: 5000
+      # Trace-based exemplars link latency-histogram samples to the trace that
+      # produced them (Prometheus runs with --enable-feature=exemplar-storage).
+      OTEL_METRICS_EXEMPLAR_FILTER: trace_based
       OTEL_TRACES_SAMPLER: parentbased_traceidratio
       OTEL_TRACES_SAMPLER_ARG: ${PERFLAB_TRACE_SAMPLE_RATIO:-0.25}
       DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
@@ -117,6 +134,25 @@ services:
     volumes:
       - ../../source/dotnet/ecommerce:/workspace:ro
       - ../../artifacts:/artifacts
+
+  # --- Dependency metric exporter (opt-in live server-side dashboards) ---------
+  # Gated behind the "obs" profile so it NEVER starts during a default run.
+  # Enable live PostgreSQL panels by attaching it to the running stack:
+  #   docker compose -f labs/ecommerce/compose.yaml --profile obs up -d postgres-exporter
+  postgres-exporter:
+    profiles: ["obs"]
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: "postgresql://ecommerce:${POSTGRES_PASSWORD:-ecommerce}@postgres:5432/ecommerce?sslmode=disable&application_name=ecommerce-pg-exporter"
+    command: ["--collector.stat_statements", "--no-collector.wal"]
+    # No host port: the collector overlay scrapes it in-network at
+    # postgres-exporter:9187, so nothing needs the host binding (which would also
+    # collide with the scenariolab exporter when both obs stacks are up).
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 96m
+    restart: unless-stopped
 
 volumes:
   postgres-data:

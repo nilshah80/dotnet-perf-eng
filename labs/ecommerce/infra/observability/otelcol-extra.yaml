@@ -1,0 +1,29 @@
+# Additive OpenTelemetry Collector overlay for the ecommerce observability stack.
+#
+# Merged into grafana/otel-lgtm's built-in collector config at container start via
+#   OTELCOL_EXTRA_ARGS: --config=file:/otel-lgtm/otelcol-extra.yaml
+# The OTel Collector deep-merges every --config file, so this file only ADDS a
+# receiver + a metrics pipeline; the base otlp/app + runtime pipelines are
+# untouched. PostgreSQL server-side metrics then land in the SAME Prometheus as
+# the app's OTLP metrics, so Grafana shows them side by side.
+#
+# The ecommerce lab depends on PostgreSQL only (no Redis/RabbitMQ). postgres-exporter
+# runs only when the stack is brought up with the "obs" compose profile
+#   docker compose --profile obs up -d postgres-exporter
+# When it is down the target is simply "no data" -- nothing breaks and default
+# measurement runs stay perturbation-free.
+receivers:
+  prometheus/deps:
+    config:
+      scrape_configs:
+        - job_name: postgres
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["postgres-exporter:9187"]
+
+service:
+  pipelines:
+    metrics/deps:
+      receivers: [prometheus/deps]
+      processors: [batch]
+      exporters: [otlp_http/metrics]
