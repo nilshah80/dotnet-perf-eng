@@ -292,6 +292,42 @@ printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","loadGenerator":"%
   "$(json_escape "${load_gen}")" "$(cat "${obs_file}")" \
   > "${artifact_dir}/facts.json"
 
+# Per-request EFFICIENCY (derived facts): normalize resource use by throughput --
+# CPU-ms, allocated bytes, GC-pause-ms and dependency-ms per request over the
+# measure window. These catch the regression absolute latency hides ("same p99,
+# 2x the CPU/allocations per request") and are gate-able / comparable / trendable
+# like any other observation. Best-effort: if Prometheus is unreachable (a
+# black-box remote run) or the app emitted no requests, the queries no-op and
+# facts.json is left unchanged. Rates cancel the window, so cpu-seconds/request *
+# 1000 = cpu-ms/request, independent of run length.
+eff_window=$(( end_epoch - start_epoch )); (( eff_window < 1 )) && eff_window=1
+eff_si="${service_instance_regex:-.+}"
+eff_reqrate="sum(rate(http_server_request_duration_seconds_count{service_instance_id=~\"${eff_si}\",http_route!~\"/health.*|\"}[${eff_window}s]))"
+prom_scalar() {
+  curl -fsS -G "${prometheus_url}/api/v1/query" \
+    --data-urlencode "query=$1" --data-urlencode "time=${end_epoch}" 2>/dev/null \
+    | jqd -r '.data.result[0].value[1] // empty' 2>/dev/null || true
+}
+eff_obs=()
+add_eff() { # <name> <unit> <numerator-promql>
+  local v; v="$(prom_scalar "$3 / ${eff_reqrate}")"
+  [[ -n "${v}" && "${v}" != "NaN" && "${v}" != "+Inf" && "${v}" != "-Inf" ]] || return 0
+  eff_obs+=("{\"name\":\"$1\",\"value\":${v},\"unit\":\"$2\",\"source\":\"prometheus (derived)\"}")
+}
+add_eff "efficiency.cpu_ms_per_request"    "ms"   "1000 * sum(rate(dotnet_process_cpu_time_seconds_total{service_instance_id=~\"${eff_si}\"}[${eff_window}s]))"
+add_eff "efficiency.alloc_bytes_per_request" "byte" "sum(rate(dotnet_gc_heap_allocated_bytes_total{service_instance_id=~\"${eff_si}\"}[${eff_window}s]))"
+add_eff "efficiency.gc_pause_ms_per_request"  "ms"   "1000 * sum(rate(dotnet_gc_pause_time_seconds_total{service_instance_id=~\"${eff_si}\"}[${eff_window}s]))"
+add_eff "efficiency.db_ms_per_request"        "ms"   "1000 * sum(rate(db_client_operation_duration_seconds_sum{service_instance_id=~\"${eff_si}\"}[${eff_window}s]))"
+if (( ${#eff_obs[@]} > 0 )); then
+  eff_json="[$(IFS=,; echo "${eff_obs[*]}")]"
+  if jqd --argjson eff "${eff_json}" '.observations += $eff' < "${artifact_dir}/facts.json" > "${artifact_dir}/facts.json.tmp" 2>/dev/null; then
+    mv "${artifact_dir}/facts.json.tmp" "${artifact_dir}/facts.json"
+    echo "Added ${#eff_obs[@]} per-request efficiency observation(s) to facts.json." >&2
+  else
+    rm -f "${artifact_dir}/facts.json.tmp"
+  fi
+fi
+
 # Finalize the manifest. Status is "partial" when a required backend capture failed,
 # so an incomplete package is not mistaken for a clean one;
 # measurementStartedEpoch/EndedEpoch record the exact window the telemetry above was
@@ -324,4 +360,14 @@ else
 fi
 if [[ "${capture_incomplete}" -eq 1 ]]; then
   echo "NOTE: package finalized status:\"partial\" -- a required capture failed or a prior partial/fault outcome is sticky (see WARNINGs above)." >&2
+fi
+
+# Stamp the capture status onto facts.json too, so a single facts.json is
+# self-describing and gate.sh can refuse a partial package (whose available
+# metrics might meet SLOs only because a required capture failed) even when it is
+# handed the facts file directly, without the sibling manifest.
+if jqd --arg st "${capture_status}" '.status=$st' < "${artifact_dir}/facts.json" > "${artifact_dir}/facts.json.tmp" 2>/dev/null; then
+  mv "${artifact_dir}/facts.json.tmp" "${artifact_dir}/facts.json"
+else
+  rm -f "${artifact_dir}/facts.json.tmp"
 fi

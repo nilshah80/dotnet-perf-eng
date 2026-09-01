@@ -48,6 +48,7 @@ echo "Repeat ${rep_id}: ${scenario_id} x${repeats}, ${duration}s each, profile $
 # reseed the DB before each rep (independent samples, at the cost of a bring-up per
 # rep). Read scenarios need no reseed.
 facts_files=()
+excluded_reps=0
 for ((k = 1; k <= repeats; k++)); do
   echo; echo "[repeat] rep ${k}/${repeats} ..."
   d="${rep_dir}/reps/rep-$(printf '%02d' "${k}")"
@@ -59,15 +60,19 @@ for ((k = 1; k <= repeats; k++)); do
   rep_rc=0
   PERFLAB_ARTIFACT_DIR="${d}" PERFLAB_PACKAGE_RUN_ID="${rep_id}-rep${k}" PERFLAB_TELEMETRY_RUN_ID="${rep_id}-rep${k}" \
     "${harness_core_dir}/run/run-scenario.sh" "${scenario_id}" "${duration}" >/dev/null 2>&1 || rep_rc=$?
-  # Only a clean rep contributes to the statistics: a rep that errored (even if it
-  # left a partial facts.json with rps~0) would otherwise skew median/stddev/CV.
-  if [[ "${rep_rc}" -eq 0 && -s "${d}/facts.json" ]]; then
+  # Only a clean, fully-CAPTURED rep contributes: a rep that errored, or that
+  # finalized status:"partial" (a required capture failed -- run-scenario still
+  # exits 0), would otherwise skew median/stddev/CV and let partial evidence into a
+  # baseline. So the aggregate below is provably from captured reps only.
+  rep_status="unknown"; [[ -s "${d}/facts.json" ]] && rep_status="$(jqd -r '.status // "unknown"' < "${d}/facts.json" 2>/dev/null || echo unknown)"
+  if [[ "${rep_rc}" -eq 0 && -s "${d}/facts.json" && "${rep_status}" == "captured" ]]; then
     facts_files+=("${d}/facts.json")
   else
-    echo "[repeat] rep ${k} excluded from the statistics (exit ${rep_rc} or no facts)." >&2
+    excluded_reps=$((excluded_reps + 1))
+    echo "[repeat] rep ${k} EXCLUDED from the statistics (exit ${rep_rc}, status '${rep_status}', or no facts)." >&2
   fi
 done
-[[ "${#facts_files[@]}" -gt 0 ]] || { echo "No successful reps produced facts." >&2; exit 1; }
+[[ "${#facts_files[@]}" -gt 0 ]] || { echo "No fully-captured reps produced facts (${excluded_reps} excluded)." >&2; exit 1; }
 # stddev/CV need >=2 samples to mean anything; with one rep they are 0 and would
 # read as "perfectly consistent". Report the median/mean but flag the spread as
 # undefined so a single-rep result is not mistaken for a trustworthy one.
@@ -75,7 +80,7 @@ if [[ "${#facts_files[@]}" -lt 2 ]]; then
   echo "WARNING: only ${#facts_files[@]} rep succeeded (of ${repeats} requested); stddev/CV are undefined with <2 samples -- median/mean are reported but treat the spread as unknown." >&2
 fi
 
-cat "${facts_files[@]}" | jqd -s --arg scen "${scenario_id}" --arg repId "${rep_id}" --arg prof "${PERFLAB_PROFILE:-steady}" '
+cat "${facts_files[@]}" | jqd -s --arg scen "${scenario_id}" --arg repId "${rep_id}" --arg prof "${PERFLAB_PROFILE:-steady}" --argjson excl "${excluded_reps}" '
   def med($a): ($a|sort) as $s | ($s|length) as $n
      | if $n==0 then null elif $n%2==1 then $s[($n/2|floor)] else (($s[$n/2-1]+$s[$n/2])/2) end;
   def stats($a): ($a|length) as $n
@@ -86,10 +91,18 @@ cat "${facts_files[@]}" | jqd -s --arg scen "${scenario_id}" --arg repId "${rep_
        | {n:$n, mean:($mean*1000|round/1000), median:(med($a)*1000|round/1000), min:($a|min), max:($a|max),
           stddev:(if $sd==null then null else ($sd*1000|round/1000) end),
           cv:(if $sd==null then null elif $mean==0 then 0 else ($sd/($mean|fabs)*1000|round/1000) end)} end;
-  ["http.requests_per_second","http.latency.p50","http.latency.p90","http.latency.p99","http.error_rate"] as $names
-  | (reduce .[] as $f ({}; reduce ($f.observations[]?) as $o (.; if ($o.value|type)=="number" then .[$o.name] += [$o.value] else . end))) as $byname
+  # Aggregate EVERY numeric observation, not a hardcoded HTTP subset, so the
+  # derived efficiency.* metrics (cpu/alloc/gc/db per request) land in stats.json
+  # too -- otherwise a significance-aware baseline promoted from a repeat run can
+  # never catch a CPU/allocation/GC/dependency-cost regression (compare-runs only
+  # compares keys present in both sides).
+  (reduce .[] as $f ({}; reduce ($f.observations[]?) as $o (.; if ($o.value|type)=="number" then .[$o.name] += [$o.value] else . end))) as $byname
+  | ($byname | keys) as $names
+  | (($byname["http.requests_per_second"]//[])|length) as $inc
   | {runId:$repId,kind:"repeat-stats",scenarioId:$scen,profile:$prof,
-     reps:(($byname["http.requests_per_second"]//[])|length),
+     # Only fully-captured reps are aggregated, so the aggregate is "captured";
+     # excludedReps records how many errored/partial reps were dropped.
+     status:"captured", includedReps:$inc, excludedReps:$excl, reps:$inc,
      metrics:($names | map({(.): stats($byname[.] // [])}) | add)}' > "${rep_dir}/stats.json"
 
 echo; echo "Repeat stats: ${rep_dir}/stats.json"

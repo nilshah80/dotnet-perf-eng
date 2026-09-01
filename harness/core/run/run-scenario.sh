@@ -271,6 +271,13 @@ export PERFLAB_MEASURE_START_EPOCH="${measure_started_epoch}" PERFLAB_MEASURE_EN
 # any run (short windows self-mark as low-confidence).
 "${harness_core_dir}/analyze/analyze-trends.sh" "${artifact_dir}" || true
 
+# Record this run's key facts to the committed cross-commit perf history
+# (perf-history/<lab>.jsonl) so trend-report.sh can show the metric per scenario
+# over time. Best-effort and skippable (PERFLAB_RECORD_TREND=0); never fails the run.
+if [[ "${PERFLAB_RECORD_TREND:-1}" != "0" ]]; then
+  "${harness_core_dir}/analyze/record-trend.sh" "${artifact_dir}" || true
+fi
+
 echo "Evidence package: ${artifact_dir}"
 # Runtime diagnostics (nettrace/gcdump/stacks) need a dotnet-monitor endpoint: a
 # local target owns its sidecar; a remote target must opt in (PERFLAB_REMOTE_

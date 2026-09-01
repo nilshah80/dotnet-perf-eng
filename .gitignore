@@ -4,6 +4,11 @@ obj/
 .vscode/
 .DS_Store
 .env
+
+# Python bytecode cache (from the dashboard generator / analyze helpers)
+__pycache__/
+*.pyc
+*.pyo
 artifacts/runs/*
 artifacts/runtime/*
 !artifacts/runs/.gitkeep

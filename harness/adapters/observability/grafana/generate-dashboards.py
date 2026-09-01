@@ -502,6 +502,30 @@ def build_runtime(s):
                        unit="short", minv=0,
                        desc="Flat after warm-up; late growth = runtime codegen / dynamic loading."), 8, 8)
 
+    # Per-request efficiency: resource use normalised by throughput. Mirrors the
+    # efficiency.* facts capture-evidence.sh writes, so the boards and facts.json
+    # agree. Catches the regression absolute latency hides: same p95, more work.
+    g.add_row("Efficiency (per request)")
+    reqrate = f'sum(rate(http_server_request_duration_seconds_count{{{SVC_INST},http_route!~"/health.*|"}}[{RI}]))'
+    # Guard against divide-by-~0 at idle: `... / reqrate and (reqrate > 0.5)` yields
+    # a value only when the request rate is meaningful, otherwise the series is
+    # hidden. (clamp_min(reqrate,1e-9) instead produced billions/trillions at idle.)
+    def per_req(numer):
+        return f'{numer} / {reqrate} and ({reqrate} > 0.5)'
+    g.place(timeseries(None, "CPU-ms per request", {},
+                       [target(per_req(f'1000 * sum(rate(dotnet_process_cpu_time_seconds_total{{{SVC_INST}}}[{RI}]))'), "cpu ms/req")],
+                       unit="ms", minv=0,
+                       desc="CPU-milliseconds spent per served request -- rises when a change does more work per request even if latency holds. Hidden when idle."), 8, 8)
+    g.place(timeseries(None, "Allocated bytes per request", {},
+                       [target(per_req(f'sum(rate(dotnet_gc_heap_allocated_bytes_total{{{SVC_INST}}}[{RI}]))'), "bytes/req")],
+                       unit="bytes", minv=0,
+                       desc="Managed bytes allocated per request -- the driver of GC frequency, and a classic hidden regression. Hidden when idle."), 8, 8)
+    g.place(timeseries(None, "GC-pause + dependency ms per request", {},
+                       [target(per_req(f'1000 * sum(rate(dotnet_gc_pause_time_seconds_total{{{SVC_INST}}}[{RI}]))'), "gc pause ms/req"),
+                        target(per_req(f'1000 * sum(rate(db_client_operation_duration_seconds_sum{{{SVC_INST}}}[{RI}]))'), "db ms/req")],
+                       unit="ms", minv=0,
+                       desc="Per-request GC-pause time and DB dependency time -- where the per-request cost actually goes. Hidden when idle."), 8, 8)
+
     tv = templating(app, s["service_regex"])
     return "10-runtime.json", dashboard(f'{s["uid"]}-runtime',
                                         f'{s["human"]} · .NET Runtime & GC', g.panels, tv,
