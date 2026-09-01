@@ -75,13 +75,16 @@ harness/                          # reusable toolkit (never edited per project)
 ├── adapters/
 │   ├── runtime/dotnet/           # metrics.sh, capture.sh, normalize.sh, versions.sh, evidence-extra.sh, diagnostics/Dockerfile
 │   ├── dependency/{postgres,redis,rabbitmq}/  # reset/sample-midload/snapshot.sh (generic; config-parameterized)
-│   └── loadgen/{wrk,k6}/         # run.sh (shared contract) + default.lua / default.js (fallback workload)
+│   ├── loadgen/{wrk,k6}/         # run.sh (shared contract) + default.lua / default.js (fallback workload)
+│   └── observability/grafana/    # generate-dashboards.py — emits the per-lab Grafana dashboard suite
 └── ai/                           # diagnosis.schema.json, *-prompt.md, scripts/
 labs/scenariolab/                 # the EXPERIMENT (per project): what to test + how to run it
 ├── lab.config.sh                 # descriptor — the single re-pointing seam (bash)
 ├── scenarios.tsv                 # this project's API scenarios
 ├── loadgen/{k6.js,wrk.lua}       # this lab's workload (auth/data live here; else the shared default)
 ├── dependencies/<dep>/<phase>.sh # project-specific probes (e.g. postgres EXPLAIN), by convention
+├── infra/grafana/dashboards/     # provisioned dashboard suite (generated; one JSON per focused board)
+├── infra/observability/          # otelcol-extra.yaml — additive collector overlay for dependency scrapes
 └── compose.yaml  infra/          # lab wiring: app + deps + observability + diagnostics
 source/dotnet/scenariolab/        # the APP under test ONLY (pristine — swappable for a real repo)
 └── PerfLab.slnx  src/{Api,Worker,Shared}/
@@ -216,20 +219,61 @@ labs use the **same** host ports; `ecommerce` simply omits Redis and RabbitMQ.
 | Component | Purpose | Host address | Lab |
 |---|---|---|---|
 | API | Workload endpoints | `http://127.0.0.1:8080` | both |
-| Grafana | Dashboards, Explore, trace/log correlation | `http://127.0.0.1:3000` (`admin` / `admin`) | both |
-| Prometheus | Metrics query API | `http://127.0.0.1:9090` | both |
+| Grafana | Dashboard suite, Explore, trace/log correlation | `http://127.0.0.1:3000` (`admin` / `admin`) | both |
+| Prometheus | Metrics query API (OTLP + remote-write receivers on) | `http://127.0.0.1:9090` | both |
 | Loki | Log query API | `http://127.0.0.1:3100` | both |
 | Tempo | Trace query API | `http://127.0.0.1:3200` | both |
 | Pyroscope | Profiles backend — reachable but empty (see note) | `http://127.0.0.1:4040` | both |
 | OTLP ingest | Collector gRPC / HTTP | `127.0.0.1:4317` / `4318` | both |
 | dotnet-monitor | Diagnostic API (trace/gcdump/stacks/dump) | `http://127.0.0.1:18323` | both |
 | PostgreSQL | Lab database (`perflab` / `perflab`) | `127.0.0.1:5432` | both |
+| postgres-exporter | Server-side PG metrics (`obs` profile — opt-in) | in-network only (scraped by the collector) | both |
 | Redis | Lab cache (`allkeys-lru`) | `127.0.0.1:6379` | scenariolab |
+| redis-exporter | Server-side Redis metrics (`obs` profile — opt-in) | in-network only (scraped by the collector) | scenariolab |
 | RabbitMQ | Broker + management (`perflab` / `perflab`) | `127.0.0.1:5672`, mgmt `:15672`, metrics `:15692` | scenariolab |
 
 CPU profiling in this lab comes from the `dotnet-monitor` sidecar (captured and
 converted to Speedscope), **not** Pyroscope: no application sends Pyroscope
 profiles, so treat that port as available-but-empty.
+
+## Dashboards
+
+Each lab provisions a **suite of focused Grafana dashboards** (folder-provisioned
+from `labs/<lab>/infra/grafana/dashboards/`; the overview is the home dashboard).
+Every board shares four template variables — `service`, `instance`, `scenario`,
+`run` — so the same view narrows to one process or one measurement run, mirroring
+how evidence capture scopes runtime metrics by `service_instance_id`.
+
+| Board | For | What it answers |
+|---|---|---|
+| **Overview & SLOs** | stakeholders + PE landing | Golden signals (rate/errors/latency) server-side **and** client-side (k6), latency heatmap, correlated error logs |
+| **.NET Runtime & GC** | performance engineer | Allocation rate, % time in GC, collections by generation, heap by gen, thread-pool queue/starvation, lock contention, exceptions |
+| **HTTP & Endpoints** | PE + dev leads | Per-route RED (throughput/p99/errors), 5xx by exception type, Kestrel connections, sortable top-routes table |
+| **Dependencies & Pools** | PE + SRE | Npgsql + HTTP-client pool saturation (pending requests, time-in-queue) and — with the `obs` profile — live Postgres/Redis/RabbitMQ server internals |
+| **Messaging & Worker** *(scenariolab)* | PE | Order publish/process/retry, processing-duration p95, cache hit ratio, resource-pool lab (S21–S26), worker process health |
+
+The boards are **generated** so both labs stay in lock-step — edit
+`harness/adapters/observability/grafana/generate-dashboards.py` and re-run it;
+never hand-edit the emitted JSON.
+
+**Client-observed SLOs (k6 → Prometheus).** The measure phase streams the load
+generator's own throughput/latency/error metrics into Prometheus via remote-write,
+so the Overview board shows the **client view next to the server view** — the two
+diverge exactly when the system saturates. It is guarded by a readiness probe
+(never fails a run) and disabled with `PERFLAB_K6_PROM_RW=0`. k6 series carry
+`run=$PERF_RUN_ID`, matching the app's `perf_run_id`, so `$run` filters both.
+
+**Live dependency internals (opt-in).** Server-side Postgres/Redis metrics come
+from exporters gated behind the `obs` compose profile, so default measurement
+runs stay perturbation-free. RabbitMQ needs no exporter (its Prometheus plugin is
+always scraped). Attach the exporters to a running stack with:
+
+```bash
+docker compose -f labs/scenariolab/compose.yaml --profile obs up -d postgres-exporter redis-exporter
+```
+
+**Exemplars.** Latency histograms carry trace exemplars (`OTEL_METRICS_EXEMPLAR_FILTER=trace_based`),
+so a spike on a latency panel links straight to the Tempo trace that produced it.
 
 ## Prerequisites
 
@@ -255,9 +299,10 @@ PERFLAB_LAB=scenariolab ./harness/core/run/run-single.sh S01 30
 
 Brings up the stack, warms up for 10s, measures `S01` for 30s with k6, captures
 runtime diagnostics, and writes an evidence package under
-`artifacts/runs/<run-id>/`. Open Grafana at `http://127.0.0.1:3000` and pick the
-provisioned dashboard for live dashboards, Tempo traces, and Loki logs. Then,
-optionally, hand a package to the AI phase:
+`artifacts/runs/<run-id>/`. Open Grafana at `http://127.0.0.1:3000` — it lands on
+the **Overview & SLOs** board; the dashboard dropdown switches between the focused
+boards (see **Dashboards** above), and Explore has Tempo traces and Loki logs.
+Then, optionally, hand a package to the AI phase:
 
 ```bash
 ./harness/ai/scripts/analyze-with-claude.sh artifacts/runs/<run-id>/scenarios/S01

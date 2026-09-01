@@ -1,0 +1,786 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "type": "dashboard",
+        "name": "Annotations & Alerts",
+        "iconColor": "rgba(0, 211, 255, 1)"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "Lab dashboards",
+      "type": "dashboards",
+      "tags": [
+        "perflab",
+        "ecommerce",
+        "http"
+      ],
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": true,
+      "targetBlank": false,
+      "icon": "external link"
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 101,
+      "title": "Per-route RED",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 102,
+      "title": "Requests/s by route",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (http_route)(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{http_route}}"
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "title": "p99 latency by route",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "description": "Which endpoint owns the tail.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le,http_route)(rate(http_server_request_duration_seconds_bucket{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])))",
+          "refId": "A",
+          "legendFormat": "{{http_route}}"
+        }
+      ]
+    },
+    {
+      "id": 104,
+      "title": "Errors/s by route (4xx+5xx)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "description": "Zero-filled per route: a healthy run shows 0, not No-data.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (http_route)(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\",http_response_status_code=~\"4..|5..\"}[$__rate_interval])) or (sum by (http_route)(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])) * 0)",
+          "refId": "A",
+          "legendFormat": "{{http_route}}"
+        }
+      ]
+    },
+    {
+      "id": 105,
+      "title": "5xx by exception type",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "description": "error_type is the CLR exception surfaced by ASP.NET Core instrumentation.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (error_type)(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\",error_type!=\"\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{error_type}}"
+        }
+      ]
+    },
+    {
+      "id": 106,
+      "title": "Concurrency & connections",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "panels": []
+    },
+    {
+      "id": 107,
+      "title": "In-flight requests",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service_name)(http_server_active_requests{service_name=~\"$service\",service_instance_id=~\"$instance\"})",
+          "refId": "A",
+          "legendFormat": "{{service_name}}"
+        }
+      ]
+    },
+    {
+      "id": 108,
+      "title": "Kestrel connections",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 18
+      },
+      "description": "Queued connections rising = accept-loop can't keep up.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service_name)(kestrel_active_connections{service_name=~\"$service\",service_instance_id=~\"$instance\"})",
+          "refId": "A",
+          "legendFormat": "active {{service_name}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service_name)(kestrel_queued_connections{service_name=~\"$service\",service_instance_id=~\"$instance\"})",
+          "refId": "B",
+          "legendFormat": "queued {{service_name}}"
+        }
+      ]
+    },
+    {
+      "id": 109,
+      "title": "Request method mix",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 25,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (http_request_method)(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{http_request_method}}"
+        }
+      ]
+    },
+    {
+      "id": 110,
+      "title": "Route breakdown (current window)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "panels": []
+    },
+    {
+      "id": 111,
+      "title": "Top routes by throughput / latency / errors (over window)",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "description": "Averaged over the dashboard window ($__range), so idle-at-now doesn't blank it. err/s zero-filled per route. Sortable/filterable; joined by route.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (http_route)(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__range]))",
+          "refId": "reqs",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le,http_route)(rate(http_server_request_duration_seconds_bucket{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__range])))",
+          "refId": "p95",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le,http_route)(rate(http_server_request_duration_seconds_bucket{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__range])))",
+          "refId": "p99",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (http_route)(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\",http_response_status_code=~\"5..\"}[$__range])) or (sum by (http_route)(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__range])) * 0)",
+          "refId": "err",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "p99",
+            "desc": true
+          }
+        ]
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "http_route"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 260
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #reqs"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "req/s"
+              },
+              {
+                "id": "unit",
+                "value": "reqps"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #p95"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "p95"
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #p99"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "p99"
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #err"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "err/s"
+              },
+              {
+                "id": "unit",
+                "value": "reqps"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "http_route",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "job": true,
+              "instance": true
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": [
+    "perflab",
+    "ecommerce",
+    "http"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "label": "Service",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(service_name)",
+        "query": {
+          "query": "label_values(service_name)",
+          "refId": "var-service"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "sort": 1,
+        "regex": "/ecommerce-.*/",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(dotnet_process_memory_working_set_bytes{service_name=~\"$service\"}, service_instance_id)",
+        "query": {
+          "query": "label_values(dotnet_process_memory_working_set_bytes{service_name=~\"$service\"}, service_instance_id)",
+          "refId": "var-instance"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "sort": 1,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "scenario",
+        "label": "Scenario",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values({__name__=~\"ecommerce_.*\",scenario_id!=\"\"}, scenario_id)",
+        "query": {
+          "query": "label_values({__name__=~\"ecommerce_.*\",scenario_id!=\"\"}, scenario_id)",
+          "refId": "var-scenario"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "sort": 1,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "run",
+        "label": "Run",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values({__name__=~\"ecommerce_.*\",perf_run_id!=\"\"}, perf_run_id)",
+        "query": {
+          "query": "label_values({__name__=~\"ecommerce_.*\",perf_run_id!=\"\"}, perf_run_id)",
+          "refId": "var-run"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "sort": 1,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "eCommerce Lab \u00b7 HTTP & Endpoints",
+  "uid": "ecommerce-http"
+}

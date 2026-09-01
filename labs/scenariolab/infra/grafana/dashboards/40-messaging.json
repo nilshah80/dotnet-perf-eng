@@ -1,0 +1,833 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "type": "dashboard",
+        "name": "Annotations & Alerts",
+        "iconColor": "rgba(0, 211, 255, 1)"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "Lab dashboards",
+      "type": "dashboards",
+      "tags": [
+        "perflab",
+        "perflab",
+        "messaging"
+      ],
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": true,
+      "targetBlank": false,
+      "icon": "external link"
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 101,
+      "title": "Order pipeline (app instrumentation)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 102,
+      "title": "Publish / process / retry per second",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 1
+      },
+      "description": "published>processed for a sustained period = the worker is falling behind (see broker queue depth).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(perflab_orders_published_total{service_name=~\"$service\",scenario_id=~\"$scenario\",perf_run_id=~\"$run\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "published/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(perflab_orders_processed_total{service_name=~\"$service\",scenario_id=~\"$scenario\",perf_run_id=~\"$run\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "processed/s"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(perflab_orders_retried_total{service_name=~\"$service\",scenario_id=~\"$scenario\",perf_run_id=~\"$run\"}[$__rate_interval]))",
+          "refId": "C",
+          "legendFormat": "retried/s"
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "title": "Order processing duration p95/p99",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le)(rate(perflab_order_processing_duration_milliseconds_bucket{service_name=~\"$service\",scenario_id=~\"$scenario\",perf_run_id=~\"$run\"}[$__rate_interval])))",
+          "refId": "A",
+          "legendFormat": "p95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le)(rate(perflab_order_processing_duration_milliseconds_bucket{service_name=~\"$service\",scenario_id=~\"$scenario\",perf_run_id=~\"$run\"}[$__rate_interval])))",
+          "refId": "B",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 104,
+      "title": "Correctness failures (total in window)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 9
+      },
+      "description": "Guards against 'fast but wrong'. Must stay 0 -- any value invalidates a throughput win.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(increase(perflab_correctness_failures_total{service_name=~\"$service\",scenario_id=~\"$scenario\",perf_run_id=~\"$run\"}[$__range])) or vector(0)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 105,
+      "title": "Retries/s",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(perflab_orders_retried_total{service_name=~\"$service\",scenario_id=~\"$scenario\",perf_run_id=~\"$run\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "retried/s"
+        }
+      ]
+    },
+    {
+      "id": 106,
+      "title": "Cache hit ratio (app view)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 9
+      },
+      "description": "From perflab_cache_requests{cache_result}. Compare with Redis server-side ratio on Dependencies.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(perflab_cache_requests_total{service_name=~\"$service\",scenario_id=~\"$scenario\",perf_run_id=~\"$run\",cache_result=\"hit\"}[$__rate_interval])) / clamp_min(sum(rate(perflab_cache_requests_total{service_name=~\"$service\",scenario_id=~\"$scenario\",perf_run_id=~\"$run\"}[$__rate_interval])), 1)",
+          "refId": "A",
+          "legendFormat": "hit ratio"
+        }
+      ]
+    },
+    {
+      "id": 107,
+      "title": "Resource-pool lab (S21\u2013S26 \u2014 by pool)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "panels": []
+    },
+    {
+      "id": 108,
+      "title": "Pool wait duration p95 by pool",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "description": "Time blocked acquiring a lease. postgres / redis-multiplexer / http.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le,pool_name)(rate(perflab_pool_wait_duration_milliseconds_bucket{service_name=~\"$service\",scenario_id=~\"$scenario\",perf_run_id=~\"$run\"}[$__rate_interval])))",
+          "refId": "A",
+          "legendFormat": "{{pool_name}}"
+        }
+      ]
+    },
+    {
+      "id": 109,
+      "title": "Active leases by pool",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 16
+      },
+      "description": "Leases in flight; flat at the configured ceiling under contention.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (pool_name)(perflab_pool_active_leases{service_name=~\"$service\",scenario_id=~\"$scenario\",perf_run_id=~\"$run\"})",
+          "refId": "A",
+          "legendFormat": "{{pool_name}}"
+        }
+      ]
+    },
+    {
+      "id": 110,
+      "title": "Pool timeouts/s + resources created/s",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 16
+      },
+      "description": "Timeouts>0 = under-sized pool; a high create rate = churn (not reusing resources).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (pool_name)(rate(perflab_pool_timeouts_total{service_name=~\"$service\",scenario_id=~\"$scenario\",perf_run_id=~\"$run\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "timeout {{pool_name}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (pool_name)(rate(perflab_pool_resources_created_total{service_name=~\"$service\",scenario_id=~\"$scenario\",perf_run_id=~\"$run\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "created {{pool_name}}"
+        }
+      ]
+    },
+    {
+      "id": 111,
+      "title": "Worker process health (service_name=perflab-worker)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "panels": []
+    },
+    {
+      "id": 112,
+      "title": "Worker CPU (cores) & working set",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "description": "Worker is cpus:0.75 / 512 MiB. CPU cores on the left axis, working-set bytes on the right.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "working set"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(dotnet_process_cpu_time_seconds_total{service_name=\"perflab-worker\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "cpu cores"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "dotnet_process_memory_working_set_bytes{service_name=\"perflab-worker\"}",
+          "refId": "B",
+          "legendFormat": "working set"
+        }
+      ]
+    },
+    {
+      "id": 113,
+      "title": "Worker allocation rate & GC pause %",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 25
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "% time in GC"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(dotnet_gc_heap_allocated_bytes_total{service_name=\"perflab-worker\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "alloc Bps"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(dotnet_gc_pause_time_seconds_total{service_name=\"perflab-worker\"}[$__rate_interval]))",
+          "refId": "B",
+          "legendFormat": "gc pause %"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": [
+    "perflab",
+    "perflab",
+    "messaging"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "label": "Service",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(service_name)",
+        "query": {
+          "query": "label_values(service_name)",
+          "refId": "var-service"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "sort": 1,
+        "regex": "/perflab-.*/",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(dotnet_process_memory_working_set_bytes{service_name=~\"$service\"}, service_instance_id)",
+        "query": {
+          "query": "label_values(dotnet_process_memory_working_set_bytes{service_name=~\"$service\"}, service_instance_id)",
+          "refId": "var-instance"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "sort": 1,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "scenario",
+        "label": "Scenario",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values({__name__=~\"perflab_.*\",scenario_id!=\"\"}, scenario_id)",
+        "query": {
+          "query": "label_values({__name__=~\"perflab_.*\",scenario_id!=\"\"}, scenario_id)",
+          "refId": "var-scenario"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "sort": 1,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      },
+      {
+        "name": "run",
+        "label": "Run",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values({__name__=~\"perflab_.*\",perf_run_id!=\"\"}, perf_run_id)",
+        "query": {
+          "query": "label_values({__name__=~\"perflab_.*\",perf_run_id!=\"\"}, perf_run_id)",
+          "refId": "var-run"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "sort": 1,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Scenario Lab \u00b7 Messaging & Worker",
+  "uid": "perflab-messaging"
+}

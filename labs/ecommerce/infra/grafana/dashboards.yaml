@@ -1,0 +1,9 @@
+apiVersion: 1
+
+providers:
+  - name: eCommerce Lab
+    type: file
+    updateIntervalSeconds: 10
+    options:
+      path: /otel-lgtm/grafana/conf/provisioning/dashboards/custom
+      foldersFromFilesStructure: false

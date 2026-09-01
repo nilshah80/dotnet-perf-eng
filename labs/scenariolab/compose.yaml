@@ -83,7 +83,12 @@ services:
       # so the trace volume is capped at the source with sampling below; this is
       # belt-and-braces so a long session cannot grow the metric store unbounded.
       PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=6h --storage.tsdb.retention.size=512MB
-      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/grafana/conf/provisioning/dashboards/custom/perflab.json
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/grafana/conf/provisioning/dashboards/custom/00-overview.json
+      # Merge an additive collector overlay (infra/observability/otelcol-extra.yaml)
+      # so Postgres/Redis/RabbitMQ exporter metrics land in the SAME Prometheus as
+      # the app's OTLP metrics. Harmless when the exporters are down -- they are
+      # gated behind the "obs" compose profile, so default runs stay perturbation-free.
+      OTELCOL_EXTRA_ARGS: --config=file:/otel-lgtm/otelcol-extra.yaml
     ports:
       - "127.0.0.1:3000:3000"
       - "127.0.0.1:3100:3100"
@@ -94,8 +99,12 @@ services:
       - "127.0.0.1:4040:4040"
     volumes:
       - lgtm-data:/data
+      # Provision the whole dashboards/ folder -- one JSON per focused board
+      # (overview, runtime, http, dependencies, messaging). Regenerate with
+      # harness/adapters/observability/grafana/generate-dashboards.py.
       - ./infra/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/custom.yaml:ro
-      - ./infra/grafana/perflab.json:/otel-lgtm/grafana/conf/provisioning/dashboards/custom/perflab.json:ro
+      - ./infra/grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/custom:ro
+      - ./infra/observability/otelcol-extra.yaml:/otel-lgtm/otelcol-extra.yaml:ro
     # A full 27-scenario sweep saturated this at 2g: Prometheus and Tempo stopped
     # responding partway through, which starved evidence capture of traces and
     # logs for the later scenarios. Raised to 3g, which keeps the sum of all
@@ -141,6 +150,10 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
       OTEL_METRIC_EXPORT_INTERVAL: 5000
+      # Trace-based exemplars attach a trace id to histogram samples so a latency
+      # spike on a Grafana panel links straight to the trace that produced it
+      # (otel-lgtm's Prometheus already runs with --enable-feature=exemplar-storage).
+      OTEL_METRICS_EXEMPLAR_FILTER: trace_based
       # Head sampling keeps whole traces intact while capping what reaches Tempo.
       # Evidence capture only reads the ten slowest traces per scenario, so a
       # fraction is ample for structural findings such as span counts per request.
@@ -186,6 +199,10 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
       OTEL_METRIC_EXPORT_INTERVAL: 5000
+      # Trace-based exemplars attach a trace id to histogram samples so a latency
+      # spike on a Grafana panel links straight to the trace that produced it
+      # (otel-lgtm's Prometheus already runs with --enable-feature=exemplar-storage).
+      OTEL_METRICS_EXEMPLAR_FILTER: trace_based
       # Head sampling keeps whole traces intact while capping what reaches Tempo.
       # Evidence capture only reads the ten slowest traces per scenario, so a
       # fraction is ample for structural findings such as span counts per request.
@@ -224,6 +241,45 @@ services:
       # Evidence packages live at the repo-root artifacts/ tree; normalize-runtime
       # addresses files by their in-container /artifacts path.
       - ../../artifacts:/artifacts
+
+  # --- Dependency metric exporters (opt-in live server-side dashboards) --------
+  # Gated behind the "obs" profile so they NEVER start during a default run:
+  # `compose up -d api worker` only creates the app dependency graph, and an
+  # empirical check confirms a profiled service stays down even with
+  # COMPOSE_PROFILES set. Enable live Postgres/Redis panels by attaching them to
+  # the already-running stack:
+  #   docker compose -f labs/scenariolab/compose.yaml --profile obs up -d \
+  #       postgres-exporter redis-exporter
+  # (RabbitMQ needs no exporter -- its rabbitmq_prometheus plugin is always on
+  # and is scraped by the collector overlay regardless of this profile.)
+  postgres-exporter:
+    profiles: ["obs"]
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: "postgresql://perflab:${POSTGRES_PASSWORD:-perflab}@postgres:5432/perflab?sslmode=disable&application_name=perflab-pg-exporter"
+    # A single scrape connection keeps the exporter from disturbing the app's
+    # 20-slot client pool that the pool-capacity scenarios (S21/S22) measure.
+    command: ["--collector.stat_statements", "--no-collector.wal"]
+    # No host port: the collector overlay scrapes it in-network at
+    # postgres-exporter:9187. Publishing 9187 to the host would collide with the
+    # ecommerce lab's exporter when both obs stacks are up.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 96m
+    restart: unless-stopped
+
+  redis-exporter:
+    profiles: ["obs"]
+    image: oliver006/redis_exporter:v1.62.0-alpine
+    environment:
+      REDIS_ADDR: "redis://redis:6379"
+    # No host port: scraped in-network at redis-exporter:9121 by the collector overlay.
+    depends_on:
+      redis:
+        condition: service_healthy
+    mem_limit: 64m
+    restart: unless-stopped
 
 volumes:
   postgres-data:
