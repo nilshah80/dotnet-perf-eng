@@ -16,14 +16,15 @@ source "${here}/../lib/common.sh"
 # shellcheck disable=SC1091
 source "${here}/../lib/slo-lib.sh"
 
-run_arg="${1:?gate.sh <run-dir|facts.json> [--baseline P] [--slos P] [--threshold R] [--no-baseline]}"; shift || true
-baseline_override=""; slos_override=""; threshold="0.10"; use_baseline="true"
+run_arg="${1:?gate.sh <run-dir|facts.json> [--baseline P] [--slos P] [--threshold R] [--no-baseline] [--allow-missing]}"; shift || true
+baseline_override=""; slos_override=""; threshold="0.10"; use_baseline="true"; allow_missing="false"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --baseline) baseline_override="${2:?--baseline needs a path}"; shift 2 ;;
     --slos) slos_override="${2:?--slos needs a path}"; shift 2 ;;
     --threshold) threshold="${2:?--threshold needs a value}"; shift 2 ;;
     --no-baseline) use_baseline="false"; shift ;;
+    --allow-missing) allow_missing="true"; shift ;;
     *) echo "Unknown option '$1'." >&2; exit 2 ;;
   esac
 done
@@ -53,15 +54,27 @@ if [[ -s "${slos_file}" ]]; then
   echo "Absolute SLOs:"
   while IFS=$'\t' read -r metric op thr; do
     [[ -n "${metric}" ]] || continue
+    # An unknown operator is a config error, not a pass -- fail it.
+    if [[ "${op}" != "max" && "${op}" != "min" ]]; then
+      fail=$((fail+1)); checked=$((checked+1))
+      printf '  %-34s %-3s %-10s  observed=%-13s FAIL (invalid op)\n' "${metric}" "${op}" "${thr}" "-"; continue
+    fi
     val="${OBS[${metric}]:-}"
     if [[ -z "${val}" ]]; then
-      printf '  %-34s %-3s %-10s  observed=(missing)  SKIP\n' "${metric}" "${op}" "${thr}"; continue
+      # A configured SLO whose metric is absent must NOT silently pass (fail-open).
+      # Fail it unless --allow-missing was given.
+      if [[ "${allow_missing}" == "true" ]]; then
+        printf '  %-34s %-3s %-10s  observed=(missing)  SKIP (--allow-missing)\n' "${metric}" "${op}" "${thr}"
+      else
+        fail=$((fail+1)); checked=$((checked+1))
+        printf '  %-34s %-3s %-10s  observed=(missing)  FAIL (required; --allow-missing to skip)\n' "${metric}" "${op}" "${thr}"
+      fi
+      continue
     fi
     checked=$((checked+1))
     verdict="$(awk -v v="${val}" -v t="${thr}" -v op="${op}" 'BEGIN{
       if (op=="max") print (v+0 <= t+0) ? "PASS" : "FAIL";
-      else if (op=="min") print (v+0 >= t+0) ? "PASS" : "FAIL";
-      else print "PASS" }')"
+      else print (v+0 >= t+0) ? "PASS" : "FAIL" }')"
     [[ "${verdict}" == "FAIL" ]] && fail=$((fail+1))
     printf '  %-34s %-3s %-10s  observed=%-13s %s\n' "${metric}" "${op}" "${thr}" "${val}" "${verdict}"
   done < <(slo_effective "${slos_file}" "${scenario}")

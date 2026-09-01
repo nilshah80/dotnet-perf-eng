@@ -25,19 +25,24 @@ n_scen="$(jqd -r '(.scenarios | length) // 0' < "${facts}" 2>/dev/null || echo 0
 
 lab="${PERFLAB_PROJECT:-unknown}"
 git_rev="$(git -C "${repo_root}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-git_dirty="false"; git -C "${repo_root}" diff --quiet 2>/dev/null || git_dirty="true"
+# --porcelain catches staged AND unstaged AND untracked changes; `git diff --quiet`
+# would miss staged/untracked and mislabel a non-HEAD working tree as clean.
+git_dirty="false"; [[ -n "$(git -C "${repo_root}" status --porcelain 2>/dev/null)" ]] && git_dirty="true"
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-profile="steady"; generator=""
+profile="steady"; generator=""; status="unknown"
 [[ -s "${manifest}" ]] && {
   profile="$(jqd -r '.workload.profile // "steady"' < "${manifest}" 2>/dev/null || echo steady)"
   generator="$(jqd -r '.workload.loadGenerator // ""' < "${manifest}" 2>/dev/null || echo "")"
+  # Capture status (captured|partial): a partial run must be visibly marked in
+  # history, not silently trended as if it were clean.
+  status="$(jqd -r '.status // "unknown"' < "${manifest}" 2>/dev/null || echo unknown)"
 }
 
 mkdir -p "${repo_root}/perf-history"
 out="${repo_root}/perf-history/${lab}.jsonl"
 line="$(jqd -c --arg ts "${ts}" --arg rev "${git_rev}" --arg lab "${lab}" \
-             --arg prof "${profile}" --arg gen "${generator}" --argjson dirty "${git_dirty}" '
-  { ts:$ts, gitRevision:$rev, gitDirty:$dirty, lab:$lab, profile:$prof,
+             --arg prof "${profile}" --arg gen "${generator}" --arg status "${status}" --argjson dirty "${git_dirty}" '
+  { ts:$ts, gitRevision:$rev, gitDirty:$dirty, captureStatus:$status, lab:$lab, profile:$prof,
     loadGenerator:( ($gen | select(. != "")) // (.loadGenerator // .scenarios[0].loadGenerator // "") ),
     runId:(.runId // .scenarios[0].runId // ""),
     scenarioId:(.scenarioId // .scenarios[0].scenarioId // ""),

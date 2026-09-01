@@ -771,7 +771,7 @@
         "x": 0,
         "y": 37
       },
-      "description": "CPU-milliseconds spent per served request -- rises when a change does more work per request even if latency holds.",
+      "description": "CPU-milliseconds spent per served request -- rises when a change does more work per request even if latency holds. Hidden when idle.",
       "fieldConfig": {
         "defaults": {
           "unit": "ms",
@@ -804,7 +804,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "1000 * sum(rate(dotnet_process_cpu_time_seconds_total{service_name=~\"$service\",service_instance_id=~\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])), 1e-9)",
+          "expr": "1000 * sum(rate(dotnet_process_cpu_time_seconds_total{service_name=~\"$service\",service_instance_id=~\"$instance\"}[$__rate_interval])) / sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])) and (sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])) > 0.5)",
           "refId": "A",
           "legendFormat": "cpu ms/req"
         }
@@ -824,7 +824,7 @@
         "x": 8,
         "y": 37
       },
-      "description": "Managed bytes allocated per request -- the driver of GC frequency, and a classic hidden regression.",
+      "description": "Managed bytes allocated per request -- the driver of GC frequency, and a classic hidden regression. Hidden when idle.",
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
@@ -857,7 +857,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(dotnet_gc_heap_allocated_bytes_total{service_name=~\"$service\",service_instance_id=~\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])), 1e-9)",
+          "expr": "sum(rate(dotnet_gc_heap_allocated_bytes_total{service_name=~\"$service\",service_instance_id=~\"$instance\"}[$__rate_interval])) / sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])) and (sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])) > 0.5)",
           "refId": "A",
           "legendFormat": "bytes/req"
         }
@@ -877,7 +877,7 @@
         "x": 16,
         "y": 37
       },
-      "description": "Per-request GC-pause time and DB dependency time -- where the per-request cost actually goes.",
+      "description": "Per-request GC-pause time and DB dependency time -- where the per-request cost actually goes. Hidden when idle.",
       "fieldConfig": {
         "defaults": {
           "unit": "ms",
@@ -910,7 +910,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "1000 * sum(rate(dotnet_gc_pause_time_seconds_total{service_name=~\"$service\",service_instance_id=~\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])), 1e-9)",
+          "expr": "1000 * sum(rate(dotnet_gc_pause_time_seconds_total{service_name=~\"$service\",service_instance_id=~\"$instance\"}[$__rate_interval])) / sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])) and (sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])) > 0.5)",
           "refId": "A",
           "legendFormat": "gc pause ms/req"
         },
@@ -919,7 +919,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "1000 * sum(rate(db_client_operation_duration_seconds_sum{service_name=~\"$service\",service_instance_id=~\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])), 1e-9)",
+          "expr": "1000 * sum(rate(db_client_operation_duration_seconds_sum{service_name=~\"$service\",service_instance_id=~\"$instance\"}[$__rate_interval])) / sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])) and (sum(rate(http_server_request_duration_seconds_count{service_name=~\"$service\",service_instance_id=~\"$instance\",http_route!~\"/health.*|\"}[$__rate_interval])) > 0.5)",
           "refId": "B",
           "legendFormat": "db ms/req"
         }

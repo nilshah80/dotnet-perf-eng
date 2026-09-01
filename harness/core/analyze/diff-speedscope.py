@@ -69,8 +69,14 @@ def report(base_doc, cand_doc, top, b_label, c_label):
         bp, cp = b_pct.get(fr, 0.0), c_pct.get(fr, 0.0)
         rows.append((cp - bp, bp, cp, fr))
     rows.sort(reverse=True)
+    # Partition by direction so a frame never appears in BOTH lists (it would when
+    # there are fewer than 2*top frames and the slices overlap).
+    hotter = [r for r in rows if r[0] > 1e-9][:top]
+    colder = sorted((r for r in rows if r[0] < -1e-9))[:top]  # most negative first
 
     def fmt(rs):
+        if not rs:
+            print("  (none)")
         for delta, bp, cp, fr in rs:
             print(f"  {delta:+7.2f}%   {bp:6.2f}% -> {cp:6.2f}%   {fr[:96]}")
 
@@ -78,20 +84,34 @@ def report(base_doc, cand_doc, top, b_label, c_label):
     print(f"#   baseline : {b_label}")
     print(f"#   candidate: {c_label}\n")
     print(f"Top {top} HOTTER in candidate (regressions):")
-    fmt(rows[:top])
+    fmt(hotter)
     print(f"\nTop {top} COLDER in candidate (improvements):")
-    fmt(list(reversed(rows[-top:])))
+    fmt(colder)
 
 
 def main():
     argv = sys.argv[1:]
     top = 15
-    if "--top" in argv:
-        try:
-            top = int(argv[argv.index("--top") + 1])
-        except (ValueError, IndexError):
-            pass
-    files = [a for a in argv if not a.startswith("--")]
+    files = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--top":
+            # consume the numeric value so it is NOT mistaken for a positional file arg
+            try:
+                top = int(argv[i + 1])
+            except (ValueError, IndexError):
+                pass
+            i += 2
+            continue
+        if a == "--stdin":
+            i += 1
+            continue
+        if a.startswith("--"):
+            i += 1
+            continue
+        files.append(a)
+        i += 1
     if "--stdin" in argv:
         env = json.load(sys.stdin)
         report(env["baseline"], env["candidate"], top, "baseline", "candidate")

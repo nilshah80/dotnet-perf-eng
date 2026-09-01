@@ -86,8 +86,13 @@ cat "${facts_files[@]}" | jqd -s --arg scen "${scenario_id}" --arg repId "${rep_
        | {n:$n, mean:($mean*1000|round/1000), median:(med($a)*1000|round/1000), min:($a|min), max:($a|max),
           stddev:(if $sd==null then null else ($sd*1000|round/1000) end),
           cv:(if $sd==null then null elif $mean==0 then 0 else ($sd/($mean|fabs)*1000|round/1000) end)} end;
-  ["http.requests_per_second","http.latency.p50","http.latency.p90","http.latency.p99","http.error_rate"] as $names
-  | (reduce .[] as $f ({}; reduce ($f.observations[]?) as $o (.; if ($o.value|type)=="number" then .[$o.name] += [$o.value] else . end))) as $byname
+  # Aggregate EVERY numeric observation, not a hardcoded HTTP subset, so the
+  # derived efficiency.* metrics (cpu/alloc/gc/db per request) land in stats.json
+  # too -- otherwise a significance-aware baseline promoted from a repeat run can
+  # never catch a CPU/allocation/GC/dependency-cost regression (compare-runs only
+  # compares keys present in both sides).
+  (reduce .[] as $f ({}; reduce ($f.observations[]?) as $o (.; if ($o.value|type)=="number" then .[$o.name] += [$o.value] else . end))) as $byname
+  | ($byname | keys) as $names
   | {runId:$repId,kind:"repeat-stats",scenarioId:$scen,profile:$prof,
      reps:(($byname["http.requests_per_second"]//[])|length),
      metrics:($names | map({(.): stats($byname[.] // [])}) | add)}' > "${rep_dir}/stats.json"
