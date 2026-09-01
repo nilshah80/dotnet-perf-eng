@@ -148,7 +148,10 @@ json="$(awk \
      if (lock_sat){ cand[++n]="lock-bound"; sc[n]=1.2 + lock_per_req/10 }
      if (cpu_sat){ cand[++n]="cpu-bound"; sc[n]=1.0 + cpu_util }
      if (gc_sat){ cand[++n]="gc-bound"; sc[n]=1.0 + (gcpause+0) }
-     if (dep_dom){ cand[++n]="dependency-bound-db"; sc[n]=0.5 + db_share }
+     # dependency-bound-db means the request time is DB EXECUTION, not pool WAITING -- its
+     # reason explicitly assumes the pool is NOT saturated. So it is mutually exclusive with
+     # db-pool-saturated: only a candidate when the pool is not saturated.
+     if (dep_dom && !dbp_sat){ cand[++n]="dependency-bound-db"; sc[n]=0.5 + db_share }
      # utilisation-only fallbacks (no hard saturation, but a resource clearly dominates)
      if (n==0 && cpu_share>=0.5){ cand[++n]="cpu-bound"; sc[n]=0.4+cpu_share }
      if (n==0 && gc_share>=0.3){ cand[++n]="gc-bound"; sc[n]=0.4+gc_share }
@@ -161,10 +164,20 @@ json="$(awk \
      for(i=1;i<=n;i++) ord[i]=i;
      for(i=1;i<=n;i++){ mxj=i; for(j=i+1;j<=n;j++){ if(sc[ord[j]]>sc[ord[mxj]]) mxj=j } t2=ord[i]; ord[i]=ord[mxj]; ord[mxj]=t2 }
      verdict="no-clear-bottleneck"; conf="low"; bi=(n>0?ord[1]:0); best=(n>0?sc[ord[1]]:0);
-     ncontrib=0; composite=""; satlist=""; contribjson="";
-     for(i=1;i<=n;i++){ satlist=satlist (i>1?", ":"") cand[ord[i]]; contribjson=contribjson (i>1?",":"") "\"" cand[ord[i]] "\"";
-       if(best>0 && sc[ord[i]] >= best*0.90){ ncontrib++; composite=composite (ncontrib>1?"+":"") cand[ord[i]] } }
-     concurrent=(n>=2 ? 1 : 0);
+     # ONE set drives everything: PRIMARY = candidates within 10% of the top score. The
+     # composite verdict, contributors, concurrent flag and the reason all use this SAME
+     # set, so they never disagree. Resources saturated OUTSIDE the band are listed
+     # separately (saturatedResources + "also saturated" in the reason) -- surfaced, but
+     # not conflated with the primary verdict.
+     ncontrib=0; nsec=0; composite=""; primlist=""; seclist=""; contribjson=""; satjson="";
+     for(i=1;i<=n;i++){
+       satjson=satjson (i>1?",":"") "\"" cand[ord[i]] "\"";
+       if(best>0 && sc[ord[i]] >= best*0.90){ ncontrib++;
+         composite=composite (ncontrib>1?"+":"") cand[ord[i]];
+         primlist=primlist (ncontrib>1?", ":"") cand[ord[i]];
+         contribjson=contribjson (ncontrib>1?",":"") "\"" cand[ord[i]] "\"" }
+       else { nsec++; seclist=seclist (nsec>1?", ":"") cand[ord[i]] } }
+     concurrent=(ncontrib>=2 ? 1 : 0);
      if (bi>0) verdict=(ncontrib>=2 ? composite : cand[ord[1]]);
 
      # any resource signal captured at all?
@@ -187,7 +200,7 @@ json="$(awk \
      if (tpq_sat && !cpu_sat) notes[++nn]="thread-pool queue is high while CPU is NOT saturated -- classic sync-over-async / blocking-call starvation (threads parked, not busy).";
      if (verdict=="dependency-bound-db" && dbp_sat) notes[++nn]="most request time is DB AND the pool is saturated -- the DB dependency is the bottleneck via pool exhaustion.";
      if (verdict=="no-clear-bottleneck" && any) notes[++nn]="no resource crossed a saturation gate -- the system has headroom at this load (push RPS with a capacity profile to find the knee).";
-     if (concurrent) notes[++nn]=sprintf("%d resources saturated at once (%s) -- concurrent bottleneck; address them together, not just the top-scored one. See resources.* for each.", n, satlist);
+     if (concurrent) notes[++nn]=sprintf("concurrent bottleneck -- primary: %s%s. Address them together, not just the top-scored one; see resources.* for each.", primlist, (nsec>0? sprintf("; also saturated: %s", seclist):""));
 
      # ----- reason line: describe the PRIMARY (top) resource; a composite verdict lists
      # the concurrent ones as a prefix so nothing is hidden. -----
@@ -201,13 +214,13 @@ json="$(awk \
        else if (cand[bi]=="db-pool-saturated") reason=sprintf("%.0f request(s) peak waiting for a pooled DB connection (used %.0f/%.0f).", dbpending+0, (has(dbused)?dbused+0:0), (has(dbmax)?dbmax+0:0));
        else if (cand[bi]=="dependency-bound-db") reason=sprintf("~%.0f%% of a typical request is spent in the database (pool not saturated -- it is DB execution time, not pool waiting).", db_share*100);
        else reason="";
-       if (concurrent) reason=sprintf("Concurrent saturation of %d resources (%s). Primary -> ", n, satlist) reason;
+       if (concurrent) reason=sprintf("Concurrent saturation of %d resources (%s)%s. Primary -> ", ncontrib, primlist, (nsec>0? sprintf("; also saturated: %s", seclist):"")) reason;
      }
 
      # ----- emit JSON -----
      printf "{";
      printf "\"kind\":\"bottleneck\",\"runId\":\"%s\",\"scenarioId\":\"%s\",\"captureStatus\":\"%s\",", runid, scen, status;
-     printf "\"verdict\":\"%s\",\"confidence\":\"%s\",\"concurrent\":%s,\"contributors\":[%s],\"reason\":\"%s\",", verdict, conf, (concurrent?"true":"false"), contribjson, reason;
+     printf "\"verdict\":\"%s\",\"confidence\":\"%s\",\"concurrent\":%s,\"contributors\":[%s],\"saturatedResources\":[%s],\"reason\":\"%s\",", verdict, conf, (concurrent?"true":"false"), contribjson, satjson, reason;
      printf "\"resources\":{";
      printf "\"cpu\":{\"coresBusyPeak\":%s,\"cpuCount\":%s,\"utilizationPct\":%s,\"msPerRequest\":%s,\"latencySharePct\":%s,\"saturated\":%s},", jnum(cpubusy), (has(cpucount)?sprintf("%d",cpucount+0):"null"), jpct(cpu_util), jnum(effcpu), jpct(cpu_share), (cpu_sat?"true":"false");
      printf "\"threadPool\":{\"queuePeak\":%s,\"queueAvg\":%s,\"threadCountPeak\":%s,\"saturated\":%s},", jnum(tpqpeak), jnum(tpqavg), jnum(threadpeak), (tpq_sat?"true":"false");

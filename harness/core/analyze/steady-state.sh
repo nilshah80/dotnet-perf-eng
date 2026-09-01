@@ -261,15 +261,19 @@ if [[ "${settled_f}" == "true" && ( "${sverdict}" == "steady" || "${sverdict}" =
     [[ -n "${patched}" ]] && printf '%s\n' "${patched}" > "${out}"
   fi
 else
-  # UNSTEADY / never-settled: there is NO steady sub-window, so do not report one or a
-  # trim. Keep the whole-window numbers for reference; null the steady fields.
+  # UNSTEADY / never-settled: NULL the steady-region fields UNCONDITIONALLY -- they are
+  # meaningless without a settled window, and must not survive as zero placeholders just
+  # because the whole-window query happened to fail. Update wholeWindow to true windowed
+  # values only when ITS query succeeds; otherwise leave the awk's bucket-mean estimate.
   if [[ -n "${w_rps}" && -n "${w_p99}" && "${w_p99}" != "NaN" ]]; then
     patched="$(jqd --argjson wr "${w_rps}" --argjson wp "${w_p99}" '
       .warmup.recommendedTrimSeconds=null
       | .wholeWindow={servedRps:($wr*100|round/100),serverP99Ms:($wp*100|round/100)}
       | .steadyWindow=null | .skewPct=null' < "${out}" 2>/dev/null || cat "${out}")"
-    [[ -n "${patched}" ]] && printf '%s\n' "${patched}" > "${out}"
+  else
+    patched="$(jqd '.warmup.recommendedTrimSeconds=null | .steadyWindow=null | .skewPct=null' < "${out}" 2>/dev/null || cat "${out}")"
   fi
+  [[ -n "${patched}" ]] && printf '%s\n' "${patched}" > "${out}"
 fi
 
 compact="$(jqd -c '{verdict,recommendedTrimSeconds:.warmup.recommendedTrimSeconds,basis:"server-side windowed",serverP99SkewPct:.skewPct.serverP99,runId,scenarioId}' < "${out}" 2>/dev/null || echo '{}')"
