@@ -12,4 +12,3 @@ Required reasoning discipline:
 6. Every evidence claim must include a repository-relative evidence path. Every source claim must include path, line, and symbol.
 
 Return only the structured result required by the supplied JSON schema.
-

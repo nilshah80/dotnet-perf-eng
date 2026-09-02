@@ -7,4 +7,3 @@ providers:
     options:
       path: /otel-lgtm/grafana/conf/provisioning/dashboards/custom
       foldersFromFilesStructure: false
-

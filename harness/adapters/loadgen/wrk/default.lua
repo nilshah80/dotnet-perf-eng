@@ -28,4 +28,3 @@ if extra_headers ~= "" then
     wrk.headers[name] = value
   end
 end
-

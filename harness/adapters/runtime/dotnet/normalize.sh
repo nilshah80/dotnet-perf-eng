@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # dotnet runtime adapter -- normalize captured binaries into readable evidence.
-# Invoked by harness/core/normalize-runtime.sh. Uses the diagnostics tools
+# Invoked by harness/core/capture/normalize-runtime.sh. Uses the diagnostics tools
 # container (built from ./diagnostics/Dockerfile via the compose "diagnostics"
 # service) to convert:
 #   *.nettrace -> Speedscope JSON  (CPU flamegraph, portable)

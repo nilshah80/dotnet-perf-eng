@@ -15,4 +15,3 @@ For diagnosis work:
 - Keep measurement and diagnostic runs separate because traces, GC dumps, and process dumps perturb the process.
 
 For code changes, first read the latest structured diagnosis under the selected evidence package. Build the full solution and state the exact validation workload and mechanism-specific success gate.
-

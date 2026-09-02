@@ -125,4 +125,3 @@ public sealed class RuntimeLabService(
 
     private sealed record AllocationPayload(int Index, string Base64);
 }
-

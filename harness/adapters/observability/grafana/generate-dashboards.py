@@ -38,12 +38,20 @@ TEMPO = {"type": "tempo", "uid": "tempo"}
 # ---------------------------------------------------------------------------
 # Lab descriptors -- mirror labs/<lab>/lab.config.sh. Onboard a new lab's
 # dashboards by adding an entry here (config-only, matching the harness ethos).
+#
+# "service_regex" is the Grafana $service variable's filter, so it must select
+# the SAME services as the lab's PERFLAB_SERVICE_NAME_REGEX (which the harness
+# uses for its Tempo/Loki selectors) -- it is deliberately written as a prefix
+# wildcard rather than copied verbatim, because the harness value enumerates the
+# services it owns (scenariolab: "perflab-(api|worker)") while the dashboard
+# should also surface a service added to the lab later. Equivalent selection,
+# not identical text: keep them in agreement when a lab is re-pointed.
 # ---------------------------------------------------------------------------
 LABS = {
     "scenariolab": {
         "human": "Scenario Lab",
         "app": "perflab",                 # PERFLAB_APP_METRIC_PREFIX (default)
-        "service_regex": "perflab-.*",    # PERFLAB_SERVICE_NAME_REGEX
+        "service_regex": "perflab-.*",    # cf. PERFLAB_SERVICE_NAME_REGEX (above)
         "uid": "perflab",
         "worker": True,
         "deps": ["postgres", "redis", "rabbitmq"],

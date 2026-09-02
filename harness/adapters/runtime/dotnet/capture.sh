@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # dotnet runtime adapter -- capture in-process diagnostics via the dotnet-monitor
-# sidecar. Invoked by harness/core/capture-runtime.sh, which has already
+# sidecar. Invoked by harness/core/capture/capture-runtime.sh, which has already
 # recreated the app in diagnose mode and exported the workload env
 # (PERF_METHOD/PATH/BODY/BASE_URL, PERFLAB_CONNECTIONS, PERFLAB_DURATION_SECONDS,
 # PERFLAB_LOAD_GENERATOR, PERF_SCENARIO).

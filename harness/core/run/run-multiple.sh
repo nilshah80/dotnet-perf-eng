@@ -5,7 +5,7 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ $# -eq 0 ]]; then
-  echo "Usage: ./harness/core/run-multiple.sh <S01,S07,...> [duration-seconds] [options]" >&2
+  echo "Usage: ./harness/core/run/run-multiple.sh <S01,S07,...> [duration-seconds] [options]" >&2
   exit 1
 fi
 

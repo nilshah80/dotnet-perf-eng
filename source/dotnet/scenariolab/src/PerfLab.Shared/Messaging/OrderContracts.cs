@@ -20,4 +20,3 @@ public static class RabbitTopology
     public const string DeadLetterRoutingKey = "order.dead";
     public const string DeadLetterQueue = "perf.orders.dead";
 }
-

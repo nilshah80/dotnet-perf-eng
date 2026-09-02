@@ -95,4 +95,3 @@ public sealed class LabDbContext(DbContextOptions<LabDbContext> options) : DbCon
         });
     }
 }
-

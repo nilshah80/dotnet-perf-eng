@@ -8,4 +8,3 @@ After editing:
 2. Explain each changed source location and why it breaks the diagnosed causal chain.
 3. State any correctness or regression risk.
 4. Do not claim a performance win until the same benchmark protocol is rerun and compared.
-

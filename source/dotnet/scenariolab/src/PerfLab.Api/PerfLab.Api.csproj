@@ -10,4 +10,3 @@
     <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" />
   </ItemGroup>
 </Project>
-

@@ -11,7 +11,7 @@ require_loadgen
 usage() {
   cat <<'EOF'
 Usage:
-  ./harness/core/run-scenarios.sh <S01,S07,...|all> [duration-seconds] [options]
+  ./harness/core/run/run-scenarios.sh <S01,S07,...|all> [duration-seconds] [options]
 
 Options:
   --with-runtime       Capture and normalize the recommended diagnostic (DEFAULT ON).
@@ -23,9 +23,9 @@ Options:
   -h, --help           Show this help.
 
 Examples:
-  ./harness/core/run-scenarios.sh S01,S07,S12 30              # with runtime diagnostics
-  ./harness/core/run-scenarios.sh S01,S07,S12 30 --no-runtime # clean measurement only
-  ./harness/core/run-scenarios.sh all 30 --continue-on-error
+  ./harness/core/run/run-scenarios.sh S01,S07,S12 30              # with runtime diagnostics
+  ./harness/core/run/run-scenarios.sh S01,S07,S12 30 --no-runtime # clean measurement only
+  ./harness/core/run/run-scenarios.sh all 30 --continue-on-error
 EOF
 }
 

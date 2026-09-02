@@ -58,4 +58,3 @@ public sealed class OrderProcessingEvent
     public DateTimeOffset ProcessedAt { get; set; }
     public double DurationMs { get; set; }
 }
-

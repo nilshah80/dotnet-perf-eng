@@ -1,7 +1,7 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /source
 
-COPY Directory.Build.props Directory.Packages.props global.json PerfLab.slnx ./
+COPY Directory.Build.props Directory.Packages.props global.json PerfLab.slnx NuGet.config ./
 COPY src/PerfLab.Shared/PerfLab.Shared.csproj src/PerfLab.Shared/
 COPY src/PerfLab.Api/PerfLab.Api.csproj src/PerfLab.Api/
 RUN dotnet restore src/PerfLab.Api/PerfLab.Api.csproj
