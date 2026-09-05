@@ -104,7 +104,7 @@ case "${kind}" in
   dump)
     run_load & load_pid=$!
     sleep 5
-    pull "${out}/process.dmp" --get --data-urlencode "uid=${runtime_uid}" --data-urlencode "type=Heap" "${diagnostics_url}/dump"
+    pull "${out}/process.dmp" --get --data-urlencode "uid=${runtime_uid}" --data-urlencode "type=WithHeap" "${diagnostics_url}/dump"
     wait "${load_pid}"; load_pid=""
     ;;
   *)

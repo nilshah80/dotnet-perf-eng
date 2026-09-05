@@ -49,6 +49,7 @@ echo "Data-scale sweep ${ds_id}: ${scenario_id}, scales [${scales_csv}], ${durat
 obs() { jqd -r --arg n "$2" '(.scenarios[0].observations // .observations)[]? | select(.name==$n) | .value' < "$1" 2>/dev/null | head -1; }
 
 level_json=()
+failed_scales=0
 for scale in "${scales[@]}"; do
   echo; echo "[data-scale] SEED_SCALE=${scale}: resetting DB volume and reseeding ..."
   # Hard-fail if the volume wipe fails: without a fresh volume the seeder's
@@ -70,6 +71,7 @@ for scale in "${scales[@]}"; do
   if [[ "${level_rc}" -ne 0 || ! -s "$f" ]]; then
     echo "[data-scale] ${scale} ERRORED (exit ${level_rc}, no observations under ${level_dir}); recorded as errored." >&2
     level_json+=("$(printf '{"scale":"%s","errored":true,"artifactPath":"scales/%s"}' "$(json_escape "${scale}")" "${scale}")")
+    failed_scales=$((failed_scales + 1))
     continue
   fi
   rps="$(obs "$f" http.requests_per_second)"; p50="$(obs "$f" http.latency.p50)"
@@ -87,3 +89,9 @@ git_revision="unversioned"; git -C "${repo_root}" rev-parse --is-inside-work-tre
   printf ']}\n'
 } > "${ds_dir}/data-scale.json"
 echo; echo "Data-scale curve: ${ds_dir}/data-scale.json"
+
+# Retain the complete curve before returning a failed aggregate.
+if [[ "${failed_scales}" -gt 0 ]]; then
+  echo "Data-scale sweep failed: ${failed_scales} scale(s) did not produce measured observations." >&2
+  exit 1
+fi

@@ -16,3 +16,4 @@ __pycache__/
 # a run promoted for comparison is stored as a baseline under
 # labs/<lab>/baselines/ and the cross-commit trend in perf-history/.
 artifacts/
+perf-history/
