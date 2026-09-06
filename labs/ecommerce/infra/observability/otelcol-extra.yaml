@@ -2,10 +2,9 @@
 #
 # Merged into grafana/otel-lgtm's built-in collector config at container start via
 #   OTELCOL_EXTRA_ARGS: --config=file:/otel-lgtm/otelcol-extra.yaml
-# The OTel Collector deep-merges every --config file, so this file only ADDS a
-# receiver + a metrics pipeline; the base otlp/app + runtime pipelines are
-# untouched. PostgreSQL server-side metrics then land in the SAME Prometheus as
-# the app's OTLP metrics, so Grafana shows them side by side.
+# The Collector merges this overlay with its built-in configuration: dependency
+# metrics use an additional receiver/pipeline, while logs use bounded batches.
+# Application metrics and traces retain their existing pipelines.
 #
 # The ecommerce lab depends on PostgreSQL only (no Redis/RabbitMQ). postgres-exporter
 # runs only when the stack is brought up with the "obs" compose profile
@@ -21,8 +20,26 @@ receivers:
           static_configs:
             - targets: ["postgres-exporter:9187"]
 
+# SQL-heavy scenarios exceed Loki's default 4 MiB/s ingest and 6 MiB burst.
+# Split collector batches so one export cannot pin the queue, and raise Loki
+# write limits in loki-config.yaml. Metrics/traces and Loki storage retention
+# stay unchanged. Query capture remains 1,000 entries.
+processors:
+  batch/logs:
+    send_batch_size: 512
+    send_batch_max_size: 512
+    timeout: 1s
+
+exporters:
+  otlp_http/logs:
+    sending_queue:
+      queue_size: 64
+      num_consumers: 1
+
 service:
   pipelines:
+    logs:
+      processors: [batch/logs]
     metrics/deps:
       receivers: [prometheus/deps]
       processors: [batch]

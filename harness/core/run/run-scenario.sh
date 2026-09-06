@@ -265,26 +265,40 @@ sleep 6
 export PERFLAB_MEASURE_START_EPOCH="${measure_started_epoch}" PERFLAB_MEASURE_END_EPOCH="${measure_ended_epoch}"
 "${harness_core_dir}/capture/capture-evidence.sh" "${artifact_dir}"
 
-# Resource-trend / leak detection on the captured range gauges (heap, working
-# set, thread-pool queue, DB connections). This is the soak profile's payload --
-# the growth signal a long run exists to surface -- but it is cheap and useful on
-# any run (short windows self-mark as low-confidence).
-"${harness_core_dir}/analyze/analyze-trends.sh" "${artifact_dir}" || true
+# Server-side analyzers read Prometheus. A black-box remote measurement must not
+# query it just because the URL is reachable; write an explicit not-applicable
+# analysis instead of a quiet empty/insufficient-data placeholder.
+if [[ "${target_mode}" == "local" || "${remote_telemetry:-0}" == "1" ]]; then
+  # Resource-trend / leak detection on the captured range gauges (heap, working
+  # set, thread-pool queue, DB connections). This is the soak profile's payload --
+  # the growth signal a long run exists to surface -- but it is cheap and useful on
+  # any run (short windows self-mark as low-confidence).
+  "${harness_core_dir}/analyze/analyze-trends.sh" "${artifact_dir}" || true
 
-# Steady-state validity: did the measure window actually settle, or did warm-up
-# transients (JIT, pool/cache fill, GC) skew the reported p99/throughput/efficiency?
-# Reads window-local SERVER metrics (request-count rate + duration-histogram quantile);
-# best-effort and skippable (PERFLAB_STEADY_STATE=0). It reports; gate.sh
-# --require-steady enforces.
-if [[ "${PERFLAB_STEADY_STATE:-1}" != "0" ]]; then
-  "${harness_core_dir}/analyze/steady-state.sh" "${artifact_dir}" || true
-fi
+  # Steady-state validity: did the measure window actually settle, or did warm-up
+  # transients (JIT, pool/cache fill, GC) skew the reported p99/throughput/efficiency?
+  # Reads window-local SERVER metrics (request-count rate + duration-histogram quantile);
+  # best-effort and skippable (PERFLAB_STEADY_STATE=0). It reports; gate.sh
+  # --require-steady enforces.
+  if [[ "${PERFLAB_STEADY_STATE:-1}" != "0" ]]; then
+    "${harness_core_dir}/analyze/steady-state.sh" "${artifact_dir}" || true
+  fi
 
-# USE-method bottleneck classification (CPU / thread pool / GC / locks / DB pool /
-# dependency) from the captured evidence -- a reproducible "what is the bottleneck?"
-# answer next to the AI phase's. Best-effort and skippable (PERFLAB_BOTTLENECK=0).
-if [[ "${PERFLAB_BOTTLENECK:-1}" != "0" ]]; then
-  "${harness_core_dir}/analyze/bottleneck.sh" "${artifact_dir}" || true
+  # USE-method bottleneck classification (CPU / thread pool / GC / locks / DB pool /
+  # dependency) from the captured evidence -- a reproducible "what is the bottleneck?"
+  # answer next to the AI phase's. Best-effort and skippable (PERFLAB_BOTTLENECK=0).
+  if [[ "${PERFLAB_BOTTLENECK:-1}" != "0" ]]; then
+    "${harness_core_dir}/analyze/bottleneck.sh" "${artifact_dir}" || true
+  fi
+else
+  echo "Remote (black-box): skipping Prometheus-backed analyzers; recording not-applicable server analysis." >&2
+  mkdir -p "${artifact_dir}/analysis"
+  window=$(( measure_ended_epoch - measure_started_epoch )); (( window < 1 )) && window=1
+  printf '{"kind":"steady-state","runId":"%s","scenarioId":"%s","profile":"%s","verdict":"not-applicable","windowSeconds":%s,"basis":"server-side windowed (http_server_request_duration histogram)","reason":"server telemetry was not collected for this black-box remote measurement"}\n' \
+    "$(json_escape "${telemetry_run_id}")" "$(json_escape "${scenario_id}")" "$(json_escape "${load_profile}")" "${window}" \
+    > "${artifact_dir}/analysis/steady-state.json"
+  printf '{"kind":"trend-report","verdict":"not-applicable","growthThreshold":0.2,"series":[],"reason":"server telemetry was not collected for this black-box remote measurement"}\n' \
+    > "${artifact_dir}/analysis/trend-report.json"
 fi
 
 # Record this run's key facts to the committed cross-commit perf history

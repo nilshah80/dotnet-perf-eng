@@ -33,6 +33,9 @@ services:
     image: grafana/otel-lgtm:0.31.0
     container_name: ecommerce-lgtm
     environment:
+      # Keep telemetry ingestion failures visible in docker logs.
+      ENABLE_LOGS_OTELCOL: "true"
+      ENABLE_LOGS_LOKI: "true"
       TEMPO_EXTRA_ARGS: --query-frontend.mcp-server.enabled=true
       PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=6h --storage.tsdb.retention.size=512MB
       # Land on the eCommerce overview board (was previously stock Grafana -- the
@@ -59,6 +62,7 @@ services:
       - ./infra/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/custom.yaml:ro
       - ./infra/grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/custom:ro
       - ./infra/observability/otelcol-extra.yaml:/otel-lgtm/otelcol-extra.yaml:ro
+      - ./infra/observability/loki-config.yaml:/otel-lgtm/loki-config.yaml:ro
     mem_limit: 4g
 
   dotnet-monitor:

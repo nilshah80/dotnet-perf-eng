@@ -125,24 +125,37 @@ if [[ "${target_mode}" == "remote" ]]; then
   # mid-window would be missed by an instant query taken only at capture time.
   capture_prometheus_range scenario_executions "${app_metric_prefix}_scenario_executions_total{${prom_run_id_matcher}}"
   capture_prometheus_range application_metrics "{__name__=~\"${app_metric_prefix}_.*\"${prom_run_id_selector}}"
+  capture_prometheus_range service_instances "target_info{${prom_run_id_matcher}}"
 else
   capture_prometheus_query scenario_executions "${app_metric_prefix}_scenario_executions_total{${prom_run_id_matcher}}"
   capture_prometheus_query application_metrics "{__name__=~\"${app_metric_prefix}_.*\"${prom_run_id_selector}}"
+  capture_prometheus_query service_instances "target_info{${prom_run_id_matcher}}"
 fi
 # (No separate <prefix>_pool_* probe: neither lab exports app-level pool metrics,
 # so it only ever produced an empty result[] file. The application_metrics query
 # above already captures any <prefix>_pool_* series if a lab adds them, and the
 # real connection-pool telemetry is database_pool_metrics.json from metrics.sh.)
 
-service_instance_regex="$(jqd -r '[.data.result[]? | (.metric.service_instance_id // .metric.instance // empty)] | unique | join("|")' \
-  < "${artifact_dir}/telemetry/metrics/application_metrics.json" 2>/dev/null || true)"
+# Resource identity also exists for routes that never emit an application counter
+# (for example S27). Keep the exact local run ID, or the remote job/window scope.
+# Parse each response independently: a missing or partial response must not
+# discard valid identities from the other source. Query failures remain marked
+# incomplete by the capture helpers above.
+service_instance_regex="$(
+  for identity_source in application_metrics service_instances; do
+    identity_file="${artifact_dir}/telemetry/metrics/${identity_source}.json"
+    if [[ -s "${identity_file}" ]]; then
+      jqd -r '[.data.result[]? | (.metric.service_instance_id // .metric.instance // empty)] | unique | .[]' \
+        < "${identity_file}" 2>/dev/null || true
+    fi
+  done | LC_ALL=C sort -u | paste -sd '|' -
+)"
 service_instance_regex="${service_instance_regex:-__no_correlated_service_instance__}"
-# Remote-observed has no run-id fallback, so if the deployed app's meter prefix (or
-# its Prometheus job) does not match, application_metrics is empty -> no correlated
-# instance -> every runtime metric file comes back present-but-empty and the package
-# would otherwise finalize "captured" and look diagnosable. Make that visible.
+# Remote-observed has no run-id fallback. If neither application metrics nor
+# resource identity match its job/window, runtime metrics cannot be correlated.
+# Keep that incomplete state visible instead of claiming a diagnosable package.
 if [[ "${target_mode}" == "remote" && "${service_instance_regex}" == "__no_correlated_service_instance__" ]]; then
-  echo "WARNING: no series matched \"${app_metric_prefix}_*\" with job=~\"${prom_job_regex}\" in the window; runtime metric files will be EMPTY. Check PERFLAB_APP_METRIC_PREFIX matches the deployed app and PERFLAB_PROM_JOB_REGEX its Prometheus job." >&2
+  echo "WARNING: no application or target_info series matched job=~\"${prom_job_regex}\" in the window; runtime metric files will be EMPTY. Check PERFLAB_APP_METRIC_PREFIX matches the deployed app and PERFLAB_PROM_JOB_REGEX its Prometheus job." >&2
   capture_incomplete=1
 fi
 
@@ -214,7 +227,8 @@ if grep -q '"traceID"' "${trace_search_file}" 2>/dev/null; then
 fi
 
 # Loki logs. Retry with a temp file so a timeout cannot truncate the artifact.
-# limit=2000 stays under Loki's 4 MiB gRPC message cap on verbose scenarios.
+# Verbose exception records can exceed Loki's 4 MiB gRPC response cap at
+# 2,000 entries. Match PerfLab's bounded 1,000-entry query.
 log_query="{service_name=~\"${service_name_regex}\"}"
 log_file="${artifact_dir}/telemetry/logs/query-range.json"
 : > "${log_file}"
@@ -223,7 +237,7 @@ for _ in $(seq 1 6); do
   if curl -fsS --max-time 30 --get \
       --data-urlencode "query=${log_query}" \
       --data-urlencode "start=${start_epoch}000000000" --data-urlencode "end=${end_epoch}000000000" \
-      --data-urlencode "limit=2000" \
+      --data-urlencode "limit=1000" \
       "${loki_url}/loki/api/v1/query_range" > "${log_file}.tmp" 2>/dev/null; then
     log_reachable=1
     mv "${log_file}.tmp" "${log_file}"
@@ -296,35 +310,39 @@ printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","loadGenerator":"%
 # CPU-ms, allocated bytes, GC-pause-ms and dependency-ms per request over the
 # measure window. These catch the regression absolute latency hides ("same p99,
 # 2x the CPU/allocations per request") and are gate-able / comparable / trendable
-# like any other observation. Best-effort: if Prometheus is unreachable (a
-# black-box remote run) or the app emitted no requests, the queries no-op and
-# facts.json is left unchanged. Rates cancel the window, so cpu-seconds/request *
-# 1000 = cpu-ms/request, independent of run length.
-eff_window=$(( end_epoch - start_epoch )); (( eff_window < 1 )) && eff_window=1
-eff_si="${service_instance_regex:-.+}"
-eff_reqrate="sum(rate(http_server_request_duration_seconds_count{service_instance_id=~\"${eff_si}\",http_route!~\"/health.*|\"}[${eff_window}s]))"
-prom_scalar() {
-  curl -fsS -G "${prometheus_url}/api/v1/query" \
-    --data-urlencode "query=$1" --data-urlencode "time=${end_epoch}" 2>/dev/null \
-    | jqd -r '.data.result[0].value[1] // empty' 2>/dev/null || true
-}
-eff_obs=()
-add_eff() { # <name> <unit> <numerator-promql>
-  local v; v="$(prom_scalar "$3 / ${eff_reqrate}")"
-  [[ -n "${v}" && "${v}" != "NaN" && "${v}" != "+Inf" && "${v}" != "-Inf" ]] || return 0
-  eff_obs+=("{\"name\":\"$1\",\"value\":${v},\"unit\":\"$2\",\"source\":\"prometheus (derived)\"}")
-}
-add_eff "efficiency.cpu_ms_per_request"    "ms"   "1000 * sum(rate(dotnet_process_cpu_time_seconds_total{service_instance_id=~\"${eff_si}\"}[${eff_window}s]))"
-add_eff "efficiency.alloc_bytes_per_request" "byte" "sum(rate(dotnet_gc_heap_allocated_bytes_total{service_instance_id=~\"${eff_si}\"}[${eff_window}s]))"
-add_eff "efficiency.gc_pause_ms_per_request"  "ms"   "1000 * sum(rate(dotnet_gc_pause_time_seconds_total{service_instance_id=~\"${eff_si}\"}[${eff_window}s]))"
-add_eff "efficiency.db_ms_per_request"        "ms"   "1000 * sum(rate(db_client_operation_duration_seconds_sum{service_instance_id=~\"${eff_si}\"}[${eff_window}s]))"
-if (( ${#eff_obs[@]} > 0 )); then
-  eff_json="[$(IFS=,; echo "${eff_obs[*]}")]"
-  if jqd --argjson eff "${eff_json}" '.observations += $eff' < "${artifact_dir}/facts.json" > "${artifact_dir}/facts.json.tmp" 2>/dev/null; then
-    mv "${artifact_dir}/facts.json.tmp" "${artifact_dir}/facts.json"
-    echo "Added ${#eff_obs[@]} per-request efficiency observation(s) to facts.json." >&2
-  else
-    rm -f "${artifact_dir}/facts.json.tmp"
+# like any other observation.
+#
+# Server metrics require telemetry capture. A black-box remote run must not read
+# Prometheus just because the URL happens to be reachable (local-as-remote
+# fixtures would otherwise silently convert load-only into observed-mode facts).
+# Missing server costs stay absent -- never zero-filled.
+if [[ "${capture_telemetry}" == "1" ]]; then
+  eff_window=$(( end_epoch - start_epoch )); (( eff_window < 1 )) && eff_window=1
+  eff_si="${service_instance_regex:-.+}"
+  eff_reqrate="sum(rate(http_server_request_duration_seconds_count{service_instance_id=~\"${eff_si}\",http_route!~\"/health.*|\"}[${eff_window}s]))"
+  prom_scalar() {
+    curl -fsS -G "${prometheus_url}/api/v1/query" \
+      --data-urlencode "query=$1" --data-urlencode "time=${end_epoch}" 2>/dev/null \
+      | jqd -r '.data.result[0].value[1] // empty' 2>/dev/null || true
+  }
+  eff_obs=()
+  add_eff() { # <name> <unit> <numerator-promql>
+    local v; v="$(prom_scalar "$3 / ${eff_reqrate}")"
+    [[ -n "${v}" && "${v}" != "NaN" && "${v}" != "+Inf" && "${v}" != "-Inf" ]] || return 0
+    eff_obs+=("{\"name\":\"$1\",\"value\":${v},\"unit\":\"$2\",\"source\":\"prometheus (derived)\"}")
+  }
+  add_eff "efficiency.cpu_ms_per_request"    "ms"   "1000 * sum(rate(dotnet_process_cpu_time_seconds_total{service_instance_id=~\"${eff_si}\"}[${eff_window}s]))"
+  add_eff "efficiency.alloc_bytes_per_request" "byte" "sum(rate(dotnet_gc_heap_allocated_bytes_total{service_instance_id=~\"${eff_si}\"}[${eff_window}s]))"
+  add_eff "efficiency.gc_pause_ms_per_request"  "ms"   "1000 * sum(rate(dotnet_gc_pause_time_seconds_total{service_instance_id=~\"${eff_si}\"}[${eff_window}s]))"
+  add_eff "efficiency.db_ms_per_request"        "ms"   "1000 * sum(rate(db_client_operation_duration_seconds_sum{service_instance_id=~\"${eff_si}\"}[${eff_window}s]))"
+  if (( ${#eff_obs[@]} > 0 )); then
+    eff_json="[$(IFS=,; echo "${eff_obs[*]}")]"
+    if jqd --argjson eff "${eff_json}" '.observations += $eff' < "${artifact_dir}/facts.json" > "${artifact_dir}/facts.json.tmp" 2>/dev/null; then
+      mv "${artifact_dir}/facts.json.tmp" "${artifact_dir}/facts.json"
+      echo "Added ${#eff_obs[@]} per-request efficiency observation(s) to facts.json." >&2
+    else
+      rm -f "${artifact_dir}/facts.json.tmp"
+    fi
   fi
 fi
 

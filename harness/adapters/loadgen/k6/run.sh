@@ -49,7 +49,15 @@ k6_enable_prom_rw() {
 
 case "${phase}" in
   warmup)
-    k6 run --vus 16 --duration 10s \
+    warmup_seconds="${PERFLAB_WARMUP_SECONDS:-10}"
+    case "${warmup_seconds}" in
+      ''|*[!0-9]*) echo "PERFLAB_WARMUP_SECONDS must be an integer number of seconds; received '${warmup_seconds}'." >&2; exit 1 ;;
+    esac
+    if (( warmup_seconds < 1 || warmup_seconds > 600 )); then
+      echo "PERFLAB_WARMUP_SECONDS must be between 1 and 600; received '${warmup_seconds}'." >&2
+      exit 1
+    fi
+    k6 run --vus 16 --duration "${warmup_seconds}s" \
       --summary-export "${artifact_dir}/benchmark/k6-warmup.json" \
       --quiet --no-color "${js}" \
       > "${artifact_dir}/benchmark/k6-warmup.txt"

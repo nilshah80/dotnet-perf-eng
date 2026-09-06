@@ -76,6 +76,9 @@ services:
     image: grafana/otel-lgtm:0.31.0
     container_name: perflab-lgtm
     environment:
+      # Keep telemetry ingestion failures visible in docker logs.
+      ENABLE_LOGS_OTELCOL: "true"
+      ENABLE_LOGS_LOKI: "true"
       TEMPO_EXTRA_ARGS: --query-frontend.mcp-server.enabled=true
       # One 27-scenario sweep wrote 812 MB of traces and 364 MB of logs against a
       # 3 GiB limit, which starved evidence capture of traces and metrics for the
@@ -105,6 +108,7 @@ services:
       - ./infra/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/custom.yaml:ro
       - ./infra/grafana/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/custom:ro
       - ./infra/observability/otelcol-extra.yaml:/otel-lgtm/otelcol-extra.yaml:ro
+      - ./infra/observability/loki-config.yaml:/otel-lgtm/loki-config.yaml:ro
     # A full 27-scenario sweep saturated this at 2g: Prometheus and Tempo stopped
     # responding partway through, which starved evidence capture of traces and
     # logs for the later scenarios. Raised to 3g, which keeps the sum of all
