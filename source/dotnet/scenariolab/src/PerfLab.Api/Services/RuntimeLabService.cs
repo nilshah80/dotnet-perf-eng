@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using PerfLab.Api.Contracts;
 using PerfLab.Shared.Configuration;
 using PerfLab.Shared.Data;
@@ -11,7 +12,8 @@ namespace PerfLab.Api.Services;
 
 public sealed class RuntimeLabService(
     IDbContextFactory<LabDbContext> contextFactory,
-    LabRunContext runContext)
+    LabRunContext runContext,
+    ILogger<RuntimeLabService> logger)
 {
     private static readonly SemaphoreSlim SharedGate = new(1, 1);
     private static long _retainedObserverCount;
@@ -92,6 +94,14 @@ public sealed class RuntimeLabService(
 
         if (runContext.Is("S05"))
         {
+            // Sample log so the S05 window has application log evidence in Loki
+            // (the allocation path is otherwise silent: no DB/cache/queue work
+            // and no per-request framework logging at this level).
+            logger.LogInformation(
+                "S05 large-object-churn starting: allocating {Iterations} large arrays of {ArrayBytes} bytes",
+                12,
+                128 * 1024);
+
             var checksum = 0;
             long allocated = 0;
             for (var index = 0; index < 12; index++)
@@ -109,6 +119,11 @@ public sealed class RuntimeLabService(
                 checksum ^= copy?.Base64.Length ?? 0;
                 allocated += bytes.LongLength + (base64.Length * sizeof(char)) + (json.Length * sizeof(char));
             }
+
+            logger.LogInformation(
+                "S05 large-object-churn completed: allocated {AllocatedBytes} bytes, checksum {Checksum}",
+                allocated,
+                checksum);
 
             return Task.FromResult(new MemoryResult("large-object-churn", 0, allocated, checksum));
         }
