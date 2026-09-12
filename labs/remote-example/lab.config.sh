@@ -60,9 +60,14 @@ PERFLAB_WRK_IMAGE=""
 #   PERFLAB_PROMETHEUS_URL="https://prom.staging.example.com" \
 #   PERFLAB_TEMPO_URL="https://tempo.staging.example.com" \
 #   PERFLAB_LOKI_URL="https://loki.staging.example.com" \
+#   PERFLAB_PYROSCOPE_URL="https://pyroscope.staging.example.com" \
 #   PERFLAB_PROM_JOB_REGEX="staging-api-.*" \
 #   PERFLAB_SERVICE_NAME_REGEX="checkout-api" \
 #   PERFLAB_APP_METRIC_PREFIX="myapp"   # if the deployed app's meter prefix differs
+#   PERFLAB_CONTINUOUS_PROFILING=1     # only if the deployed image already has the profiler
+#                                     # (this harness never injects it into a remote target)
+#   PERFLAB_PYROSCOPE_SERVICES="checkout-api"          # exact deployed service_name labels (required)
+#   PERFLAB_PYROSCOPE_REQUIRED_SERVICES="checkout-api" # which of those must have CPU samples
 #
 # (B) remote + diagnostics -- capture nettrace/gcdump against a remote
 #     dotnet-monitor. It PERTURBS the live target and can expose PII, so it needs

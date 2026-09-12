@@ -16,17 +16,20 @@ manifest="${artifact_dir}/manifest.json"
 # capture what the ACTIVE config is before the manifest read below overwrites them.
 env_target_mode="${target_mode}"
 env_remote_telemetry="${remote_telemetry}"
+env_continuous_profiling="${continuous_profiling:-0}"
 
 # Read the manifest fields we need in one jqd call (standalone-safe). The recorded
 # target/remoteTelemetry say what the run actually WAS and gate the backend captures.
-IFS=$'\t' read -r run_id telemetry_run_id scenario_id load_gen manifest_start_epoch manifest_target manifest_rt manifest_meas_start manifest_meas_end manifest_prior_status manifest_fault_applied manifest_fault_restored < <(
-  jqd -r '[.runId,(.telemetryRunId//.runId),.scenarioId,(.workload.loadGenerator//"wrk"),(.startedEpoch//0),(.target//"local"),(.remoteTelemetry // false),(.measurementStartedEpoch // 0),(.measurementEndedEpoch // 0),(.status // ""),
+IFS=$'\t' read -r run_id telemetry_run_id scenario_id load_gen manifest_start_epoch manifest_target manifest_rt manifest_cp manifest_keep manifest_meas_start manifest_meas_end manifest_prior_status manifest_fault_applied manifest_fault_restored < <(
+  jqd -r '[.runId,(.telemetryRunId//.runId),.scenarioId,(.workload.loadGenerator//"wrk"),(.startedEpoch//0),(.target//"local"),(.remoteTelemetry // false),(.continuousProfiling // false),(.profilingKeepTiering // false),(.measurementStartedEpoch // 0),(.measurementEndedEpoch // 0),(.status // ""),
     # (.faultApplied // "") would map a persisted `false` to "" (jq // treats false
     # like null), defeating the explicit fault-outcome guard; has() distinguishes an
     # absent key ("") from a real false ("false").
     (if has("faultApplied") then (.faultApplied|tostring) else "" end),(if has("faultRestored") then (.faultRestored|tostring) else "" end)] | @tsv' < "${manifest}")
 manifest_target="${manifest_target:-local}"
 [[ "${manifest_rt}" == "true" ]] && manifest_rt=1 || manifest_rt=0
+[[ "${manifest_cp}" == "true" ]] && manifest_cp=1 || manifest_cp=0
+[[ "${manifest_keep}" == "true" ]] && manifest_keep=1 || manifest_keep=0
 
 # Standalone-recapture guard: the package records what it WAS; the ACTIVE lab/env
 # must match, because the backend URLs come from the env and default to localhost.
@@ -41,8 +44,20 @@ if [[ "${manifest_rt}" == "1" && "${env_remote_telemetry}" != "1" ]]; then
   echo "Config/manifest mismatch: package is remote-observed, but PERFLAB_REMOTE_TELEMETRY is not enabled now -- the telemetry URLs were not required and would default to localhost. Re-run with PERFLAB_REMOTE_TELEMETRY=1 and the deployed backend URLs." >&2
   exit 1
 fi
+if [[ "${manifest_cp}" == "1" && "${env_continuous_profiling}" != "1" ]]; then
+  echo "Config/manifest mismatch: package recorded continuousProfiling, but PERFLAB_CONTINUOUS_PROFILING is not enabled now. Re-run with PERFLAB_CONTINUOUS_PROFILING=1 (and, for remote, PERFLAB_PYROSCOPE_URL)." >&2
+  exit 1
+fi
+if [[ "${manifest_cp}" == "0" && "${env_continuous_profiling}" == "1" ]]; then
+  echo "Config/manifest mismatch: package recorded continuousProfiling=false, but PERFLAB_CONTINUOUS_PROFILING is enabled now. Recapture would query Pyroscope and rewrite compatibility as profiling-on. Unset PERFLAB_CONTINUOUS_PROFILING." >&2
+  exit 1
+fi
 target_mode="${manifest_target}"
 remote_telemetry="${manifest_rt}"
+continuous_profiling="${manifest_cp}"
+export PERFLAB_CONTINUOUS_PROFILING="${continuous_profiling}"
+profiling_keep_tiering="${manifest_keep}"
+export PERFLAB_PROFILING_KEEP_TIERING="${profiling_keep_tiering}"
 
 # Window selection, most-authoritative first: the env-exported measurement window
 # (run-scenario, the normal path), then the manifest's FINALIZED measurement window
@@ -64,6 +79,7 @@ metric_query_failures=0
 telemetry_metrics_state="not-applicable"
 telemetry_trace_state="not-applicable"
 telemetry_log_state="not-applicable"
+telemetry_profiles_state="not-applicable"
 telemetry_metric_files=0
 telemetry_trace_results=0
 telemetry_trace_details=0
@@ -73,7 +89,7 @@ mkdir -p "${artifact_dir}/source"
 
 # ---------------------------------------------------------------------------
 # Backend capture is two independent decisions:
-#   capture_telemetry -- read Prometheus/Tempo/Loki. TRUE for a local target
+#   capture_telemetry -- read Prometheus/Tempo/Loki/Pyroscope. TRUE for a local target
 #     (owned, run-id scoped) OR a remote-observed one (PERFLAB_REMOTE_TELEMETRY=1,
 #     the deployed env's backends, WINDOW scoped).
 #   target_mode==local -- the compose-exec dependency snapshots + runtime extras.
@@ -299,6 +315,25 @@ telemetry_metrics_state="captured"
 
 fi   # end capture_telemetry
 
+# Pyroscope CPU profiles stay in the Grafana observability adapter. Disabled
+# runs record not-applicable and do not query the backend.
+# shellcheck disable=SC1091
+source "${harness_root}/adapters/observability/grafana/capture-profiles.sh"
+if [[ "${continuous_profiling}" == "1" && "${target_mode}" == "local" ]]; then
+  role="$(scenario_value "${scenario_id}" target || true)"
+  mapped=""
+  for pair in ${PERFLAB_PYROSCOPE_ROLE_SERVICES:-}; do
+    case "${pair}" in
+      "${role}:"*) mapped="${pair#*:}" ;;
+    esac
+  done
+  if [[ -n "${mapped}" ]]; then
+    pyroscope_required_services="${mapped}"
+  fi
+fi
+pyroscope_capture_profiles
+[[ "${profiles_incomplete:-0}" == "1" ]] && capture_incomplete=1
+
 # Dependency snapshots + the app's own socket table + compose ps + runtime extras
 # all shell into OWNED containers (compose exec / snapshot.sh / docker), so they
 # are LOCAL-only -- a remote target (even remote-observed) never runs them.
@@ -321,7 +356,7 @@ fi
 
 # A plain black-box remote run (no telemetry read, no ownership) has only facts.json.
 if [[ "${target_mode}" == "remote" && "${capture_telemetry}" != "1" ]]; then
-  echo "Remote (black-box): skipping all backend capture (Prometheus/Tempo/Loki/dependencies/runtime); facts.json from the load generator is the evidence." >&2
+  echo "Remote (black-box): skipping all backend capture (Prometheus/Tempo/Loki/Pyroscope/dependencies/runtime); facts.json from the load generator is the evidence." >&2
 fi
 
 # Tool versions (generic + runtime adapter probe). Runtime-neutral, both targets.
@@ -454,11 +489,23 @@ jqd -n \
   --arg metrics_state "${telemetry_metrics_state}" --argjson metric_files "${telemetry_metric_files}" --argjson metric_failures "${metric_query_failures}" \
   --arg traces_state "${telemetry_trace_state}" --argjson trace_results "${telemetry_trace_results}" --argjson trace_details "${telemetry_trace_details}" \
   --arg logs_state "${telemetry_log_state}" --argjson log_records "${telemetry_log_records}" \
+  --arg profiles_state "${telemetry_profiles_state}" \
   '{schemaVersion:"telemetry-capture-v1",packageStatus:$package_status,signals:{
     metrics:{captureState:$metrics_state,files:$metric_files,queryFailures:$metric_failures},
     traces:{captureState:$traces_state,returned:$trace_results,retainedDetails:$trace_details,limit:200,truncated:($traces_state=="truncated")},
-    logs:{captureState:$logs_state,returned:$log_records,limit:1000,truncated:($logs_state=="truncated")}
+    logs:{captureState:$logs_state,returned:$log_records,limit:1000,truncated:($logs_state=="truncated")},
+    profiles:{captureState:$profiles_state}
   }}' > "${artifact_dir}/telemetry/capture-status.json"
+if [[ -s "${artifact_dir}/telemetry/profiles-signal.json" ]]; then
+  if cat "${artifact_dir}/telemetry/capture-status.json" "${artifact_dir}/telemetry/profiles-signal.json" \
+    | jqd -s '.[0] as $base | .[1] as $profiles | $base | .signals.profiles=($base.signals.profiles + $profiles)' \
+    > "${artifact_dir}/telemetry/capture-status.json.tmp"; then
+    mv "${artifact_dir}/telemetry/capture-status.json.tmp" "${artifact_dir}/telemetry/capture-status.json"
+  else
+    rm -f "${artifact_dir}/telemetry/capture-status.json.tmp"
+    echo "WARNING: failed to merge Pyroscope capture status; profiles remain a captureState-only signal." >&2
+  fi
+fi
 if [[ "${capture_incomplete}" -eq 1 ]]; then
   echo "NOTE: package finalized status:\"partial\" -- a required capture failed or a prior partial/fault outcome is sticky (see WARNINGs above)." >&2
 fi
@@ -467,7 +514,9 @@ fi
 # self-describing and gate.sh can refuse a partial package (whose available
 # metrics might meet SLOs only because a required capture failed) even when it is
 # handed the facts file directly, without the sibling manifest.
-if jqd --arg st "${capture_status}" '.status=$st' < "${artifact_dir}/facts.json" > "${artifact_dir}/facts.json.tmp" 2>/dev/null; then
+if jqd --arg st "${capture_status}" --argjson cp "${continuous_profiling:-0}" --argjson keep "${profiling_keep_tiering:-0}" \
+    '.status=$st | .continuousProfiling=($cp==1) | .profilingKeepTiering=($keep==1) | if has("compatibility") then .compatibility.continuousProfiling=($cp==1) | .compatibility.profilingKeepTiering=($keep==1) else . end' \
+    < "${artifact_dir}/facts.json" > "${artifact_dir}/facts.json.tmp" 2>/dev/null; then
   mv "${artifact_dir}/facts.json.tmp" "${artifact_dir}/facts.json"
 else
   rm -f "${artifact_dir}/facts.json.tmp"

@@ -33,6 +33,10 @@ PERFLAB_RUN_ID_ATTR="perf.run.id"             # OTEL resource attr carrying the 
 PERFLAB_PROMETHEUS_URL="http://127.0.0.1:9090"
 PERFLAB_TEMPO_URL="http://127.0.0.1:3200"
 PERFLAB_LOKI_URL="http://127.0.0.1:3100"
+PERFLAB_PYROSCOPE_URL="${PERFLAB_PYROSCOPE_URL:-http://127.0.0.1:4040}"
+PERFLAB_PYROSCOPE_SERVICES="perflab-api perflab-worker"
+PERFLAB_PYROSCOPE_REQUIRED_SERVICES="perflab-api"
+PERFLAB_PYROSCOPE_ROLE_SERVICES="api:perflab-api worker:perflab-worker"
 PERFLAB_DIAGNOSTICS_URL="http://127.0.0.1:18323"   # dotnet-monitor (runtime adapter)
 
 # --- Load generators ---

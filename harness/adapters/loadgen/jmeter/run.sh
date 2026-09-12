@@ -9,6 +9,18 @@ source "${HARNESS_ROOT}/core/lib/common.sh"
 
 artifact_dir="${1:?run.sh <artifact-dir> <phase>}"
 phase="${2:?phase required (warmup|measure|diagnostic)}"
+
+# The compatibility envelope of a MEASURED package is immutable evidence. A
+# diagnostic replay that runs inside a measured package (isolated non-campaign
+# diagnostics) publishes its own envelope beside it instead of overwriting it;
+# a fresh campaign-load directory still receives compatibility.json.
+compatibility_target() {
+  local target="${artifact_dir}/benchmark/compatibility.json"
+  if [[ "${phase}" == "diagnostic" && -s "${target}" ]]; then
+    target="${artifact_dir}/benchmark/diagnostic-compatibility.json"
+  fi
+  printf '%s' "${target}"
+}
 mkdir -p "${artifact_dir}/benchmark" "${artifact_dir}/.scratch/${phase}"
 
 jmeter_image="${PERFLAB_JMETER_IMAGE:-}"
@@ -288,4 +300,4 @@ jqd -n \
   --argjson files "$(printf '%s' "${config_json}" | jqd -c '.files')" \
   --argjson bindings "$(printf '%s' "${config_json}" | jqd -c '.propertyBindings')" \
   '{generator:$generator,generatorFingerprint:$fp,workloadContentHash:$content,configurationHash:$config,networkPath:$network,timeout:$timeout,durationSeconds:$duration,connections:$connections,scenario:$scenario,profile:$profile,baseUrl:$base,method:$method,path:$path,files:$files,propertyBindings:$bindings,preparation:{enabled:$prep_enabled,threads:$prep_threads,durationSeconds:$prep_seconds}}' \
-  > "${artifact_dir}/benchmark/compatibility.json"
+  > "$(compatibility_target)"

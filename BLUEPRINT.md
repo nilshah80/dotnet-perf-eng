@@ -35,6 +35,7 @@ repo root
 │   │   └── lib/               # common.sh (shared helpers) + lab-context.sh (lab-specific init)
 │   ├── adapters/
 │   │   ├── runtime/<rt>/     # metrics.sh, capture.sh, normalize.sh, versions.sh, evidence-extra.sh
+│   │   ├── observability/grafana/  # dashboard generator + Pyroscope profile capture
 │   │   ├── dependency/<dep>/ # reset/sample-midload/snapshot.sh (generic; connection config from the descriptor)
 │   │   └── loadgen/<gen>/    # run.sh (shared measurement+evidence contract) + default.{lua,js} (fallback workload)
 │   └── ai/                # diagnosis.schema.json, *-prompt.md, scripts/
@@ -59,7 +60,7 @@ A sourced bash file — no jq needed to read it. Key fields:
 | `PERFLAB_COMPOSE_FILE` / `PERFLAB_APP_SERVICES` | compose file + services to build/recreate |
 | `PERFLAB_BASE_URL` / `PERFLAB_READY_URL` | host URL + readiness probe |
 | `PERFLAB_PROM_JOB_REGEX` / `PERFLAB_SERVICE_NAME_REGEX` / `PERFLAB_RUN_ID_ATTR` | telemetry correlation |
-| `PERFLAB_PROMETHEUS_URL` / `_TEMPO_URL` / `_LOKI_URL` / `_DIAGNOSTICS_URL` | endpoints |
+| `PERFLAB_PROMETHEUS_URL` / `_TEMPO_URL` / `_LOKI_URL` / `_PYROSCOPE_URL` / `_DIAGNOSTICS_URL` | endpoints |
 | `PERFLAB_DEPENDENCIES` | dependency adapters to run |
 | `PERFLAB_DIAG_TARGETS` | `service:process-identity` map for runtime diagnostics |
 | `PERFLAB_LOAD_GENERATOR_DEFAULT` / `_INTERNAL_BASE_URL` / `_COMPOSE_NETWORK` / `_WRK_IMAGE` | load-gen selection & Docker-wrk wiring |

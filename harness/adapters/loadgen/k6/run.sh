@@ -27,6 +27,17 @@ sha256_stream() {
   fi
 }
 
+# The compatibility envelope of a MEASURED package is immutable evidence. A
+# diagnostic replay that runs inside a measured package (isolated non-campaign
+# diagnostics) publishes its own envelope beside it instead of overwriting it;
+# a fresh campaign-load directory still receives compatibility.json.
+compatibility_target() {
+  local target="${artifact_dir}/benchmark/compatibility.json"
+  if [[ "${phase}" == "diagnostic" && -s "${target}" ]]; then
+    target="${artifact_dir}/benchmark/diagnostic-compatibility.json"
+  fi
+  printf '%s' "${target}"
+}
 write_compatibility() {
   local script_rel workload_hash fingerprint base network timeout_seconds config_hash header_names
   script_rel="$(relative_to_repo "${js}")"
@@ -54,7 +65,7 @@ write_compatibility() {
     "$(json_escape "${fingerprint}")" "${workload_hash}" "${config_hash}" "$(json_escape "${network}")" \
     "${timeout_seconds}" "${dur}" "${conns}" "$(json_escape "${PERF_SCENARIO:-}")" "$(json_escape "${profile}")" \
     "$(json_escape "${base}")" "$(json_escape "${PERF_METHOD:-}")" "$(json_escape "${PERF_PATH:-}")" "$(json_escape "${script_rel}")" \
-    > "${artifact_dir}/benchmark/compatibility.json"
+    > "$(compatibility_target)"
 }
 
 # --- Optional k6 -> Prometheus remote-write (MEASURE phase only) --------------
@@ -129,14 +140,14 @@ case "${phase}" in
       echo "Load profile: ${profile} (executor recorded in benchmark/k6-profile.json)"
       k6 run --config "${cfg}" \
         --summary-export "${artifact_dir}/benchmark/${summary}" \
-        "${K6_RW_OUT[@]}" \
+        ${K6_RW_OUT[@]+"${K6_RW_OUT[@]}"} \
         --quiet --no-color "${js}" \
         > "${artifact_dir}/benchmark/${txt}"
     else
       k6 run --vus "${conns}" --duration "${dur}s" \
         --summary-trend-stats "avg,min,med,max,p(50),p(90),p(95),p(99)" \
         --summary-export "${artifact_dir}/benchmark/${summary}" \
-        "${K6_RW_OUT[@]}" \
+        ${K6_RW_OUT[@]+"${K6_RW_OUT[@]}"} \
         --quiet --no-color "${js}" \
         > "${artifact_dir}/benchmark/${txt}"
     fi

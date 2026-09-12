@@ -79,6 +79,20 @@ if [[ -n "${a_fp}${a_content}${a_config}${b_fp}${b_content}${b_config}" ]]; then
     exit 1
   fi
 fi
+read_profiling() { jqd -r '(.continuousProfiling // .compatibility.continuousProfiling // false) | tostring' < "$1" 2>/dev/null || echo false; }
+a_cp="$(read_profiling "${a_file}")"
+b_cp="$(read_profiling "${b_file}")"
+if [[ "${a_cp}" != "${b_cp}" ]]; then
+  echo "ERROR: baseline continuousProfiling=${a_cp} != candidate continuousProfiling=${b_cp}; the CLR profiler perturbs latency. Re-run both with the same PERFLAB_CONTINUOUS_PROFILING setting." >&2
+  exit 1
+fi
+read_keep_tiering() { jqd -r '(.profilingKeepTiering // .compatibility.profilingKeepTiering // false) | tostring' < "$1" 2>/dev/null || echo false; }
+a_keep="$(read_keep_tiering "${a_file}")"
+b_keep="$(read_keep_tiering "${b_file}")"
+if [[ "${a_keep}" != "${b_keep}" ]]; then
+  echo "ERROR: baseline profilingKeepTiering=${a_keep} != candidate profilingKeepTiering=${b_keep}; keep-tiering changes DOTNET_TieredCompilation while the profiler is loaded. Re-run both with the same PERFLAB_PROFILING_KEEP_TIERING setting." >&2
+  exit 1
+fi
 mism=""
 [[ -n "${a_scen}" && -n "${b_scen}" && "${a_scen}" != "${b_scen}" ]] && mism+=" scenario(${a_scen} vs ${b_scen})"
 [[ -n "${a_prof}" && -n "${b_prof}" && "${a_prof}" != "${b_prof}" ]] && mism+=" profile(${a_prof} vs ${b_prof})"

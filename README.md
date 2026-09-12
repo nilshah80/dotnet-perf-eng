@@ -118,7 +118,7 @@ A lab declares `PERFLAB_TARGET` (default `local`). It decides whether the harnes
 | Dependencies | reset/reseed/fault the owned postgres/redis/rabbitmq | none owned — dependencies are off-limits |
 | Warm-up + measure window | yes | yes |
 | Load generator SLIs → `facts.json` | yes | yes — **the entire evidence** |
-| Telemetry (Prometheus/Tempo/Loki) | captured, **run-id-scoped** | off by default; opt-in `PERFLAB_REMOTE_TELEMETRY=1` reads it **window-scoped** |
+| Telemetry (Prometheus/Tempo/Loki/Pyroscope) | captured, **run-id-scoped** | off by default; opt-in `PERFLAB_REMOTE_TELEMETRY=1` reads it **window-scoped** |
 | Runtime diagnostics (dotnet-monitor nettrace/gcdump/stacks) | available | off by default; opt-in `PERFLAB_REMOTE_DIAGNOSTICS=1` **+ ack** |
 | `manifest.json` | `"target":"local"` | `"target":"remote"` (+ `"remoteTelemetry"`) |
 
@@ -158,7 +158,8 @@ reach. The plain mode assumes only a URL; two independent opt-ins add back
 evidence when you have more:
 
 **Remote-observed** (`PERFLAB_REMOTE_TELEMETRY=1`) — you have **read access** to
-the deployed env's Prometheus/Tempo/Loki. The harness reads them too, but scoped by
+the deployed env's Prometheus/Tempo/Loki (and, when continuous profiling is on,
+Pyroscope). The harness reads them too, but scoped by
 the **measurement time window** instead of a run id (the deployed app was not
 started by us, so it carries no `perf.run.id`). The catch: without run-id
 isolation, everything else serving traffic in that window is swept in — trust it
@@ -172,6 +173,11 @@ PERFLAB_LOKI_URL=https://loki.staging \
 PERFLAB_PROM_JOB_REGEX='staging-api-.*' PERFLAB_SERVICE_NAME_REGEX='checkout-api' \
   ./harness/core/run/run-scenario.sh R01 30
 ```
+
+Collecting Pyroscope profiles from a remote target additionally requires
+`PERFLAB_CONTINUOUS_PROFILING=1` and an explicit `PERFLAB_PYROSCOPE_URL`. The
+harness never injects the native profiler into a remote process; the deployed
+image must already contain it.
 
 **Remote + diagnostics** (`PERFLAB_REMOTE_DIAGNOSTICS=1` **+ ack**) — the deployed
 app exposes a reachable **dotnet-monitor** endpoint, so `capture-runtime` can pull
@@ -223,7 +229,7 @@ labs use the **same** host ports; `ecommerce` simply omits Redis and RabbitMQ.
 | Prometheus | Metrics query API (OTLP + remote-write receivers on) | `http://127.0.0.1:9090` | both |
 | Loki | Log query API | `http://127.0.0.1:3100` | both |
 | Tempo | Trace query API | `http://127.0.0.1:3200` | both |
-| Pyroscope | Profiles backend — reachable but empty (see note) | `http://127.0.0.1:4040` | both |
+| Pyroscope | Continuous CPU profiles (opt-in) | `http://127.0.0.1:4040` | both |
 | OTLP ingest | Collector gRPC / HTTP | `127.0.0.1:4317` / `4318` | both |
 | dotnet-monitor | Diagnostic API (trace/gcdump/stacks/dump) | `http://127.0.0.1:18323` | both |
 | PostgreSQL | Lab database (`perflab` / `perflab`) | `127.0.0.1:5432` | both |
@@ -232,9 +238,20 @@ labs use the **same** host ports; `ecommerce` simply omits Redis and RabbitMQ.
 | redis-exporter | Server-side Redis metrics (`obs` profile — opt-in) | in-network only (scraped by the collector) | scenariolab |
 | RabbitMQ | Broker + management (`perflab` / `perflab`) | `127.0.0.1:5672`, mgmt `:15672`, metrics `:15692` | scenariolab |
 
-CPU profiling in this lab comes from the `dotnet-monitor` sidecar (captured and
-converted to Speedscope), **not** Pyroscope: no application sends Pyroscope
-profiles, so treat that port as available-but-empty.
+CPU profiling has two independent paths:
+
+- **Continuous CPU profiling** (opt-in): the Pyroscope .NET native profiler inside
+  each app image, pushing directly to `http://lgtm:4040`. Enable with
+  `PERFLAB_CONTINUOUS_PROFILING=1`. Default is off so benchmark runs stay
+  unperturbed — the CLR profiler and `LD_PRELOAD` wrapper are not activated.
+- **Invasive snapshots** from the `dotnet-monitor` sidecar (`.nettrace`, GC dump,
+  stacks, process dump, Speedscope). These remain the default diagnose-mode
+  workflow and still work when continuous profiling is enabled.
+
+Hold the same `PERFLAB_CONTINUOUS_PROFILING` value on baseline and candidate.
+When profiling is on, also hold `PERFLAB_PROFILING_KEEP_TIERING` — on aarch64 it
+changes `DOTNET_TieredCompilation`. Allocation, heap, lock-contention, and
+exception profiling stay off.
 
 ## Dashboards
 
@@ -251,6 +268,21 @@ how evidence capture scopes runtime metrics by `service_instance_id`.
 | **HTTP & Endpoints** | PE + dev leads | Per-route RED (throughput/p99/errors), 5xx by exception type, Kestrel connections, sortable top-routes table |
 | **Dependencies & Pools** | PE + SRE | Npgsql + HTTP-client pool saturation (pending requests, time-in-queue) and — with the `obs` profile — live Postgres/Redis/RabbitMQ server internals |
 | **Messaging & Worker** *(scenariolab)* | PE | Order publish/process/retry, processing-duration p95, cache hit ratio, resource-pool lab (S21–S26), worker process health |
+| **CPU Profiling** | PE | Pyroscope process-CPU flame graph for `$service` / `$run`, plus a Profiles Drilldown link. Empty unless `PERFLAB_CONTINUOUS_PROFILING=1`. |
+
+**One-place correlation.** The lab overrides the image's Grafana datasource file
+(`labs/<lab>/infra/grafana/datasources.yaml`, generated). One-click links that
+work today: a Prometheus exemplar opens its trace in Tempo; a span's **Logs for
+this span** opens the service's Loki lines for that `trace_id`; a span's
+**Request rate** opens the service's Prometheus rate; a Loki line's `trace_id`
+opens the trace. **Trace → profile is two clicks, not one:** Grafana only
+renders a span-level profile link when the span carries a `pyroscope.profile.id`
+tag, which requires the Pyroscope span-profiles SDK inside the app (deliberately
+not adopted by the labs). Instead, from the trace use Explore **Split**, pick the
+Pyroscope datasource and `{service_name="<service>"}`: the split pane keeps the
+trace's time range, so the flame graph is the span's service over that window.
+The overlay's `tracesToProfiles` block is pre-configured so the one-click button
+appears automatically if a lab app ever adopts span profiles.
 
 The boards are **generated** so both labs stay in lock-step — edit
 `harness/adapters/observability/grafana/generate-dashboards.py` and re-run it;
@@ -303,6 +335,14 @@ runtime diagnostics, and writes an evidence package under
 `artifacts/runs/<run-id>/`. Open Grafana at `http://127.0.0.1:3000` — it lands on
 the **Overview & SLOs** board; the dashboard dropdown switches between the focused
 boards (see **Dashboards** above), and Explore has Tempo traces and Loki logs.
+
+Continuous CPU profiling is off by default. To also collect Pyroscope profiles
+into `telemetry/profiles/` and populate the CPU Profiling board:
+
+```bash
+PERFLAB_LAB=scenariolab PERFLAB_CONTINUOUS_PROFILING=1 \
+  ./harness/core/run/run-single.sh S01 30 --no-runtime
+```
 Then, optionally, hand a package to the AI phase:
 
 ```bash
@@ -505,14 +545,14 @@ These turn the lab from "run and inspect" into a guardrail that **decides**.
 |---|---|
 | `analyze/gate.sh <run> [--threshold R]` | **Performance gate.** Judges a run against absolute SLOs from `labs/<lab>/slos.tsv` **and** a stored baseline (regression, via `compare-runs.sh`). Prints a verdict table and **exits non-zero** on any SLO breach or regression — drops straight into CI. Refuses a `status:"partial"`/unknown package by default (`--allow-partial` to override); a missing required SLO metric fails (`--allow-missing` to skip). `--require-steady` additionally fails a run whose steady-state verdict is not `steady` (so a warm-up/drift-skewed number cannot pass) — this certifies **server-side** steady state, not client-p99 tail steadiness, and validates the stamp's embedded runId/scenario against the candidate and baseline. Accepts a `facts.json` **or** a `run-repeat` `stats.json` (SLOs are checked against the median). |
 | `analyze/update-baseline.sh <run>` | Promote a run to `labs/<lab>/baselines/<scenario>.json`. Commit it so future gates compare against it. |
-
-> **Significance-aware gating (repeat vs repeat).** `compare-runs.sh` only uses statistical significance when *both* sides carry per-metric spread (`n>1`), i.e. both are `run-repeat` `stats.json`. So for a significance-aware gate: baseline **and** candidate must be repeat runs — promote a `run-repeat` directory as the baseline, and gate a `run-repeat` candidate directory (`gate.sh` resolves `stats.json` and now covers `efficiency.*` too). A single `facts.json` candidate (`n=1`) against any baseline falls back to the relative `--threshold`.
 | `analyze/find-knee.sh <capacity-run>` | **Capacity knee from one continuous ramp.** Reads the k6 remote-write series of a `--profile capacity` (ramping-arrival-rate) run and reports the max sustained RPS before p99 breaches the SLO. Complements `run-sweep.sh` (discrete rate steps) with a single-run, client-observed knee → `analysis/capacity.json`. |
 | `analyze/diff-profile.sh <baseline-run> <candidate-run>` | **Differential flame graph.** For each Speedscope profile (from `--with-runtime`), reports the methods whose share of CPU grew/shrank the most — the "which method got hotter" answer. Runs the differ in a `python:3-alpine` container (like `jqd`), so no host Python. |
 | `analyze/trend-report.sh --scenario ID --metric M` | **Cross-commit trend.** Shows a metric per scenario across commits from `perf-history/<lab>.jsonl` (auto-appended after every measure by `record-trend.sh`; skip with `PERFLAB_RECORD_TREND=0`). |
 | `analyze/steady-state.sh <run>` | **Steady-state validity.** Every reported number assumes the window was in steady state, but the harness only does a fixed warm-up. It buckets the window and, per bucket, reads genuinely window-local **server-side** metrics — `rate()` of the request count and `histogram_quantile` over the request-duration histogram (k6's remote-write percentiles are cumulative and can't be windowed). The verdict is **drift-based** (a systematic tail trend, not spread), reporting whether it settled (`steady` / `warming` / `unsteady`), the warm-up to trim, and the whole-vs-steady skew → `analysis/steady-state.json`. **Scope:** it certifies **server-side** steady state; client-side **p99 tail** steadiness is *not* independently verified (k6 client percentiles are cumulative/not windowable) — in a closed-loop run throughput tracks the client *mean*, not the tail (`clientLatencyCoupling`, `certifies`). Auto-run after every measure (skip `PERFLAB_STEADY_STATE=0`); enforce with `gate.sh --require-steady`. |
 | `analyze/bottleneck.sh <run>` | **USE-method bottleneck classifier.** Decomposes a typical request into CPU / GC / DB / other time and combines it with per-resource saturation (thread-pool queue, DB-pool pending, GC-pause fraction, lock contention, CPU utilisation) to name the dominant bottleneck — `cpu-bound`, `threadpool-starved`, `gc-bound`, `lock-bound`, `db-pool-saturated`, `dependency-bound-db` — with a confidence and the evidence → `analysis/bottleneck.json`. A reproducible answer next to the AI phase's. Auto-run after every measure (skip `PERFLAB_BOTTLENECK=0`). |
 | `analyze/diff-gcdump.sh <run>` or `<base> <cand>` | **Differential heap (leak attribution).** The memory counterpart of `diff-profile`: diffs two `dotnet-gcdump report`s and lists the types that grew / shrank / appeared — the "which type grew" answer that turns `analyze-trends`'s *"the heap is growing"* into a cause. Retained bytes are `Object Bytes × Count` per row (bucketed rows list per-object size). One run dir diffs its own `before`/`after` gcdump (same process, bracketing the load); two run dirs compare cross-commit. Pure awk — no container. **Auto-run** by `normalize-runtime` whenever a gcdump before/after pair is present (a plain measure has no gcdump, so — unlike steady-state/bottleneck — it runs on a diagnostic capture, not every measure). |
+
+> **Significance-aware gating (repeat vs repeat).** `compare-runs.sh` only uses statistical significance when *both* sides carry per-metric spread (`n>1`), i.e. both are `run-repeat` `stats.json`. So for a significance-aware gate: baseline **and** candidate must be repeat runs — promote a `run-repeat` directory as the baseline, and gate a `run-repeat` candidate directory (`gate.sh` resolves `stats.json` and now covers `efficiency.*` too). A single `facts.json` candidate (`n=1`) against any baseline falls back to the relative `--threshold`.
 
 **Per-request efficiency** is captured automatically into every `facts.json` as
 `efficiency.cpu_ms_per_request`, `.alloc_bytes_per_request`, `.gc_pause_ms_per_request`
@@ -760,11 +800,14 @@ artifacts/runs/<run-id>/                 # a suite run
     │   ├── k6-summary.json  k6.txt       # measure phase (or wrk.txt / jmeter-summary-v1.json)
     │   ├── k6-warmup.json  k6-warmup.txt
     │   ├── jmeter-summary-v1.json        # JMeter measure (plus jtl-metadata.json, observations.json)
-    │   └── diagnostic-k6-*.{json,txt}    # the separate diagnose-mode load
+    │   ├── diagnostic-k6-*.{json,txt}    # the separate diagnose-mode load
+    │   └── diagnostic-compatibility.json # its envelope; the measured compatibility.json is never rewritten
     ├── telemetry/
+    │   ├── capture-status.json           # metrics/traces/logs/profiles capture states
     │   ├── metrics/                      # Prometheus range (gauges) + instant (counters)
     │   ├── traces/                       # Tempo search + the slowest traces
-    │   └── logs/                         # Loki range query
+    │   ├── logs/                         # Loki range query
+    │   └── profiles/                     # Pyroscope CPU flame graphs (opt-in)
     ├── dependencies/                     # live snapshots (files present depend on the lab):
     │   ├── postgres-{statements,activity,connections,deadlocks,query-plan}.*   # + *-midload
     │   ├── redis-{info,latency,clients}.*                    # scenariolab only
@@ -889,6 +932,12 @@ docker compose -f labs/scenariolab/compose.yaml down -v    # full reset (deletes
 
 - Hold `PERFLAB_LOAD_GENERATOR` constant across any before/after comparison.
   JMeter is container-only (`PERFLAB_JMETER_IMAGE`); do not install host Java.
+- Hold `PERFLAB_CONTINUOUS_PROFILING` constant across an A/B pair. The CLR
+  profiler perturbs latency (and on aarch64 hosts the wrapper also disables
+  tiered compilation while profiling unless `PERFLAB_PROFILING_KEEP_TIERING=1`);
+  default-off runs are the clean benchmark path. `compare-runs.sh` refuses to
+  compare a profiling-on package against a profiling-off one, and refuses two
+  profiling-on packages that disagree on keep-tiering.
 - Runtime diagnostics are **on by default** and ~double wall-clock per scenario;
   because profiling perturbs latency, use `--no-runtime` for the numbers in an A/B
   latency comparison and read the diagnostic run only for the mechanism.
@@ -900,6 +949,65 @@ docker compose -f labs/scenariolab/compose.yaml down -v    # full reset (deletes
 - A `stacks` request usually yields a `trace` — confirm in `runtime/capture.json`.
 - `capture-evidence` fails loud if telemetry or a dependency is unreachable, rather
   than emitting a silently empty package.
+
+## Continuous profiling troubleshooting
+
+- **Backend ready but empty.** `/ready` on port 4040 can succeed before the .NET
+  profiler has uploaded a 10s window. Capture retries like Loki/Tempo. Check
+  `telemetry/profiles/query.json` for the exact selector, window, and the
+  recorded `ready` probe, and confirm `PERFLAB_CONTINUOUS_PROFILING=1` was set
+  **before** `compose up` so the entrypoint exported `CORECLR_*` / `LD_PRELOAD`.
+  Each service entry in `telemetry/profiles-signal.json` records the last
+  `httpStatus`: an HTTP 4xx/5xx means Pyroscope was reachable but rejected the
+  selector (`missing`, with the status in the reason), which is different from
+  an unreachable backend (`ready=false`, "unreachable" in the reason).
+- **Agent not loaded.** `CORECLR_*` and `LD_PRELOAD` are exported only into PID 1
+  by the entrypoint, not into `docker exec` shells. Check
+  `tr '\0' '\n' < /proc/1/environ` inside the app container, or look at
+  `/opt/pyroscope/logs`. If profiler logs say the profiler is explicitly
+  disabled, the wrapper took the disabled path — recreate the app containers
+  after toggling `PERFLAB_CONTINUOUS_PROFILING`. On `aarch64`, pyroscope-dotnet
+  1.5.1 still inherits Datadog's ARM64 gate: the wrapper sets
+  `DD_INTERNAL_PROFILING_ENABLED_ARM64=1`. If logs say "Continuous Profiler is
+  not enabled for ARM64 architecture", that flag did not reach the process.
+  If logs say "The CPU limit is too low for the profiler to work properly",
+  the container quota is below Datadog's 1-core default; the wrapper sets
+  `DD_PROFILING_MIN_CORES_THRESHOLD=0.1` so lab workers at `cpus: 0.75` still
+  profile.
+- **Only `Unknown-Type.Unknown-Method` frames (aarch64 hosts).** pyroscope-dotnet
+  1.5.1 has no supported arm64 build; the gated aarch64 library resolves frames
+  of first-JIT and ReadyToRun code but loses every frame of a method once tiered
+  compilation re-jits it, so a flame graph collapses to one unknown frame
+  ~20-30s after process start (live-verified: `DOTNET_TieredCompilation=0`
+  keeps sampling rich and stable; `TieredPGO=0` does not help). On aarch64 the
+  wrapper therefore disables tiered compilation while profiling is on and
+  labels the profile `dotnet_tiered_compilation:0`; set
+  `PERFLAB_PROFILING_KEEP_TIERING=1` to opt out. Compose interpolates that
+  variable into the ScenarioLab API/worker and eCommerce API services (`0`
+  when unset). Each service entry in
+  `telemetry/profiles-signal.json` carries `symbolization`
+  (`symbolized|partial|unknown`) and `symbolizedNodes`; an `unknown` profile is
+  still `captured` content but is flagged as non-attributable. amd64 images
+  (`TARGETARCH=amd64`) run the supported build with tiering untouched.
+- **Wrong architecture.** Images download `glibc-x86_64` or `glibc-aarch64` from
+  `TARGETARCH`, not the host. A `exec format error` or native-load failure in
+  `/opt/pyroscope/logs` means the image was built for the other architecture.
+- **Unwritable log directory.** The profiler logs to `/opt/pyroscope/logs` (mode
+  0777). If that directory is missing or not writable by `$APP_UID`, native
+  load fails. The images create it in the Dockerfile.
+- **Invalid labels.** `PYROSCOPE_LABELS` values must be bounded tokens (no colon,
+  comma, or space). The wrapper rejects `PERF_RUN_ID` / scenario values that
+  cannot be labels. Secrets, URLs, and user IDs must never be labels. Do not
+  add `service_name` to `PYROSCOPE_LABELS`: pyroscope-dotnet 1.5.1 already
+  labels the Push series from `PYROSCOPE_APPLICATION_NAME`, and a duplicate
+  `service_name` makes Grafana Pyroscope v2 return HTTP 400.
+- **Ingestion delay / empty exact window.** Pyroscope stores each agent upload
+  at a single timestamp. The wrapper sets `DD_PROFILING_UPLOAD_PERIOD=10` so a
+  30s measurement window holds several points; with the inherited 60s period an
+  active process can legitimately have **no** point inside the window and the
+  required profile stays `delayed` (package `partial`). Capture polls like
+  Loki/Tempo. Truncation at 16384 nodes is recorded as `truncated` and remains
+  usable.
 
 ## No host jq
 

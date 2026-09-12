@@ -42,6 +42,22 @@ remote_diag_ack_phrase="i-understand-perturbation"
 remote_write_ack_phrase="i-understand-data-mutation"
 remote_telemetry=0
 remote_diagnostics=0
+continuous_profiling=0
+case "${PERFLAB_CONTINUOUS_PROFILING:-0}" in
+  1|true|yes|on) continuous_profiling=1 ;;
+  0|false|no|off|"") continuous_profiling=0 ;;
+  *) echo "PERFLAB_CONTINUOUS_PROFILING must be 1/true or 0/false; received '${PERFLAB_CONTINUOUS_PROFILING}'." >&2; exit 1 ;;
+esac
+# Compose interpolates this; normalize aliases so the container sees 0 or 1.
+export PERFLAB_CONTINUOUS_PROFILING="${continuous_profiling}"
+profiling_keep_tiering=0
+case "${PERFLAB_PROFILING_KEEP_TIERING:-0}" in
+  1|true|yes|on) profiling_keep_tiering=1 ;;
+  0|false|no|off|"") profiling_keep_tiering=0 ;;
+  *) echo "PERFLAB_PROFILING_KEEP_TIERING must be 1/true or 0/false; received '${PERFLAB_PROFILING_KEEP_TIERING}'." >&2; exit 1 ;;
+esac
+# Compose interpolates this into app services; normalize aliases so containers see 0 or 1.
+export PERFLAB_PROFILING_KEEP_TIERING="${profiling_keep_tiering}"
 if [[ "${target_mode}" == "remote" ]]; then
   case "${PERFLAB_REMOTE_TELEMETRY:-0}" in
     1|true|yes|on) remote_telemetry=1 ;;
@@ -65,6 +81,20 @@ if [[ "${target_mode}" == "remote" ]]; then
   if [[ "${remote_diagnostics}" == "1" && -z "${PERFLAB_DIAGNOSTICS_URL:-}" ]]; then
     echo "PERFLAB_REMOTE_DIAGNOSTICS=1 requires PERFLAB_DIAGNOSTICS_URL set to the deployed dotnet-monitor endpoint; a remote target must not inherit the localhost default." >&2
     exit 1
+  fi
+  if [[ "${continuous_profiling}" == "1" ]]; then
+    if [[ "${remote_telemetry}" != "1" ]]; then
+      echo "PERFLAB_CONTINUOUS_PROFILING=1 on a remote target requires PERFLAB_REMOTE_TELEMETRY=1 and an explicit PERFLAB_PYROSCOPE_URL; the harness never injects a profiler into a remote deployment." >&2
+      exit 1
+    fi
+    if [[ -z "${PERFLAB_PYROSCOPE_URL:-}" ]]; then
+      echo "PERFLAB_CONTINUOUS_PROFILING=1 on a remote target requires PERFLAB_PYROSCOPE_URL set to the deployed Pyroscope endpoint; a remote target must not inherit the localhost default." >&2
+      exit 1
+    fi
+    if [[ -z "${PERFLAB_PYROSCOPE_SERVICES:-}" ]]; then
+      echo "PERFLAB_CONTINUOUS_PROFILING=1 on a remote target requires PERFLAB_PYROSCOPE_SERVICES (the deployed app's exact Pyroscope service_name labels); the harness cannot guess a remote identity." >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -108,6 +138,19 @@ prometheus_url="${PERFLAB_PROMETHEUS_URL:-http://127.0.0.1:9090}"
 tempo_url="${PERFLAB_TEMPO_URL:-http://127.0.0.1:3200}"
 loki_url="${PERFLAB_LOKI_URL:-http://127.0.0.1:3100}"
 diagnostics_url="${PERFLAB_DIAGNOSTICS_URL:-http://127.0.0.1:18323}"
+if [[ "${target_mode}" == "local" ]]; then
+  pyroscope_url="${PERFLAB_PYROSCOPE_URL:-http://127.0.0.1:4040}"
+else
+  # Remote never inherits the loopback Pyroscope default; an explicit URL is
+  # required above when continuous profiling is enabled.
+  pyroscope_url="${PERFLAB_PYROSCOPE_URL:-}"
+fi
+pyroscope_services="${PERFLAB_PYROSCOPE_SERVICES:-}"
+pyroscope_required_services="${PERFLAB_PYROSCOPE_REQUIRED_SERVICES:-}"
+if [[ "${continuous_profiling}" == "1" && "${target_mode}" == "local" && -z "${pyroscope_services}" ]]; then
+  echo "PERFLAB_CONTINUOUS_PROFILING=1 requires PERFLAB_PYROSCOPE_SERVICES (exact Pyroscope service_name labels) in the lab descriptor." >&2
+  exit 1
+fi
 
 dependencies="${PERFLAB_DEPENDENCIES:-}"
 artifacts_root="$(resolve_repo_path "${PERFLAB_ARTIFACTS_ROOT:-artifacts}")"

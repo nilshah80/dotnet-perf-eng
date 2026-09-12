@@ -63,4 +63,17 @@ measure_hash="$(sed -n 's/.*"workloadContentHash":"\([a-f0-9]*\)".*/\1/p' "${tes
 diagnostic_hash="$(sed -n 's/.*"workloadContentHash":"\([a-f0-9]*\)".*/\1/p' "${test_root}/diagnostic/benchmark/compatibility.json")"
 [[ -n "${measure_hash}" && "${measure_hash}" == "${diagnostic_hash}" ]]
 
+# A diagnostic replay inside a MEASURED package must leave the measured envelope
+# byte-identical (capture-runtime's mutation guard hashes it) and publish its
+# own beside it.
+cp -R "${test_root}/measure" "${test_root}/measured-package"
+before="$(shasum -a 256 "${test_root}/measured-package/benchmark/compatibility.json" | awk '{print $1}')"
+PATH="${test_root}/bin:${PATH}" PERFLAB_HARNESS_ROOT="${test_root}/harness" PERFLAB_TEST_SCRIPT="${test_root}/workload/k6.js" \
+  PERFLAB_K6_PROM_RW=0 PERFLAB_CONNECTIONS=4 PERFLAB_DURATION_SECONDS=1 PERFLAB_PROFILE=steady \
+  PERF_SCENARIO=S07 PERF_BASE_URL=http://127.0.0.1:8080/v1/ PERF_METHOD=GET PERF_PATH=/orders PERF_BODY='' \
+  bash "${adapter_dir}/run.sh" "${test_root}/measured-package" diagnostic
+after="$(shasum -a 256 "${test_root}/measured-package/benchmark/compatibility.json" | awk '{print $1}')"
+[[ "${before}" == "${after}" ]] || { echo "diagnostic replay mutated the measured compatibility envelope" >&2; exit 1; }
+[[ -s "${test_root}/measured-package/benchmark/diagnostic-compatibility.json" ]] || { echo "diagnostic replay did not publish its own envelope" >&2; exit 1; }
+
 echo "k6 load adapter compatibility tests passed"

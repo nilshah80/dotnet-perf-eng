@@ -1,0 +1,5 @@
+# Pinned grafana/pyroscope-dotnet release used by the application images.
+# Assets: https://github.com/grafana/pyroscope-dotnet/releases/tag/pyroscope-1.5.1
+PYROSCOPE_VERSION=1.5.1
+PYROSCOPE_SHA256_GLIBC_X86_64=06bc3888e45d53cecefc3263db957833b1c0cb082f9129d1b1e5f63c84b88d18
+PYROSCOPE_SHA256_GLIBC_AARCH64=745752f5f07dd51a6d0fbbcfe4d5a0e0a2d7f9a9286eb661a84b2370a595e87d
