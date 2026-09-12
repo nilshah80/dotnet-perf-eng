@@ -59,6 +59,26 @@ if [[ -n "${a_gen}" && -n "${b_gen}" && "${a_gen}" != "${b_gen}" && "${allow_gen
   echo "ERROR: baseline load generator '${a_gen}' != candidate '${b_gen}'; their numbers are not comparable. Re-run both with the same generator, or pass --allow-generator-mismatch to override." >&2
   exit 1
 fi
+
+read_compat() { jqd -r '[.compatibility.generatorFingerprint // "", .compatibility.workloadContentHash // "", .compatibility.configurationHash // "", .compatibility.generator // "", (.loadGenerator // .scenarios[0].loadGenerator // "")]|@tsv' < "$1" 2>/dev/null || printf '\t\t\t\t'; }
+IFS=$'\t' read -r a_fp a_content a_config a_cgen a_lgen < <(read_compat "${a_file}") || true
+IFS=$'\t' read -r b_fp b_content b_config b_cgen b_lgen < <(read_compat "${b_file}") || true
+require_envelope=false
+if [[ "${a_gen}" =~ ^(jmeter|k6)$ || "${b_gen}" =~ ^(jmeter|k6)$ || "${a_cgen}" =~ ^(jmeter|k6)$ || "${b_cgen}" =~ ^(jmeter|k6)$ || "${a_lgen}" =~ ^(jmeter|k6)$ || "${b_lgen}" =~ ^(jmeter|k6)$ ]]; then
+  require_envelope=true
+fi
+if [[ "${require_envelope}" == "true" ]]; then
+  if [[ -z "${a_fp}" || -z "${a_content}" || -z "${a_config}" || -z "${b_fp}" || -z "${b_content}" || -z "${b_config}" ]]; then
+    echo "ERROR: k6/JMeter comparison requires generatorFingerprint, workloadContentHash, and configurationHash on both sides." >&2
+    exit 1
+  fi
+fi
+if [[ -n "${a_fp}${a_content}${a_config}${b_fp}${b_content}${b_config}" ]]; then
+  if [[ "${a_fp}" != "${b_fp}" || "${a_content}" != "${b_content}" || "${a_config}" != "${b_config}" ]]; then
+    echo "ERROR: compatibility envelope mismatch (generatorFingerprint/workloadContentHash/configurationHash). These runs are not comparable." >&2
+    exit 1
+  fi
+fi
 mism=""
 [[ -n "${a_scen}" && -n "${b_scen}" && "${a_scen}" != "${b_scen}" ]] && mism+=" scenario(${a_scen} vs ${b_scen})"
 [[ -n "${a_prof}" && -n "${b_prof}" && "${a_prof}" != "${b_prof}" ]] && mism+=" profile(${a_prof} vs ${b_prof})"

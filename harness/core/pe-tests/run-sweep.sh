@@ -16,7 +16,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 require_loadgen
-[[ "${load_generator}" == "k6" ]] || { echo "run-sweep.sh needs PERFLAB_LOAD_GENERATOR=k6 (open-model arrival rate is k6-only)." >&2; exit 1; }
+loadgen_supports "${load_generator}" sweep || { echo "run-sweep.sh needs PERFLAB_LOAD_GENERATOR=k6 (open-model arrival rate is k6-only)." >&2; exit 1; }
 
 scenario_id="${1:?run-sweep.sh <scenario-id> [seconds-per-level] [--rates R1,R2,...]}"; shift
 require_scenario "${scenario_id}"

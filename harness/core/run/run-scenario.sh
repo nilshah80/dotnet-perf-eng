@@ -61,6 +61,7 @@ started_epoch="$(date -u +%s)"
 # duration for the manifest, the mid-load snapshot, and the fault window so they
 # cannot diverge from what actually ran.
 effective_duration="$(loadgen_effective_duration "${connections}" "${duration_seconds}")"
+dataset_identity="${PERFLAB_DATASET_IDENTITY:-seedScale=${SEED_SCALE:-default}}"
 # Record fault parameters (set by run-fault.sh) so the package is self-describing.
 fault_field=""
 if [[ -n "${PERFLAB_FAULT_DEP:-}" ]]; then
@@ -77,9 +78,9 @@ fi
 # scoped Prometheus/Tempo/Loki also read) so capture-evidence knows authoritatively
 # what to capture even on a standalone re-invocation. Always false for local.
 remote_telemetry_json=false; [[ "${remote_telemetry:-0}" == "1" ]] && remote_telemetry_json=true
-printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","mode":"measure","target":"%s","remoteTelemetry":%s,"workload":{"loadGenerator":"%s","baseUrl":"%s","readyUrl":"%s","method":"%s","path":"%s","durationSeconds":%s,"requestedDurationSeconds":%s,"connections":%s,"profile":"%s"},"startedAt":"%s","startedEpoch":%s,"source":{"gitRevision":"%s"}%s%s}\n' \
+printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","mode":"measure","target":"%s","remoteTelemetry":%s,"workload":{"loadGenerator":"%s","baseUrl":"%s","readyUrl":"%s","method":"%s","path":"%s","body":"%s","datasetIdentity":"%s","durationSeconds":%s,"requestedDurationSeconds":%s,"connections":%s,"profile":"%s"},"startedAt":"%s","startedEpoch":%s,"source":{"gitRevision":"%s"}%s%s}\n' \
   "$(json_escape "${package_run_id}")" "$(json_escape "${telemetry_run_id}")" "$(json_escape "${scenario_id}")" "$(json_escape "${target_mode}")" "${remote_telemetry_json}" \
-  "$(json_escape "${load_generator}")" "$(json_escape "${base_url}")" "$(json_escape "${ready_url}")" "$(json_escape "${method}")" "$(json_escape "${path}")" \
+  "$(json_escape "${load_generator}")" "$(json_escape "${base_url}")" "$(json_escape "${ready_url}")" "$(json_escape "${method}")" "$(json_escape "${path}")" "$(json_escape "${body}")" "$(json_escape "${dataset_identity}")" \
   "${effective_duration}" "${duration_seconds}" "${connections}" "$(json_escape "${load_profile}")" "$(json_escape "${started_at}")" "${started_epoch}" \
   "$(json_escape "${git_revision}")" "${suite_field}" "${fault_field}" \
   > "${artifact_dir}/manifest.json"

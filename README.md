@@ -25,7 +25,7 @@ the only thing the AI phase reads.
 
 ```mermaid
 flowchart TD
-    LG["Load generator<br/>k6 default or wrk<br/>plus scenario runner"] --> API["ASP.NET Core API<br/>.NET 10"]
+    LG["Load generator<br/>k6 default, wrk, or<br/>container JMeter"] --> API["ASP.NET Core API<br/>.NET 10"]
     API --> PG[("PostgreSQL")]
     API -. scenariolab .-> REDIS[("Redis")]
     API -. scenariolab .-> RABBIT[("RabbitMQ")]
@@ -75,13 +75,13 @@ harness/                          # reusable toolkit (never edited per project)
 ├── adapters/
 │   ├── runtime/dotnet/           # metrics.sh, capture.sh, normalize.sh, versions.sh, evidence-extra.sh, diagnostics/Dockerfile
 │   ├── dependency/{postgres,redis,rabbitmq}/  # reset/sample-midload/snapshot.sh (generic; config-parameterized)
-│   ├── loadgen/{wrk,k6}/         # run.sh (shared contract) + default.lua / default.js (fallback workload)
+│   ├── loadgen/{wrk,k6,jmeter}/  # run.sh (shared contract) + default.lua / default.js / test-plan.jmx
 │   └── observability/grafana/    # generate-dashboards.py — emits the per-lab Grafana dashboard suite
 └── ai/                           # diagnosis.schema.json, *-prompt.md, scripts/
 labs/scenariolab/                 # the EXPERIMENT (per project): what to test + how to run it
 ├── lab.config.sh                 # descriptor — the single re-pointing seam (bash)
 ├── scenarios.tsv                 # this project's API scenarios
-├── loadgen/{k6.js,wrk.lua}       # this lab's workload (auth/data live here; else the shared default)
+├── loadgen/{k6.js,wrk.lua,test-plan.jmx}  # this lab's workload (auth/data live here; else the shared default)
 ├── dependencies/<dep>/<phase>.sh # project-specific probes (e.g. postgres EXPLAIN), by convention
 ├── infra/grafana/dashboards/     # provisioned dashboard suite (generated; one JSON per focused board)
 ├── infra/observability/          # otelcol-extra.yaml — additive collector overlay for dependency scrapes
@@ -278,8 +278,9 @@ so a spike on a latency panel links straight to the Tempo trace that produced it
 ## Prerequisites
 
 - **Docker + Docker Compose** (runs the whole stack; also hosts `jq` — no host jq needed).
-- **A load generator:** `k6` on the host (default), or a **wrk Docker image**
-  (set `PERFLAB_WRK_IMAGE` in `lab.config.sh`). This machine uses k6.
+- **A load generator:** `k6` on the host (default), a **wrk Docker image**
+  (`PERFLAB_WRK_IMAGE`), or the **pinned JMeter container** (`PERFLAB_JMETER_IMAGE`).
+  This machine uses k6 by default. JMeter is never installed on the host.
 - **`claude` CLI** — only for the optional AI diagnosis phase.
 - Bash (Git Bash on Windows), `curl`, `awk` — standard.
 
@@ -366,13 +367,53 @@ is opt-in and runs **via Docker** on the compose network — set
 PERFLAB_LOAD_GENERATOR=wrk ./harness/core/run/run-single.sh S01 30
 ```
 
-The two are **not numerically comparable** (k6 reports latency as numeric ms;
-wrk as unit-suffixed strings), so the generator is recorded in `manifest.json`
-and must be held constant across a before/after comparison.
+**JMeter** is also opt-in and is **container-only**: the harness never installs
+Java or Apache JMeter on the host. Pin the PerfLab image with
+`PERFLAB_JMETER_IMAGE` (a digest `name@sha256:…` or a local image ID
+`sha256:` + 64 hex characters). The adapter inspects that image, refuses a
+missing image (`--pull=never`; it will not pull during a run), and executes
+`run-once` inside the container. Point at a plan with `PERFLAB_JMETER_PLAN`
+(defaults to `labs/<lab>/loadgen/test-plan.jmx`) and optional supporting files
+via `PERFLAB_JMETER_FILES` (a JSON array of repository-relative paths).
+
+```bash
+PERFLAB_LOAD_GENERATOR=jmeter \
+PERFLAB_JMETER_IMAGE=sha256:<local-image-id> \
+PERFLAB_JMETER_PLAN=labs/scenariolab/loadgen/test-plan.jmx \
+  ./harness/core/run/run-single.sh S01 30
+```
+
+JMeter supports **steady** load only (`PERFLAB_PROFILE=steady`). Among the
+performance-engineering runners it is enabled for **`run-repeat.sh` only**
+(sweep / mix / data-scale / fault stay k6). Do not compare JMeter numbers to k6
+or wrk: hold `PERFLAB_LOAD_GENERATOR` constant across a before/after pair.
+
+Both k6 and JMeter measurements publish `observations.json` with p50, p90, p95,
+and p99 plus `benchmark/compatibility.json` (`generatorFingerprint`,
+`workloadContentHash`, `configurationHash`). Comparisons and repeat aggregation
+fail closed when that envelope is absent or differs; the first new k6 baseline
+may replace a legacy baseline that predates the envelope.
+
+The JMX preprocessor joins `PERF_BASE_URL`'s URI path with `PERF_PATH` (so
+`http://api:8080/v1` + `/orders` requests `/v1/orders`). Evidence includes
+`benchmark/jmeter-summary-v1.json`, `observations.json`, and the compatibility
+envelope. Scratch JTL/logs under `.scratch/<phase>` are removed
+after each phase.
+
+**ecommerce JWT.** k6 logs in once in `setup()` and reuses the bearer token.
+JMeter does **not** run that `setup()`; protected scenarios need a pre-minted
+token in `PERF_HEADERS='{"Authorization":"Bearer <token>"}'` (JSON object, never
+commit tokens). E01 (login) needs no token. Login credentials are not forwarded
+into the JMeter container.
+
+The generators are **not numerically comparable** (k6 reports latency as numeric
+ms; wrk as unit-suffixed strings; JMeter uses HDR-histogram percentiles from the
+pinned container), so the generator is recorded in `manifest.json` and must be
+held constant across a before/after comparison.
 
 **Per-lab workloads.** `run.sh` (the measurement + `observations.json` contract)
 is shared and identical across labs; the *workload script* is per-lab, resolved as
-`PERFLAB_{K6,WRK}_SCRIPT` > `labs/<project>/loadgen/<gen>.{js,lua}` > the shared
+`PERFLAB_{K6,WRK}_SCRIPT` / `PERFLAB_JMETER_PLAN` > `labs/<project>/loadgen/<gen>.{js,lua,jmx}` > the shared
 `default.{js,lua}`. A project that needs a JWT `setup()` login, request chaining,
 or per-request datasets ships its own `loadgen/<gen>.js` instead of editing the
 shared default. The defaults also accept an optional `PERF_HEADERS` env var (a JSON
@@ -428,7 +469,8 @@ load regardless of profile, so a trace reflects a stable state rather than a ram
 
 Beyond a single load test, these runners answer the standard perf-engineering
 questions. Each produces evidence packages under `artifacts/runs/`, and they
-compose with the load profiles above (`--profile`). k6 only.
+compose with the load profiles above (`--profile`). Sweep / mix / data-scale /
+fault are **k6 only**. `run-repeat.sh` also accepts `PERFLAB_LOAD_GENERATOR=jmeter`.
 
 | Runner | Question it answers | Output |
 |---|---|---|
@@ -503,15 +545,102 @@ an existing package:
 ```bash
 ./harness/core/capture/capture-runtime.sh artifacts/runs/<run-id>            # scenario's recommended kind
 ./harness/core/capture/capture-runtime.sh artifacts/runs/<run-id> trace 30  # or choose: trace|gcdump|stacks|dump
+./harness/core/capture/capture-runtime.sh artifacts/runs/<run-id> --preset cpu-memory 30
 ./harness/core/capture/normalize-runtime.sh artifacts/runs/<run-id>         # binaries -> Speedscope JSON / text
 ```
 
-On a **local** target, `capture-runtime` recreates the app in `diagnose` mode before
-applying load (clearing leaks/pools left by the measurement) and resolves the target
-by runtime identity, not container PID. On a **remote** target it does **not**
-recreate the app (it is not owned) — it drives the manifest-recorded workload against
-the deployed dotnet-monitor and leaves a **raw** capture (normalize it offline; the
-in-place normalizer needs the local tools container). For .NET, a `stacks` request
+The `diagnostic` TSV column is a **single recommended invasive runtime
+diagnostic**, not an evidence allowlist. Load facts, metrics, logs, traces,
+dependency snapshots, process discovery, and source/tool provenance are still
+captured independently. The cell accepts one of `trace`, `gcdump`, `stacks`, or
+`dump`; it does not accept `all` or a comma-separated list.
+
+For a deep CPU-plus-memory investigation, `--preset cpu-memory` reuses one app
+recreation and warm-up, then performs the ordered campaign: before GC dump,
+short recovery, CPU trace concurrent with one diagnostic load, and after GC
+dump. `cpu`, `memory`, `hang`, and `dump` are also accepted presets; there is
+intentionally no `all`. `hang` is trace-only unless `--include-dump` is added.
+Any process dump additionally requires
+`PERFLAB_DUMP_ACK=i-understand-sensitive-dump`. The `dump` preset takes only the
+process snapshot: it does not warm up, require a load-generator installation,
+run diagnostic traffic, or require the remote data-mutation acknowledgement.
+
+Campaign output is independent and self-describing:
+
+```text
+runtime/
+├── campaign.json
+├── normalization.json
+├── campaign-load/                 # warm-up/diagnostic generator evidence; never benchmark input
+└── captures/
+    ├── gcdump-before/
+    │   ├── capture.json
+    │   ├── before.gcdump
+    │   ├── normalization.json
+    │   └── report.txt
+    ├── trace/
+    │   ├── capture.json
+    │   ├── cpu.nettrace
+    │   ├── normalization.json
+    │   └── cpu.speedscope.json
+    └── gcdump-after/
+        ├── capture.json
+        ├── after.gcdump
+        ├── normalization.json
+        └── report.txt
+```
+
+Each capture has requested/effective type, timestamps, artifact paths, and its
+own state. One failed GC dump makes the campaign `partial`; it does not delete a
+successful trace. Normalization also continues capture-by-capture and records a
+separate state. The default 1 GiB campaign budget is preflighted against free
+disk (`PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES` changes it), and recovery
+defaults to two seconds (`PERFLAB_DIAGNOSTIC_RECOVERY_SECONDS`). Diagnostic load
+files live under `runtime/campaign-load`, so the package's measured
+`facts.json`, observations, baselines, and gates remain unchanged. The campaign
+records the source git revision, endpoint, connections, body, dataset identity,
+generator fingerprint, and workload hash. It also verifies the diagnostic
+k6/JMeter fingerprint and workload hash before claiming a complete replay.
+Measurements created before these replay fields and compatibility envelopes
+were added must be rerun before using a load-bearing preset.
+
+For maximum attribution, or to capture several kinds that should not share a
+process lifetime, keep the copy-per-kind workflow below. A directory can hold
+one singular capture or one campaign; the command refuses to overwrite either.
+
+```bash
+./harness/core/run/run-single.sh S04 30 --no-runtime
+base=artifacts/runs/<suite>/scenarios/S04
+for kind in trace gcdump dump; do
+  cp -R "${base}" "${base}-${kind}"
+  [[ "${kind}" != dump ]] || export PERFLAB_DUMP_ACK=i-understand-sensitive-dump
+  ./harness/core/capture/capture-runtime.sh "${base}-${kind}" "${kind}" 30
+  ./harness/core/capture/normalize-runtime.sh "${base}-${kind}"
+done
+```
+
+Start from a measurement created with `--no-runtime`, or copy a clean
+measurement-only package before each command. `stacks` may be added to the
+loop, but the default .NET sidecar policy records its documented CPU-trace
+fallback unless
+`PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true` is explicitly enabled. In practice,
+prefer `trace`: it already contains managed stack information. Process dumps can
+contain secrets or personal data and should remain restricted.
+
+Ordinary scenarios still collect all passive evidence together. Metrics,
+logs, distributed traces, dependency snapshots, process/deployment inventory,
+load evidence, and provenance are observed during the run where appropriate and
+queried or published after load. Only these invasive runtime captures require a
+kind or preset. Routine CI comparisons should use the clean measurement;
+campaign throughput and latency are never baseline or gate inputs.
+
+On a **local** target, `capture-runtime` recreates the app in `diagnose` mode
+before any load-bearing diagnostic (clearing leaks/pools left by the measurement)
+and resolves the target by runtime identity, not container PID. On a **remote**
+target it does **not** recreate the app (it is not owned). Load-bearing diagnostics
+drive the manifest-recorded workload; dump-only does not. The command leaves a
+**raw** capture (normalize it offline; the in-place normalizer needs the local
+tools container). For .NET, a `stacks` request
 records a `trace` fallback by default (the dotnet-monitor profiler channel is
 unreliable in this sidecar topology) and documents it in `runtime/capture.json`.
 
@@ -626,9 +755,11 @@ artifacts/runs/<run-id>/                 # a suite run
     ├── manifest.json                    # scenario, workload, loadGenerator, profile, telemetryRunId
     ├── facts.json                       # this scenario's observations (an index, not conclusions)
     ├── benchmark/
-    │   ├── observations.json            # normalized SLIs: req/s, latency p50/p90/p99, error/dropped
-    │   ├── k6-summary.json  k6.txt       # measure phase (or wrk.txt)
+    │   ├── observations.json            # normalized SLIs: req/s, latency p50/p90/p95/p99, error/dropped
+    │   ├── compatibility.json           # k6/JMeter generator, workload, configuration identity
+    │   ├── k6-summary.json  k6.txt       # measure phase (or wrk.txt / jmeter-summary-v1.json)
     │   ├── k6-warmup.json  k6-warmup.txt
+    │   ├── jmeter-summary-v1.json        # JMeter measure (plus jtl-metadata.json, observations.json)
     │   └── diagnostic-k6-*.{json,txt}    # the separate diagnose-mode load
     ├── telemetry/
     │   ├── metrics/                      # Prometheus range (gauges) + instant (counters)
@@ -715,8 +846,8 @@ proposed fix:
    body, connection count, duration, and Docker resources.
 2. Same `SEED_SCALE` — and reseed (`down -v` + bring-up) when a write scenario or
    a data-scale test has mutated the dataset.
-3. Same **load generator** — wrk and k6 numbers are not comparable, so hold
-   `PERFLAB_LOAD_GENERATOR` constant across the pair.
+3. Same **load generator** — wrk, k6, and JMeter numbers are not comparable, so
+   hold `PERFLAB_LOAD_GENERATOR` constant across the pair.
 4. Reset Redis, RabbitMQ queues, and `pg_stat_statements` before each measurement
    (the harness does this at the start of every scenario).
 5. Warm up, then take **repeated** measurements rather than one: `run-repeat.sh`
@@ -757,6 +888,7 @@ docker compose -f labs/scenariolab/compose.yaml down -v    # full reset (deletes
 ## Operational cautions
 
 - Hold `PERFLAB_LOAD_GENERATOR` constant across any before/after comparison.
+  JMeter is container-only (`PERFLAB_JMETER_IMAGE`); do not install host Java.
 - Runtime diagnostics are **on by default** and ~double wall-clock per scenario;
   because profiling perturbs latency, use `--no-runtime` for the numbers in an A/B
   latency comparison and read the diagnostic run only for the mechanism.

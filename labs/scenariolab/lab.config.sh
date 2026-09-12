@@ -42,6 +42,11 @@ PERFLAB_LOAD_GENERATOR_DEFAULT="k6"
 PERFLAB_INTERNAL_BASE_URL="http://api:8080"   # app URL on the compose network (Docker load gens)
 PERFLAB_COMPOSE_NETWORK="perflab_default"     # compose network a Docker load gen joins
 PERFLAB_WRK_IMAGE=""                           # set to your wrk Docker image to enable wrk
+# JMeter uses the same pinned container image as PerfLab. Leave unset unless
+# PERFLAB_LOAD_GENERATOR=jmeter; k6 remains the lab default.
+# PERFLAB_JMETER_IMAGE="sha256:<local-image-id>"
+# PERFLAB_JMETER_PLAN="labs/scenariolab/loadgen/test-plan.jmx"
+# PERFLAB_JMETER_FILES='[]'
 # Workload scripts are the shared run.sh (evidence contract) + a per-lab script.
 # The active generator's script is resolved as: PERFLAB_{K6,WRK}_SCRIPT override >
 # labs/scenariolab/loadgen/<gen>.{js,lua} (present) > the shared default. This lab

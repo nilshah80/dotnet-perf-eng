@@ -39,10 +39,14 @@ PERFLAB_LOAD_GENERATOR_DEFAULT="k6"
 PERFLAB_INTERNAL_BASE_URL="http://api:8080"
 PERFLAB_COMPOSE_NETWORK="ecommerce_default"
 PERFLAB_WRK_IMAGE=""
+# JMeter is optional and uses the shared PerfLab image. k6.js is unchanged.
+# PERFLAB_JMETER_IMAGE="sha256:<local-image-id>"
+# PERFLAB_JMETER_PLAN="labs/ecommerce/loadgen/test-plan.jmx"
+# PERFLAB_JMETER_FILES='[]'
 # The workload is this lab's own loadgen/k6.js: it authenticates once in setup()
 # and sends the bearer token on every request, so protected scenarios need no
-# harness change. (wrk would fall back to the shared unauthenticated default, so
-# use k6 for protected endpoints, or pass a pre-minted token via PERF_HEADERS.)
+# harness change. JMeter and wrk do not run that setup() login, so protected
+# endpoints need a pre-minted token via PERF_HEADERS (or stay on k6).
 
 # --- Dependencies (postgres only) ---
 PERFLAB_DEPENDENCIES="postgres"

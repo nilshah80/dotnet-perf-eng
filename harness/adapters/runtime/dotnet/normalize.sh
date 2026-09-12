@@ -26,6 +26,17 @@ fi
 
 runtime_dir="${artifact_dir}/runtime"
 mkdir -p "${artifact_dir}/analysis/runtime"
+normalization_failures=0
+
+write_capture_normalization() { # source status output reason
+  local source="$1" status="$2" output="$3" reason="$4" directory
+  [[ "${source}" == "${runtime_dir}/captures/"* ]] || return 0
+  directory="${source%/*}"
+  printf '{"source":"%s","status":"%s","outputs":%s,"reason":"%s"}\n' \
+    "$(json_escape "${source#"${artifact_dir}/"}")" "${status}" \
+    "$([[ -n "${output}" ]] && printf '["%s"]' "$(json_escape "${output#"${artifact_dir}/"}")" || printf '[]')" \
+    "$(json_escape "${reason}")" > "${directory}/normalization.json"
+}
 
 # NB: every `compose ... run` below redirects stdin from /dev/null. Without it a
 # `docker compose run` inside a `while read` loop fed by `< <(find ...)` consumes the
@@ -36,24 +47,55 @@ mkdir -p "${artifact_dir}/analysis/runtime"
 while IFS= read -r trace_file; do
   rel="${trace_file#"${artifacts_root}/"}"
   name="$(basename "${trace_file}" .nettrace)"
-  compose --profile tools run --rm diagnostics \
+  normalized="${trace_file%/*}/${name}.speedscope.json"
+  if compose --profile tools run --rm diagnostics \
     dotnet-trace convert "/artifacts/${rel}" --format Speedscope \
-    --output "/artifacts/${rel%/*}/${name}" </dev/null
+    --output "/artifacts/${rel%/*}/${name}" </dev/null; then
+    write_capture_normalization "${trace_file}" captured "${normalized}" ""
+  else
+    echo "Failed to normalize ${trace_file}; continuing with other campaign captures." >&2
+    write_capture_normalization "${trace_file}" partial "" "dotnet-trace conversion failed"
+    normalization_failures=$((normalization_failures + 1))
+  fi
 done < <(find "${runtime_dir}" -type f -name '*.nettrace' -print)
 
 while IFS= read -r gcdump_file; do
   rel="${gcdump_file#"${artifacts_root}/"}"
-  out="${artifact_dir}/analysis/runtime/$(basename "${gcdump_file}" .gcdump)-gcdump-report.txt"
-  compose --profile tools run --rm diagnostics \
-    dotnet-gcdump report "/artifacts/${rel}" </dev/null > "${out}"
+  analysis_out="${artifact_dir}/analysis/runtime/$(basename "${gcdump_file}" .gcdump)-gcdump-report.txt"
+  out="${analysis_out}"
+  [[ "${gcdump_file}" == "${runtime_dir}/captures/"* ]] && out="${gcdump_file%/*}/report.txt"
+  if compose --profile tools run --rm diagnostics \
+    dotnet-gcdump report "/artifacts/${rel}" </dev/null > "${out}"; then
+    [[ "${out}" == "${analysis_out}" ]] || cp "${out}" "${analysis_out}"
+    write_capture_normalization "${gcdump_file}" captured "${out}" ""
+  else
+    rm -f "${out}"
+    echo "Failed to normalize ${gcdump_file}; continuing with other campaign captures." >&2
+    write_capture_normalization "${gcdump_file}" partial "" "dotnet-gcdump report failed"
+    normalization_failures=$((normalization_failures + 1))
+  fi
 done < <(find "${runtime_dir}" -type f -name '*.gcdump' -print)
 
 while IFS= read -r dump_file; do
   rel="${dump_file#"${artifacts_root}/"}"
-  out="${artifact_dir}/analysis/runtime/$(basename "${dump_file}" .dmp)-dump-report.txt"
-  compose --profile tools run --rm diagnostics \
+  analysis_out="${artifact_dir}/analysis/runtime/$(basename "${dump_file}" .dmp)-dump-report.txt"
+  out="${analysis_out}"
+  [[ "${dump_file}" == "${runtime_dir}/captures/"* ]] && out="${dump_file%/*}/report.txt"
+  if compose --profile tools run --rm diagnostics \
     dotnet-dump analyze "/artifacts/${rel}" \
-    -c "clrthreads" -c "clrstack -all" -c "dumpheap -stat" -c "exit" </dev/null > "${out}"
+    -c "clrthreads" -c "clrstack -all" -c "dumpheap -stat" -c "exit" </dev/null > "${out}"; then
+    [[ "${out}" == "${analysis_out}" ]] || cp "${out}" "${analysis_out}"
+    write_capture_normalization "${dump_file}" captured "${out}" ""
+  else
+    rm -f "${out}"
+    echo "Failed to normalize ${dump_file}; continuing with other campaign captures." >&2
+    write_capture_normalization "${dump_file}" partial "" "dotnet-dump analysis failed"
+    normalization_failures=$((normalization_failures + 1))
+  fi
 done < <(find "${runtime_dir}" -type f -name '*.dmp' -print)
 
 echo "Normalized runtime evidence is under ${artifact_dir}/analysis/runtime."
+if (( normalization_failures > 0 )); then
+  echo "Runtime normalization completed partially (${normalization_failures} failed capture(s))." >&2
+  exit 2
+fi

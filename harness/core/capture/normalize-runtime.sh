@@ -24,7 +24,17 @@ if [[ ! -f "${normalizer}" ]]; then
   echo "Runtime adapter '${runtime}' has no normalize.sh; nothing to normalize." >&2
   exit 0
 fi
-"${normalizer}" "${artifact_dir}"
+normalization_json="${artifact_dir}/runtime/normalization.json"
+normalization_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+normalization_rc=0
+if "${normalizer}" "${artifact_dir}"; then
+  printf '{"startedAt":"%s","completedAt":"%s","status":"captured"}\n' \
+    "$(json_escape "${normalization_started}")" "$(json_escape "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" > "${normalization_json}"
+else
+  normalization_rc=$?
+  printf '{"startedAt":"%s","completedAt":"%s","status":"partial","reason":"one or more independent capture normalizations failed"}\n' \
+    "$(json_escape "${normalization_started}")" "$(json_escape "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" > "${normalization_json}"
+fi
 
 # If the gcdump diagnostic produced a before/after pair (it snapshots the SAME process
 # around the load), attribute the in-process growth to types automatically -- the
@@ -34,3 +44,4 @@ if [[ -s "${artifact_dir}/analysis/runtime/before-gcdump-report.txt" \
   echo ""
   "${harness_core_dir}/analyze/diff-gcdump.sh" "${artifact_dir}" || true
 fi
+(( normalization_rc == 0 )) || exit "${normalization_rc}"

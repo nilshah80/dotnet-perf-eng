@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="PerfLab" enabled="true">
+      <stringProp name="TestPlan.comments"></stringProp>
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.tearDown_on_shutdown">true</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+        <collectionProp name="Arguments.arguments"/>
+      </elementProp>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="PerfLab Thread Group" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" enabled="true">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <intProp name="LoopController.loops">-1</intProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(perflab.threads,1)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">0</stringProp>
+        <boolProp name="ThreadGroup.scheduler">true</boolProp>
+        <stringProp name="ThreadGroup.duration">${__P(perflab.duration_seconds,1)}</stringProp>
+        <stringProp name="ThreadGroup.delay">0</stringProp>
+        <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
+      </ThreadGroup>
+      <hashTree>
+        <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="Bind PERF_* environment" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="parameters"></stringProp>
+          <stringProp name="filename"></stringProp>
+          <stringProp name="cacheKey">true</stringProp>
+          <stringProp name="script"><![CDATA[
+import java.net.URI
+def joinGeneratorPath = { String basePath, String scenario ->
+  if (scenario == null || scenario.trim().isEmpty()) {
+    scenario = "/"
+  }
+  def q = scenario.indexOf('?')
+  def h = scenario.indexOf('#')
+  def cut = -1
+  if (q >= 0 && h >= 0) {
+    cut = Math.min(q, h)
+  } else if (q >= 0) {
+    cut = q
+  } else if (h >= 0) {
+    cut = h
+  }
+  def pathOnly = cut >= 0 ? scenario.substring(0, cut) : scenario
+  def suffix = cut >= 0 ? scenario.substring(cut) : ""
+  def left = (basePath ?: "").replaceAll('/+$', '')
+  def right = pathOnly.replaceAll('^/+', '')
+  def joined
+  if (left.isEmpty() && right.isEmpty()) {
+    joined = "/"
+  } else if (left.isEmpty()) {
+    joined = "/" + right
+  } else if (right.isEmpty()) {
+    joined = left
+  } else {
+    joined = left + "/" + right
+  }
+  joined = joined.replaceAll('/+', '/')
+  if (!joined.startsWith('/')) {
+    joined = "/" + joined
+  }
+  return joined + suffix
+}
+def raw = System.getenv("PERF_BASE_URL")
+if (raw == null || raw.trim().isEmpty()) {
+  throw new Exception("PERF_BASE_URL is required")
+}
+def uri = URI.create(raw)
+def scenario = System.getenv("PERF_PATH") ?: "/"
+def method = (System.getenv("PERF_METHOD") ?: "GET").toUpperCase()
+vars.put("perflab.scheme", uri.getScheme() ?: "http")
+vars.put("perflab.host", uri.getHost())
+def port = uri.getPort()
+if (port < 0) {
+  port = "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80
+}
+vars.put("perflab.port", String.valueOf(port))
+vars.put("perflab.path", joinGeneratorPath(uri.getRawPath() ?: "", scenario))
+vars.put("perflab.method", method)
+vars.put("perflab.body", System.getenv("PERF_BODY") ?: "")
+vars.put("perflab.runId", System.getenv("PERF_RUN_ID") ?: "")
+def headersRaw = System.getenv("PERF_HEADERS")
+vars.put("perflab.authorization", "")
+if (headersRaw != null && !headersRaw.trim().isEmpty()) {
+  try {
+    def parsed = new groovy.json.JsonSlurper().parseText(headersRaw)
+    if (parsed instanceof Map && parsed.Authorization) {
+      vars.put("perflab.authorization", String.valueOf(parsed.Authorization))
+    }
+  } catch (Exception ignored) {
+  }
+}
+]]></stringProp>
+        </JSR223PreProcessor>
+        <hashTree/>
+        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="PerfLab Headers" enabled="true">
+          <collectionProp name="HeaderManager.headers">
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">Accept</stringProp>
+              <stringProp name="Header.value">application/json</stringProp>
+            </elementProp>
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">Content-Type</stringProp>
+              <stringProp name="Header.value">application/json</stringProp>
+            </elementProp>
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">X-Perf-Run-Id</stringProp>
+              <stringProp name="Header.value">${perflab.runId}</stringProp>
+            </elementProp>
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">Authorization</stringProp>
+              <stringProp name="Header.value">${perflab.authorization}</stringProp>
+            </elementProp>
+          </collectionProp>
+        </HeaderManager>
+        <hashTree/>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="PerfLab HTTP" enabled="true">
+          <stringProp name="HTTPSampler.domain">${perflab.host}</stringProp>
+          <stringProp name="HTTPSampler.port">${perflab.port}</stringProp>
+          <stringProp name="HTTPSampler.protocol">${perflab.scheme}</stringProp>
+          <stringProp name="HTTPSampler.path">${perflab.path}</stringProp>
+          <stringProp name="HTTPSampler.method">${perflab.method}</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" enabled="true">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">${perflab.body}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree/>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

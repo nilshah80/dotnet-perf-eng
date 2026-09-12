@@ -12,6 +12,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 require_loadgen
+loadgen_supports "${load_generator}" fault || { echo "run-fault.sh needs PERFLAB_LOAD_GENERATOR=k6 (JMeter fault PE is not enabled)." >&2; exit 1; }
 # Local-only: fault injection pauses/stops OWNED compose dependencies, which a
 # remote target does not have (and must never be attempted against).
 [[ "${target_mode:-local}" == "local" ]] || { echo "run-fault.sh needs a local target (PERFLAB_TARGET=local): it pauses/stops OWNED compose dependencies. A remote target has none to fault." >&2; exit 1; }

@@ -9,7 +9,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 require_loadgen
-[[ "${load_generator}" == "k6" ]] || { echo "run-mix.sh needs PERFLAB_LOAD_GENERATOR=k6 (the mix workload is k6-only)." >&2; exit 1; }
+loadgen_supports "${load_generator}" mix || { echo "run-mix.sh needs PERFLAB_LOAD_GENERATOR=k6 (the mix workload is k6-only)." >&2; exit 1; }
 
 mix_name="${1:?run-mix.sh <mix-name> [duration-seconds] [--connections N] [--profile P]}"; shift
 duration="30"

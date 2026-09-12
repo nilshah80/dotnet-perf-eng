@@ -145,8 +145,8 @@ lab_dep_hooks_dir="${PERFLAB_DEP_HOOKS_DIR:-${lab_dir}/dependencies}"
 # k6 and wrk are not numerically comparable, so the generator is recorded in the
 # manifest and must be held constant across a before/after comparison.
 load_generator="${PERFLAB_LOAD_GENERATOR:-${PERFLAB_LOAD_GENERATOR_DEFAULT:-wrk}}"
-if [[ "${load_generator}" != "wrk" && "${load_generator}" != "k6" ]]; then
-  echo "PERFLAB_LOAD_GENERATOR must be 'wrk' or 'k6'; received '${load_generator}'." >&2
+if [[ "${load_generator}" != "wrk" && "${load_generator}" != "k6" && "${load_generator}" != "jmeter" ]]; then
+  echo "PERFLAB_LOAD_GENERATOR must be 'wrk', 'k6', or 'jmeter'; received '${load_generator}'." >&2
   exit 1
 fi
 # k6 runs on the host; wrk runs via Docker on the compose network (no host wrk).
@@ -168,6 +168,6 @@ case " steady ramp stress spike soak capacity arrival " in
   *) echo "PERFLAB_PROFILE must be one of: steady ramp stress spike soak capacity arrival; received '${load_profile}'." >&2; exit 1 ;;
 esac
 if [[ "${load_profile}" != "steady" && "${load_generator}" != "k6" ]]; then
-  echo "PERFLAB_PROFILE='${load_profile}' needs PERFLAB_LOAD_GENERATOR=k6 (load-shape executors are k6-only; wrk supports 'steady')." >&2
+  echo "PERFLAB_PROFILE='${load_profile}' needs PERFLAB_LOAD_GENERATOR=k6 (load-shape executors are k6-only; wrk/jmeter support 'steady')." >&2
   exit 1
 fi

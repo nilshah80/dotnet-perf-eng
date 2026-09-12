@@ -31,7 +31,7 @@ repo_root="$(cd "${harness_root}/.." && pwd)"
 # via jqd and the harness emits its own JSON with printf.)
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*)
-    export MSYS2_ENV_CONV_EXCL='PERF_BASE_URL;PERF_METHOD;PERF_PATH;PERF_BODY;PERF_RUN_ID;PERF_SCENARIO;PERF_RUN_MODE;PERF_HEADERS;PERF_MIX'
+    export MSYS2_ENV_CONV_EXCL='PERF_BASE_URL;PERF_METHOD;PERF_PATH;PERF_BODY;PERF_RUN_ID;PERF_SCENARIO;PERF_RUN_MODE;PERF_HEADERS;PERF_MIX;PERFLAB_CONNECTIONS;PERFLAB_DURATION_SECONDS;PERFLAB_GENERATOR_NETWORK_PATH;PERFLAB_PLUGIN_IMAGE_DIGEST'
     ;;
 esac
 
@@ -117,6 +117,13 @@ require_loadgen() {
         exit 1
       }
       ;;
+    jmeter)
+      require_command docker
+      [[ -n "${PERFLAB_JMETER_IMAGE:-}" ]] || {
+        echo "jmeter runs via Docker; set PERFLAB_JMETER_IMAGE to the pinned PerfLab JMeter image." >&2
+        exit 1
+      }
+      ;;
   esac
 }
 
@@ -177,12 +184,29 @@ loadgen_script() {
   case "${load_generator}" in
     k6)  ext="js";  override="${PERFLAB_K6_SCRIPT:-}" ;;
     wrk) ext="lua"; override="${PERFLAB_WRK_SCRIPT:-}" ;;
+    jmeter) ext="jmx"; override="${PERFLAB_JMETER_PLAN:-}" ;;
     *)   echo "loadgen_script: unknown generator '${load_generator}'." >&2; return 1 ;;
   esac
   if [[ -n "${override}" ]]; then resolve_repo_path "${override}"; return 0; fi
   lab_script="${lab_dir}/loadgen/${load_generator}.${ext}"
   if [[ -f "${lab_script}" ]]; then printf '%s' "${lab_script}"; return 0; fi
+  if [[ "${load_generator}" == "jmeter" && -f "${lab_dir}/loadgen/test-plan.jmx" ]]; then
+    printf '%s' "${lab_dir}/loadgen/test-plan.jmx"; return 0
+  fi
+  if [[ "${load_generator}" == "jmeter" ]]; then
+    echo "JMeter plan not found; set PERFLAB_JMETER_PLAN or add labs/<lab>/loadgen/test-plan.jmx" >&2
+    return 1
+  fi
   printf '%s/default.%s' "$(loadgen_dir)" "${ext}"
+}
+
+loadgen_supports() {
+  local gen="${1:-${load_generator}}" op="${2:?loadgen_supports <generator> <operation>}"
+  case "${gen}:${op}" in
+    k6:*) return 0 ;;
+    jmeter:repeat) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # The load adapter has a single entry point run.sh <artifact-dir> <phase>,

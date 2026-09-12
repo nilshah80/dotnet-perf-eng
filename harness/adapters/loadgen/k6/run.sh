@@ -16,6 +16,47 @@ mkdir -p "${artifact_dir}/benchmark"
 # shared and identical across labs.
 js="$(loadgen_script)"
 
+sha256_stream() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 2>/dev/null | awk '{print $NF}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    echo "k6 compatibility capture needs openssl or shasum for SHA-256." >&2
+    return 1
+  fi
+}
+
+write_compatibility() {
+  local script_rel workload_hash fingerprint base network timeout_seconds config_hash header_names
+  script_rel="$(relative_to_repo "${js}")"
+  workload_hash="$({ printf '%s\0' "${script_rel}"; cat "${js}"; printf '\0'; } | sha256_stream)"
+  fingerprint="$(k6 version 2>&1 | tr -d '\r' | awk 'NF { if (seen++) printf " | "; printf "%s", $0 }')"
+  base="${PERF_BASE_URL%/}"
+  network="${PERFLAB_GENERATOR_NETWORK_PATH:-host}"
+  header_names='[]'
+  if [[ -n "${PERF_HEADERS:-}" ]]; then
+    header_names="$(printf '%s' "${PERF_HEADERS}" | jqd -c 'if type=="object" then keys|sort else error("PERF_HEADERS must be an object") end')"
+  fi
+  if [[ "${phase}" == "measure" ]]; then timeout_seconds=$((dur + 90)); else timeout_seconds=$((dur + 60)); fi
+  # Include request bodies, headers, and mix definitions in the digest without
+  # publishing them or placing them in an external command's argument list.
+  config_hash="$({
+    printf 'connections\0%s\0duration\0%s\0timeout\0%s\0profile\0%s\0scenario\0%s\0' \
+      "${conns}" "${dur}" "${timeout_seconds}s" "${profile}" "${PERF_SCENARIO:-}"
+    printf 'baseUrl\0%s\0method\0%s\0path\0%s\0body\0%s\0headerNames\0%s\0mix\0%s\0network\0%s\0script\0%s\0' \
+      "${base}" "${PERF_METHOD:-}" "${PERF_PATH:-}" "${PERF_BODY:-}" "${header_names}" "${PERF_MIX:-}" "${network}" "${script_rel}"
+  } | sha256_stream)"
+  [[ "${workload_hash}" =~ ^[a-f0-9]{64}$ && "${config_hash}" =~ ^[a-f0-9]{64}$ && -n "${fingerprint}" ]] || {
+    echo "k6 compatibility fingerprint/hash capture failed." >&2; exit 1;
+  }
+  printf '{"generator":"k6","generatorFingerprint":"%s","workloadContentHash":"%s","configurationHash":"%s","networkPath":"%s","timeout":"%ss","durationSeconds":%s,"connections":%s,"scenario":"%s","profile":"%s","baseUrl":"%s","method":"%s","path":"%s","script":"%s"}\n' \
+    "$(json_escape "${fingerprint}")" "${workload_hash}" "${config_hash}" "$(json_escape "${network}")" \
+    "${timeout_seconds}" "${dur}" "${conns}" "$(json_escape "${PERF_SCENARIO:-}")" "$(json_escape "${profile}")" \
+    "$(json_escape "${base}")" "$(json_escape "${PERF_METHOD:-}")" "$(json_escape "${PERF_PATH:-}")" "$(json_escape "${script_rel}")" \
+    > "${artifact_dir}/benchmark/compatibility.json"
+}
+
 # --- Optional k6 -> Prometheus remote-write (MEASURE phase only) --------------
 # Streams the load generator's own throughput/latency/error metrics into the
 # lab's Prometheus so the Grafana SLO panels show the CLIENT-observed view next
@@ -93,12 +134,14 @@ case "${phase}" in
         > "${artifact_dir}/benchmark/${txt}"
     else
       k6 run --vus "${conns}" --duration "${dur}s" \
+        --summary-trend-stats "avg,min,med,max,p(50),p(90),p(95),p(99)" \
         --summary-export "${artifact_dir}/benchmark/${summary}" \
         "${K6_RW_OUT[@]}" \
         --quiet --no-color "${js}" \
         > "${artifact_dir}/benchmark/${txt}"
     fi
 
+    write_compatibility
     [[ "${phase}" == "measure" ]] || exit 0
     sfile="${artifact_dir}/benchmark/${summary}"
     if [[ ! -s "${sfile}" ]]; then
@@ -113,6 +156,7 @@ case "${phase}" in
         {name:"http.requests_per_second",value:($m.http_reqs.rate // 0),unit:"request/s",source:"benchmark/k6-summary.json"},
         {name:"http.latency.p50",value:($m.http_req_duration["p(50)"]),unit:"ms",source:"benchmark/k6-summary.json"},
         {name:"http.latency.p90",value:($m.http_req_duration["p(90)"]),unit:"ms",source:"benchmark/k6-summary.json"},
+        {name:"http.latency.p95",value:($m.http_req_duration["p(95)"]),unit:"ms",source:"benchmark/k6-summary.json"},
         {name:"http.latency.p99",value:($m.http_req_duration["p(99)"]),unit:"ms",source:"benchmark/k6-summary.json"},
         {name:"http.responses.non_2xx_3xx",value:($m.perflab_http_non_2xx_3xx.count // 0),unit:"response",source:"benchmark/k6-summary.json"},
         {name:"http.transport_errors",value:($m.perflab_http_transport_errors.count // 0),unit:"error",source:"benchmark/k6-summary.json"},
@@ -120,6 +164,11 @@ case "${phase}" in
         {name:"http.error_rate",value:((($m.perflab_http_non_2xx_3xx.count // 0) + ($m.perflab_http_transport_errors.count // 0)) / (if ($m.http_reqs.count // 0) > 0 then $m.http_reqs.count else 1 end)),unit:"ratio",source:"benchmark/k6-summary.json"},
         {name:"http.dropped_iterations",value:($m.dropped_iterations.count // 0),unit:"iteration",source:"benchmark/k6-summary.json"}
       ]' < "${sfile}" > "${artifact_dir}/benchmark/observations.json"
+    if ! jqd -e 'any(.[]; .name == "http.latency.p95" and (.value | type) == "number")' \
+        < "${artifact_dir}/benchmark/observations.json" >/dev/null; then
+      echo "k6 summary is missing the required numeric p95 latency" >&2
+      exit 1
+    fi
     ;;
   *)
     echo "Unknown phase '${phase}' (use warmup|measure|diagnostic)." >&2

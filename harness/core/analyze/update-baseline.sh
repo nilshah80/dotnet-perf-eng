@@ -48,6 +48,27 @@ scenario="${scenario_override}"
 
 mkdir -p "${lab_dir}/baselines"
 dest="${lab_dir}/baselines/${scenario}.json"
+src_gen="$(jqd -r '(.loadGenerator // .compatibility.generator // "")' < "${src}" 2>/dev/null || true)"
+src_fp="$(jqd -r '.compatibility.generatorFingerprint // empty' < "${src}" 2>/dev/null || true)"
+src_content="$(jqd -r '.compatibility.workloadContentHash // empty' < "${src}" 2>/dev/null || true)"
+src_config="$(jqd -r '.compatibility.configurationHash // empty' < "${src}" 2>/dev/null || true)"
+if [[ "${src_gen}" == "jmeter" || "${src_gen}" == "k6" ]]; then
+  if [[ -z "${src_fp}" || -z "${src_content}" || -z "${src_config}" ]]; then
+    echo "update-baseline: ${src_gen} source is missing generatorFingerprint/workloadContentHash/configurationHash." >&2
+    exit 2
+  fi
+  if [[ -s "${dest}" ]]; then
+    dest_fp="$(jqd -r '.compatibility.generatorFingerprint // empty' < "${dest}" 2>/dev/null || true)"
+    dest_content="$(jqd -r '.compatibility.workloadContentHash // empty' < "${dest}" 2>/dev/null || true)"
+    dest_config="$(jqd -r '.compatibility.configurationHash // empty' < "${dest}" 2>/dev/null || true)"
+    if [[ -z "${dest_fp}${dest_content}${dest_config}" && "${src_gen}" == "k6" ]]; then
+      echo "update-baseline: replacing a legacy k6 baseline that predates compatibility envelopes." >&2
+    elif [[ "${src_fp}" != "${dest_fp}" || "${src_content}" != "${dest_content}" || "${src_config}" != "${dest_config}" ]]; then
+      echo "update-baseline: refusing to promote a ${src_gen} run whose compatibility envelope does not match the existing baseline." >&2
+      exit 2
+    fi
+  fi
+fi
 cp "${src}" "${dest}"
 kind="$([[ "$(basename "${src}")" == stats.json ]] && echo "repeat-stats (significance-aware)" || echo "single-run facts")"
 echo "Baseline for ${scenario} <- ${src}  [${kind}]"

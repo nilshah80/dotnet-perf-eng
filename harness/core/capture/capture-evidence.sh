@@ -60,6 +60,14 @@ fi
 # "partial" instead of "captured" and an incomplete package is not read as clean.
 # run-scenario may pre-set it (a failed reset-stats or a fault that did not apply).
 capture_incomplete="${PERFLAB_CAPTURE_INCOMPLETE:-0}"
+metric_query_failures=0
+telemetry_metrics_state="not-applicable"
+telemetry_trace_state="not-applicable"
+telemetry_log_state="not-applicable"
+telemetry_metric_files=0
+telemetry_trace_results=0
+telemetry_trace_details=0
+telemetry_log_records=0
 
 mkdir -p "${artifact_dir}/source"
 
@@ -106,13 +114,13 @@ mkdir -p "${artifact_dir}/telemetry/metrics" "${artifact_dir}/telemetry/traces/d
 capture_prometheus_query() {
   curl -fsS --max-time 20 --get --data-urlencode "query=$2" \
     "${prometheus_url}/api/v1/query" > "${artifact_dir}/telemetry/metrics/$1.json" \
-    || { echo "WARNING: Prometheus instant query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; }
+    || { echo "WARNING: Prometheus instant query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; metric_query_failures=$((metric_query_failures + 1)); }
 }
 capture_prometheus_range() {
   curl -fsS --max-time 30 --get --data-urlencode "query=$2" \
     --data-urlencode "start=${start_epoch}" --data-urlencode "end=${end_epoch}" --data-urlencode "step=5" \
     "${prometheus_url}/api/v1/query_range" > "${artifact_dir}/telemetry/metrics/$1.json" \
-    || { echo "WARNING: Prometheus range query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; }
+    || { echo "WARNING: Prometheus range query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; metric_query_failures=$((metric_query_failures + 1)); }
 }
 
 # Application (<app_metric_prefix>_*) metrics: the app's own instrumentation,
@@ -206,6 +214,18 @@ if [[ "${tempo_reachable}" -eq 0 ]]; then
   echo "WARNING: Tempo unreachable at ${tempo_url} after retries; traces are MISSING." >&2
   capture_incomplete=1
 fi
+if [[ "${tempo_reachable}" -eq 1 ]]; then
+  telemetry_trace_results="$(jqd -r '(.traces // []) | length' < "${trace_search_file}" 2>/dev/null || echo 0)"
+  if [[ "${telemetry_trace_results}" -eq 0 ]]; then
+    telemetry_trace_state="delayed"
+  elif [[ "${telemetry_trace_results}" -ge 200 ]]; then
+    telemetry_trace_state="truncated"
+  else
+    telemetry_trace_state="captured"
+  fi
+else
+  telemetry_trace_state="missing"
+fi
 
 if grep -q '"traceID"' "${trace_search_file}" 2>/dev/null; then
   trace_detail_failures=0
@@ -223,13 +243,21 @@ if grep -q '"traceID"' "${trace_search_file}" 2>/dev/null; then
   if [[ "${trace_detail_failures}" -gt 0 ]]; then
     echo "WARNING: ${trace_detail_failures} trace detail fetch(es) failed; this evidence package is INCOMPLETE." >&2
     capture_incomplete=1
+    telemetry_trace_state="partial"
   fi
 fi
+telemetry_trace_details="$(find "${artifact_dir}/telemetry/traces/details" -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
 
 # Loki logs. Retry with a temp file so a timeout cannot truncate the artifact.
 # Verbose exception records can exceed Loki's 4 MiB gRPC response cap at
 # 2,000 entries. Match PerfLab's bounded 1,000-entry query.
 log_query="{service_name=~\"${service_name_regex}\"}"
+if [[ "${target_mode}" == "local" ]]; then
+  # Match PerfLab's canonical Loki query: resource labels select the service and
+  # the structured run attribute prevents concurrent/local traffic from leaking
+  # into this evidence window. Remote-observed runs remain window-scoped.
+  log_query+=" | ${run_id_label}=\"${telemetry_run_id}\""
+fi
 log_file="${artifact_dir}/telemetry/logs/query-range.json"
 : > "${log_file}"
 log_reachable=0
@@ -253,7 +281,21 @@ grep -q '"values":\[\[' "${log_file}" 2>/dev/null || \
 if [[ "${log_reachable}" -eq 0 ]]; then
   echo "WARNING: Loki unreachable at ${loki_url} after retries; logs are MISSING." >&2
   capture_incomplete=1
+  telemetry_log_state="missing"
+else
+  telemetry_log_records="$(jqd -r '[.data.result[]?.values[]?] | length' < "${log_file}" 2>/dev/null || echo 0)"
+  if [[ "${telemetry_log_records}" -eq 0 ]]; then
+    telemetry_log_state="delayed"
+  elif [[ "${telemetry_log_records}" -ge 1000 ]]; then
+    telemetry_log_state="truncated"
+  else
+    telemetry_log_state="captured"
+  fi
 fi
+
+telemetry_metric_files="$(find "${artifact_dir}/telemetry/metrics" -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
+telemetry_metrics_state="captured"
+[[ "${metric_query_failures}" -gt 0 ]] && telemetry_metrics_state="partial"
 
 fi   # end capture_telemetry
 
@@ -288,6 +330,16 @@ fi
   docker compose version
   wrk --version
   k6 version
+  if [[ "${load_gen}" == "jmeter" && -n "${PERFLAB_JMETER_IMAGE:-}" ]]; then
+    echo "--- jmeter ---"
+    MSYS_NO_PATHCONV=1 docker run --rm --pull=never \
+      --env PERFLAB_PLUGIN_ID=perflab.load.jmeter \
+      --env PERFLAB_PLUGIN_VERSION=0.1.0 \
+      --env PERFLAB_PLUGIN_IMAGE_DIGEST="${PERFLAB_PLUGIN_IMAGE_DIGEST:-}" \
+      --env PERFLAB_PLUGIN_CPUS=2 \
+      --env PERFLAB_PLUGIN_MEMORY_BYTES=2147483648 \
+      "${PERFLAB_JMETER_IMAGE}" version --json || true
+  fi
   claude --version
   echo "--- runtime adapter: ${runtime} ---"
   [[ -f "${runtime_adapter_dir}/versions.sh" ]] && bash "${runtime_adapter_dir}/versions.sh"
@@ -305,6 +357,21 @@ printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","loadGenerator":"%
   "$(json_escape "${run_id}")" "$(json_escape "${telemetry_run_id}")" "$(json_escape "${scenario_id}")" \
   "$(json_escape "${load_gen}")" "$(cat "${obs_file}")" \
   > "${artifact_dir}/facts.json"
+if [[ -s "${artifact_dir}/benchmark/compatibility.json" ]]; then
+  if cat "${artifact_dir}/facts.json" "${artifact_dir}/benchmark/compatibility.json" \
+    | jqd -s '.[0] + {compatibility: .[1]}' > "${artifact_dir}/facts.json.tmp" 2>/dev/null; then
+    mv "${artifact_dir}/facts.json.tmp" "${artifact_dir}/facts.json"
+  else
+    rm -f "${artifact_dir}/facts.json.tmp"
+    if [[ "${load_gen}" == "jmeter" || "${load_gen}" == "k6" ]]; then
+      echo "Failed to merge ${load_gen} compatibility.json into facts.json." >&2
+      exit 1
+    fi
+  fi
+elif [[ "${load_gen}" == "jmeter" || "${load_gen}" == "k6" ]]; then
+  echo "${load_gen} measure phase did not publish compatibility.json." >&2
+  exit 1
+fi
 
 # Per-request EFFICIENCY (derived facts): normalize resource use by throughput --
 # CPU-ms, allocated bytes, GC-pause-ms and dependency-ms per request over the
@@ -376,6 +443,22 @@ if jqd -c \
 else
   rm -f "${manifest}.tmp"; echo "ERROR: failed to finalize ${manifest}." >&2; exit 1
 fi
+
+# A machine-readable capture inventory makes bounded/delayed evidence explicit.
+# It is deliberately separate from facts.json: load observations remain generator
+# facts, while this document describes the evidence collection surface shared by
+# the native harness and PerfLab's normalized observability report.
+mkdir -p "${artifact_dir}/telemetry"
+jqd -n \
+  --arg package_status "${capture_status}" \
+  --arg metrics_state "${telemetry_metrics_state}" --argjson metric_files "${telemetry_metric_files}" --argjson metric_failures "${metric_query_failures}" \
+  --arg traces_state "${telemetry_trace_state}" --argjson trace_results "${telemetry_trace_results}" --argjson trace_details "${telemetry_trace_details}" \
+  --arg logs_state "${telemetry_log_state}" --argjson log_records "${telemetry_log_records}" \
+  '{schemaVersion:"telemetry-capture-v1",packageStatus:$package_status,signals:{
+    metrics:{captureState:$metrics_state,files:$metric_files,queryFailures:$metric_failures},
+    traces:{captureState:$traces_state,returned:$trace_results,retainedDetails:$trace_details,limit:200,truncated:($traces_state=="truncated")},
+    logs:{captureState:$logs_state,returned:$log_records,limit:1000,truncated:($logs_state=="truncated")}
+  }}' > "${artifact_dir}/telemetry/capture-status.json"
 if [[ "${capture_incomplete}" -eq 1 ]]; then
   echo "NOTE: package finalized status:\"partial\" -- a required capture failed or a prior partial/fault outcome is sticky (see WARNINGs above)." >&2
 fi

@@ -74,7 +74,6 @@ services:
 
   lgtm:
     image: grafana/otel-lgtm:0.31.0
-    container_name: perflab-lgtm
     environment:
       # Keep telemetry ingestion failures visible in docker logs.
       ENABLE_LOGS_OTELCOL: "true"

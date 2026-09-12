@@ -45,7 +45,7 @@ k6_write_profile_config() {
       echo "k6_write_profile_config: unknown profile '${profile}'" >&2
       return 1 ;;
   esac
-  printf '{"scenarios":{"measure":%s},"summaryTrendStats":["avg","min","med","max","p(50)","p(90)","p(99)"],"discardResponseBodies":true}\n' \
+  printf '{"scenarios":{"measure":%s},"summaryTrendStats":["avg","min","med","max","p(50)","p(90)","p(95)","p(99)"],"discardResponseBodies":true}\n' \
     "${sc}" > "${out}"
 }
 

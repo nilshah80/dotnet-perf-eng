@@ -8,9 +8,7 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 require_loadgen
-# k6 only: this aggregates numeric latency percentiles into median/stddev/CV, but
-# wrk emits them as unit-suffixed "wrk-duration" strings, which would drop to null.
-[[ "${load_generator}" == "k6" ]] || { echo "run-repeat.sh needs PERFLAB_LOAD_GENERATOR=k6 (numeric latency percentiles; wrk emits unit-suffixed strings)." >&2; exit 1; }
+loadgen_supports "${load_generator}" repeat || { echo "run-repeat.sh needs a generator that supports repeat (k6 or jmeter); received '${load_generator}'." >&2; exit 1; }
 
 scenario_id="${1:?run-repeat.sh <scenario-id> [duration] [--repeats N] [--reseed] [--profile P]}"; shift
 require_scenario "${scenario_id}"
@@ -73,6 +71,27 @@ for ((k = 1; k <= repeats; k++)); do
   fi
 done
 [[ "${#facts_files[@]}" -gt 0 ]] || { echo "No fully-captured reps produced facts (${excluded_reps} excluded)." >&2; exit 1; }
+
+if [[ -s "${facts_files[0]}" ]]; then
+  first_fp="$(jqd -r '.compatibility.generatorFingerprint // empty' < "${facts_files[0]}" 2>/dev/null || true)"
+  first_content="$(jqd -r '.compatibility.workloadContentHash // empty' < "${facts_files[0]}" 2>/dev/null || true)"
+  first_config="$(jqd -r '.compatibility.configurationHash // empty' < "${facts_files[0]}" 2>/dev/null || true)"
+  if [[ ( "${load_generator}" == "jmeter" || "${load_generator}" == "k6" ) && ( -z "${first_fp}" || -z "${first_content}" || -z "${first_config}" ) ]]; then
+    echo "run-repeat.sh: ${load_generator} reps require a complete compatibility envelope before aggregation." >&2
+    exit 1
+  fi
+  if [[ -n "${first_fp}${first_content}${first_config}" ]]; then
+    for ff in "${facts_files[@]}"; do
+      fp="$(jqd -r '.compatibility.generatorFingerprint // empty' < "${ff}" 2>/dev/null || true)"
+      content="$(jqd -r '.compatibility.workloadContentHash // empty' < "${ff}" 2>/dev/null || true)"
+      config="$(jqd -r '.compatibility.configurationHash // empty' < "${ff}" 2>/dev/null || true)"
+      if [[ "${fp}" != "${first_fp}" || "${content}" != "${first_content}" || "${config}" != "${first_config}" ]]; then
+        echo "run-repeat.sh: compatibility envelope mismatch across reps; refusing to aggregate." >&2
+        exit 1
+      fi
+    done
+  fi
+fi
 # stddev/CV need >=2 samples to mean anything; with one rep they are 0 and would
 # read as "perfectly consistent". Report the median/mean but flag the spread as
 # undefined so a single-rep result is not mistaken for a trustworthy one.
@@ -104,6 +123,20 @@ cat "${facts_files[@]}" | jqd -s --arg scen "${scenario_id}" --arg repId "${rep_
      # excludedReps records how many errored/partial reps were dropped.
      status:"captured", includedReps:$inc, excludedReps:$excl, reps:$inc,
      metrics:($names | map({(.): stats($byname[.] // [])}) | add)}' > "${rep_dir}/stats.json"
+if [[ -s "${facts_files[0]}" ]] && jqd -e '.compatibility.generatorFingerprint != null' < "${facts_files[0]}" >/dev/null 2>&1; then
+  if cat "${rep_dir}/stats.json" "${facts_files[0]}" | jqd -s '.[0] + {compatibility: .[1].compatibility}' > "${rep_dir}/stats.json.tmp" 2>/dev/null; then
+    mv "${rep_dir}/stats.json.tmp" "${rep_dir}/stats.json"
+  else
+    rm -f "${rep_dir}/stats.json.tmp"
+    if [[ "${load_generator}" == "jmeter" || "${load_generator}" == "k6" ]]; then
+      echo "run-repeat.sh: failed to copy the ${load_generator} compatibility envelope onto stats.json." >&2
+      exit 1
+    fi
+  fi
+elif [[ "${load_generator}" == "jmeter" || "${load_generator}" == "k6" ]]; then
+  echo "run-repeat.sh: ${load_generator} stats.json is missing a compatibility envelope." >&2
+  exit 1
+fi
 
 # Aggregate the reps' steady-state verdicts onto stats.json so a repeat-stats candidate
 # can be steady-gated (gate.sh --require-steady reads .steadyState.verdict). Each rep's
