@@ -23,6 +23,10 @@ Dockerfile      text eol=lf
 *.lua           text eol=lf
 *.js            text eol=lf
 
+# Plans and repository documentation are compared byte-for-byte across
+# platforms and repositories.
+*.md            text eol=lf
+
 # Differential analysers (diff-*.py) are piped as source into a python container
 # (python3 -c); a CR in that source is fragile across CPython versions.
 *.py            text eol=lf
