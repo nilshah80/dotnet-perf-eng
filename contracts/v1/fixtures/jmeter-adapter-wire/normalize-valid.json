@@ -1,0 +1,5 @@
+{
+  "mode": "normalize",
+  "jtl": "results.jtl",
+  "outputDirectory": "artifacts"
+}

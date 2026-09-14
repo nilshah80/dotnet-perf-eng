@@ -229,7 +229,7 @@ labs use the **same** host ports; `ecommerce` simply omits Redis and RabbitMQ.
 | Prometheus | Metrics query API (OTLP + remote-write receivers on) | `http://127.0.0.1:9090` | both |
 | Loki | Log query API | `http://127.0.0.1:3100` | both |
 | Tempo | Trace query API | `http://127.0.0.1:3200` | both |
-| Pyroscope | Continuous CPU profiles (opt-in) | `http://127.0.0.1:4040` | both |
+| Pyroscope | Continuous multi-type profiles (opt-in) | `http://127.0.0.1:4040` | both |
 | OTLP ingest | Collector gRPC / HTTP | `127.0.0.1:4317` / `4318` | both |
 | dotnet-monitor | Diagnostic API (trace/gcdump/stacks/dump) | `http://127.0.0.1:18323` | both |
 | PostgreSQL | Lab database (`perflab` / `perflab`) | `127.0.0.1:5432` | both |
@@ -238,20 +238,38 @@ labs use the **same** host ports; `ecommerce` simply omits Redis and RabbitMQ.
 | redis-exporter | Server-side Redis metrics (`obs` profile — opt-in) | in-network only (scraped by the collector) | scenariolab |
 | RabbitMQ | Broker + management (`perflab` / `perflab`) | `127.0.0.1:5672`, mgmt `:15672`, metrics `:15692` | scenariolab |
 
-CPU profiling has two independent paths:
+Profiling and runtime diagnostics have two independent paths:
 
-- **Continuous CPU profiling** (opt-in): the Pyroscope .NET native profiler inside
-  each app image, pushing directly to `http://lgtm:4040`. Enable with
-  `PERFLAB_CONTINUOUS_PROFILING=1`. Default is off so benchmark runs stay
-  unperturbed — the CLR profiler and `LD_PRELOAD` wrapper are not activated.
+- **Continuous profiling** (opt-in): the Pyroscope .NET native profiler inside
+  each app image, pushing directly to `http://lgtm:4040`. Enable it with
+  `PERFLAB_CONTINUOUS_PROFILING=1` and select `PERFLAB_PROFILING_POLICY` as
+  `cpu`, `cpu-wall`, `memory`, `contention`, `exceptions`, `soak-memory`, or
+  `all-diagnostic`. The resolved `PERFLAB_PROFILING_TYPES` can contain CPU,
+  wall, allocation, lock, exception, and live-heap streams. Default is off so
+  benchmark runs stay unperturbed — the CLR profiler and `LD_PRELOAD` wrapper
+  are not activated.
 - **Invasive snapshots** from the `dotnet-monitor` sidecar (`.nettrace`, GC dump,
   stacks, process dump, Speedscope). These remain the default diagnose-mode
   workflow and still work when continuous profiling is enabled.
 
-Hold the same `PERFLAB_CONTINUOUS_PROFILING` value on baseline and candidate.
-When profiling is on, also hold `PERFLAB_PROFILING_KEEP_TIERING` — on aarch64 it
-changes `DOTNET_TieredCompilation`. Allocation, heap, lock-contention, and
-exception profiling stay off.
+Hold `PERFLAB_CONTINUOUS_PROFILING`, `PERFLAB_PROFILING_POLICY`, the resolved
+types, and `PERFLAB_PROFILING_KEEP_TIERING` constant between baseline and
+candidate. On aarch64, the keep-tiering value changes
+`DOTNET_TieredCompilation`.
+
+Managed labs declare `PERFLAB_PROFILING_SERVICE_QUOTAS`,
+`PERFLAB_PROFILING_QUOTA_SOURCE`, and the versioned
+`PERFLAB_PROFILING_MIN_CORES_THRESHOLD`; preflight validates every service
+before traffic and writes `analysis/profiling-preflight.json`. Remote profiling
+also requires `PERFLAB_PROFILING_VERIFICATION_URL`, an HTTPS read-only endpoint
+whose fresh response reports provider identity, effective quotas, active types,
+and activation-probe results. Remote telemetry opt-in alone is not proof that a
+profiler is active.
+
+The supported observability stack for this release is Grafana LGTM plus
+Pyroscope. No other APM backend is configured or queried. The managed image's
+`DD_*` profiler settings configure the engine embedded in Grafana's Pyroscope
+.NET agent; they do not enable a Datadog APM integration.
 
 ## Dashboards
 
@@ -268,7 +286,7 @@ how evidence capture scopes runtime metrics by `service_instance_id`.
 | **HTTP & Endpoints** | PE + dev leads | Per-route RED (throughput/p99/errors), 5xx by exception type, Kestrel connections, sortable top-routes table |
 | **Dependencies & Pools** | PE + SRE | Npgsql + HTTP-client pool saturation (pending requests, time-in-queue) and — with the `obs` profile — live Postgres/Redis/RabbitMQ server internals |
 | **Messaging & Worker** *(scenariolab)* | PE | Order publish/process/retry, processing-duration p95, cache hit ratio, resource-pool lab (S21–S26), worker process health |
-| **CPU Profiling** | PE | Pyroscope process-CPU flame graph for `$service` / `$run`, plus a Profiles Drilldown link. Empty unless `PERFLAB_CONTINUOUS_PROFILING=1`. |
+| **Profiling** | PE | Selected Pyroscope flame graphs by `$service` / `$run`, plus Profiles Drilldown. Empty unless `PERFLAB_CONTINUOUS_PROFILING=1`. |
 
 **One-place correlation.** The lab overrides the image's Grafana datasource file
 (`labs/<lab>/infra/grafana/datasources.yaml`, generated). One-click links that
@@ -311,7 +329,8 @@ so a spike on a latency panel links straight to the Tempo trace that produced it
 
 - **Docker + Docker Compose** (runs the whole stack; also hosts `jq` — no host jq needed).
 - **A load generator:** `k6` on the host (default), a **wrk Docker image**
-  (`PERFLAB_WRK_IMAGE`), or the **pinned JMeter container** (`PERFLAB_JMETER_IMAGE`).
+  (`PERFLAB_WRK_IMAGE`), or the **native JMeter adapter image**
+  (`PERFLAB_JMETER_IMAGE`, built with `harness/adapters/loadgen/jmeter/package.sh`).
   This machine uses k6 by default. JMeter is never installed on the host.
 - **`claude` CLI** — only for the optional AI diagnosis phase.
 - Bash (Git Bash on Windows), `curl`, `awk` — standard.
@@ -336,11 +355,13 @@ runtime diagnostics, and writes an evidence package under
 the **Overview & SLOs** board; the dashboard dropdown switches between the focused
 boards (see **Dashboards** above), and Explore has Tempo traces and Loki logs.
 
-Continuous CPU profiling is off by default. To also collect Pyroscope profiles
-into `telemetry/profiles/` and populate the CPU Profiling board:
+Continuous profiling is off by default. To collect CPU and wall-time Pyroscope
+profiles independently into `telemetry/profiles/` (or select allocation,
+live-heap, lock, exception, or all diagnostic types with another policy):
 
 ```bash
 PERFLAB_LAB=scenariolab PERFLAB_CONTINUOUS_PROFILING=1 \
+  PERFLAB_PROFILING_POLICY=cpu-wall \
   ./harness/core/run/run-single.sh S01 30 --no-runtime
 ```
 Then, optionally, hand a package to the AI phase:
@@ -408,15 +429,18 @@ PERFLAB_LOAD_GENERATOR=wrk ./harness/core/run/run-single.sh S01 30
 ```
 
 **JMeter** is also opt-in and is **container-only**: the harness never installs
-Java or Apache JMeter on the host. Pin the PerfLab image with
-`PERFLAB_JMETER_IMAGE` (a digest `name@sha256:…` or a local image ID
-`sha256:` + 64 hex characters). The adapter inspects that image, refuses a
-missing image (`--pull=never`; it will not pull during a run), and executes
-`run-once` inside the container. Point at a plan with `PERFLAB_JMETER_PLAN`
+Java, Go, or Apache JMeter on the host. Build the native adapter image with
+`harness/adapters/loadgen/jmeter/package.sh` (Docker-only) and pin
+`PERFLAB_JMETER_IMAGE` to the printed digest (`name@sha256:…` or a local image
+ID `sha256:` + 64 hex characters). The name is a compatibility environment
+variable only. The adapter inspects that image, refuses a missing image
+(`--pull=never`; it will not pull during a run), and executes `run-once`
+inside the container. Point at a plan with `PERFLAB_JMETER_PLAN`
 (defaults to `labs/<lab>/loadgen/test-plan.jmx`) and optional supporting files
 via `PERFLAB_JMETER_FILES` (a JSON array of repository-relative paths).
 
 ```bash
+./harness/adapters/loadgen/jmeter/package.sh
 PERFLAB_LOAD_GENERATOR=jmeter \
 PERFLAB_JMETER_IMAGE=sha256:<local-image-id> \
 PERFLAB_JMETER_PLAN=labs/scenariolab/loadgen/test-plan.jmx \
@@ -447,9 +471,9 @@ commit tokens). E01 (login) needs no token. Login credentials are not forwarded
 into the JMeter container.
 
 The generators are **not numerically comparable** (k6 reports latency as numeric
-ms; wrk as unit-suffixed strings; JMeter uses HDR-histogram percentiles from the
-pinned container), so the generator is recorded in `manifest.json` and must be
-held constant across a before/after comparison.
+ms; wrk as unit-suffixed strings; JMeter percentiles come from the native
+adapter's JTL summary), so the generator is recorded in `manifest.json` and must
+be held constant across a before/after comparison.
 
 **Per-lab workloads.** `run.sh` (the measurement + `observations.json` contract)
 is shared and identical across labs; the *workload script* is per-lab, resolved as
@@ -661,11 +685,10 @@ done
 
 Start from a measurement created with `--no-runtime`, or copy a clean
 measurement-only package before each command. `stacks` may be added to the
-loop, but the default .NET sidecar policy records its documented CPU-trace
-fallback unless
-`PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true` is explicitly enabled. In practice,
-prefer `trace`: it already contains managed stack information. Process dumps can
-contain secrets or personal data and should remain restricted.
+loop and is captured directly. Set
+`PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=false` only for an environment where that
+endpoint is unavailable; the adapter then records its CPU-trace fallback.
+Process dumps can contain secrets or personal data and should remain restricted.
 
 Ordinary scenarios still collect all passive evidence together. Metrics,
 logs, distributed traces, dependency snapshots, process/deployment inventory,
@@ -680,9 +703,9 @@ and resolves the target by runtime identity, not container PID. On a **remote**
 target it does **not** recreate the app (it is not owned). Load-bearing diagnostics
 drive the manifest-recorded workload; dump-only does not. The command leaves a
 **raw** capture (normalize it offline; the in-place normalizer needs the local
-tools container). For .NET, a `stacks` request
-records a `trace` fallback by default (the dotnet-monitor profiler channel is
-unreliable in this sidecar topology) and documents it in `runtime/capture.json`.
+tools container). For .NET, a `stacks` request captures dotnet-monitor's text
+stack output directly and records any explicitly configured fallback in
+`runtime/capture.json`.
 
 ## Scenario catalog
 
@@ -767,15 +790,15 @@ Seeded at `smoke` scale (20k products / 200 users / 20k orders).
 |---|---|---|---|---|
 | E00 | control-products | Product list, pg 1 (64) | Paged list baseline; `count(*)` + page query per request | CPU trace |
 | E01 | login-throughput | Login (32) | PBKDF2 (100k) password hash — CPU-bound by design | CPU trace |
-| E02 | product-list-shallow | Product list, pg 1 (64) | Same as E00, captured with stacks | Stacks→trace |
-| E03 | product-list-deep | Product list, pg 500 (64) | Deep `OFFSET` — rows scanned then discarded | Stacks→trace |
+| E02 | product-list-shallow | Product list, pg 1 (64) | Same as E00, captured with stacks | Stacks |
+| E03 | product-list-deep | Product list, pg 500 (64) | Deep `OFFSET` — rows scanned then discarded | Stacks |
 | E04 | product-list-large-page | Product list, 100/pg (48) | Large page — bigger result + serialization | CPU trace |
 | E05 | product-search | Product search (64) | Non-sargable `name ILIKE '%…%'` seq scan, run twice (count+page) | CPU trace |
 | E06 | product-get | Product by id (64) | Single product by PK — clean control | CPU trace |
-| E07 | product-create | Product create (32) | Insert one product | Stacks→trace |
-| E08 | product-update | Product update (32) | Patch one product; body varies per iteration → real `UPDATE` | Stacks→trace |
-| E09 | orders-list-shallow | Orders list, pg 1 (64) | Order list sorted by unindexed `created_at` + per-request count | Stacks→trace |
-| E10 | orders-list-deep | Orders list, pg 50 (48) | Deep `OFFSET` + unindexed `created_at` sort | Stacks→trace |
+| E07 | product-create | Product create (32) | Insert one product | Stacks |
+| E08 | product-update | Product update (32) | Patch one product; body varies per iteration → real `UPDATE` | Stacks |
+| E09 | orders-list-shallow | Orders list, pg 1 (64) | Order list sorted by unindexed `created_at` + per-request count | Stacks |
+| E10 | orders-list-deep | Orders list, pg 50 (48) | Deep `OFFSET` + unindexed `created_at` sort | Stacks |
 | E11 | order-get | Order by id (64) | One order + items (`Include`, PK + indexed join) | CPU trace |
 | E12 | order-create | Order create (32) | Transactional write: lookup + order + item inserts | Stacks→trace |
 | E13 | users-list | Users list, pg 1 (48) | Paged users (small table); count negligible | CPU trace |
@@ -807,7 +830,7 @@ artifacts/runs/<run-id>/                 # a suite run
     │   ├── metrics/                      # Prometheus range (gauges) + instant (counters)
     │   ├── traces/                       # Tempo search + the slowest traces
     │   ├── logs/                         # Loki range query
-    │   └── profiles/                     # Pyroscope CPU flame graphs (opt-in)
+    │   └── profiles/                     # Selected Pyroscope flame graphs (opt-in)
     ├── dependencies/                     # live snapshots (files present depend on the lab):
     │   ├── postgres-{statements,activity,connections,deadlocks,query-plan}.*   # + *-midload
     │   ├── redis-{info,latency,clients}.*                    # scenariolab only
@@ -816,7 +839,7 @@ artifacts/runs/<run-id>/                 # a suite run
     ├── runtime/                          # dotnet-monitor capture (on by default)
     │   ├── capture.json                  # requested vs effective diagnostic
     │   ├── processes.json  processes-diagnostic.json
-    │   └── api/ | worker/                # cpu.nettrace, before/after.gcdump, stacks.json, process.dmp
+    │   └── api/ | worker/                # cpu.nettrace, before/after.gcdump, stacks.txt, process.dmp
     ├── source/                           # tool-versions, git-status, git-diff-stat
     └── analysis/
         ├── trend-report.json            # leak/trend: least-squares slope + growth, GROWING flags
@@ -946,7 +969,8 @@ docker compose -f labs/scenariolab/compose.yaml down -v    # full reset (deletes
   labs/<lab>/compose.yaml down -v` before a run whose read scenarios need the
   pristine seed, or their table sizes (and timings) will drift.
 - `gcdump` forces a full collection; don't read it as steady-state heap.
-- A `stacks` request usually yields a `trace` — confirm in `runtime/capture.json`.
+- A `stacks` request captures text stacks unless the endpoint was explicitly
+  disabled; confirm the effective kind in `runtime/capture.json`.
 - `capture-evidence` fails loud if telemetry or a dependency is unreachable, rather
   than emitting a silently empty package.
 
@@ -971,9 +995,9 @@ docker compose -f labs/scenariolab/compose.yaml down -v    # full reset (deletes
   `DD_INTERNAL_PROFILING_ENABLED_ARM64=1`. If logs say "Continuous Profiler is
   not enabled for ARM64 architecture", that flag did not reach the process.
   If logs say "The CPU limit is too low for the profiler to work properly",
-  the container quota is below Datadog's 1-core default; the wrapper sets
-  `DD_PROFILING_MIN_CORES_THRESHOLD=0.1` so lab workers at `cpus: 0.75` still
-  profile.
+  the container quota is below the profiler's default. The versioned provider
+  descriptor permits a validated `0.1` threshold, so lab workers at
+  `cpus: 0.75` still profile.
 - **Only `Unknown-Type.Unknown-Method` frames (aarch64 hosts).** pyroscope-dotnet
   1.5.1 has no supported arm64 build; the gated aarch64 library resolves frames
   of first-JIT and ReadyToRun code but loses every frame of a method once tiered

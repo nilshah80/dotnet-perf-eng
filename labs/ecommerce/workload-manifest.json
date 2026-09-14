@@ -1,0 +1,190 @@
+{
+  "apiVersion": "perflab.io/v1",
+  "kind": "WorkloadManifest",
+  "contractRevision": "v1",
+  "selectors": [
+    {
+      "id": "E00",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "E01",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "E02",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "E03",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "E04",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "E05",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "E06",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "E07",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "E08",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "E09",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "E10",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "E11",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "E12",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "E13",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "E14",
+      "type": "request",
+      "iterationContract": "one-request",
+      "generators": [
+        "k6",
+        "jmeter",
+        "wrk"
+      ]
+    },
+    {
+      "id": "checkout",
+      "type": "journey",
+      "iterationContract": "one-journey",
+      "generators": [
+        "k6",
+        "jmeter"
+      ],
+      "entrypoints": {
+        "k6": "labs/ecommerce/loadgen/journey.js",
+        "jmeter": "labs/ecommerce/loadgen/checkout-journey.jmx"
+      },
+      "files": [
+        "labs/ecommerce/loadgen/journey.js",
+        "labs/ecommerce/loadgen/checkout-journey.jmx",
+        "harness/adapters/loadgen/k6/journey.js"
+      ],
+      "operations": [
+        "login",
+        "browse",
+        "create",
+        "pay",
+        "poll",
+        "verify"
+      ],
+      "targets": [
+        "api"
+      ],
+      "amplification": {
+        "min": 6,
+        "max": 12
+      }
+    }
+  ]
+}

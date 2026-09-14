@@ -13,6 +13,11 @@ artifact_dir="${1:?run.sh <artifact-dir> <phase>}"
 phase="${2:?phase required (warmup|measure|diagnostic)}"
 mkdir -p "${artifact_dir}/benchmark"
 
+if [[ "${PERF_WORKLOAD_KIND:-request}" == "journey" || "${PERF_WORKLOAD_KIND:-request}" == "mix" ]]; then
+  echo "capability generator.wrk.journey is unsupported; rejected before traffic" >&2
+  exit 1
+fi
+
 [[ -n "${wrk_image}" ]] || { echo "PERFLAB_WRK_IMAGE is not set; wrk runs via Docker." >&2; exit 1; }
 
 # The workload script is the lab's own wrk.lua if it ships one, else the shared

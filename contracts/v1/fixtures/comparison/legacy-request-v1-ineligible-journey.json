@@ -1,0 +1,12 @@
+{
+  "projectionVersion": "legacy-request-v1",
+  "eligible": false,
+  "sourceCandidateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "projectedDigest": "",
+  "omittedFields": [
+    "journeys"
+  ],
+  "eligibilityChecks": [
+    "journey-unrepresentable"
+  ]
+}

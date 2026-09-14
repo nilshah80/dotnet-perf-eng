@@ -1,0 +1,468 @@
+{
+  "apiVersion": "perflab.io/v1",
+  "kind": "ScenarioCatalog",
+  "contractRevision": "v1",
+  "scenarios": [
+    {
+      "id": "E00",
+      "name": "control-products",
+      "workload": {
+        "type": "request",
+        "selector": "E00"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "E01",
+      "name": "login-throughput",
+      "workload": {
+        "type": "request",
+        "selector": "E01"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "write"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 32,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "E02",
+      "name": "product-list-shallow",
+      "workload": {
+        "type": "request",
+        "selector": "E02"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "E03",
+      "name": "product-list-deep",
+      "workload": {
+        "type": "request",
+        "selector": "E03"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "E04",
+      "name": "product-list-large-page",
+      "workload": {
+        "type": "request",
+        "selector": "E04"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 48,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "E05",
+      "name": "product-search",
+      "workload": {
+        "type": "request",
+        "selector": "E05"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "E06",
+      "name": "product-get",
+      "workload": {
+        "type": "request",
+        "selector": "E06"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "E07",
+      "name": "product-create",
+      "workload": {
+        "type": "request",
+        "selector": "E07"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "write"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 32,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "E08",
+      "name": "product-update",
+      "workload": {
+        "type": "request",
+        "selector": "E08"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "write"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 32,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "E09",
+      "name": "orders-list-shallow",
+      "workload": {
+        "type": "request",
+        "selector": "E09"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "E10",
+      "name": "orders-list-deep",
+      "workload": {
+        "type": "request",
+        "selector": "E10"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 48,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "E11",
+      "name": "order-get",
+      "workload": {
+        "type": "request",
+        "selector": "E11"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "E12",
+      "name": "order-create",
+      "workload": {
+        "type": "request",
+        "selector": "E12"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "write"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 32,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "E13",
+      "name": "users-list",
+      "workload": {
+        "type": "request",
+        "selector": "E13"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 48,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "E14",
+      "name": "users-me",
+      "workload": {
+        "type": "request",
+        "selector": "E14"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "checkout",
+      "name": "Browse and buy",
+      "workload": {
+        "type": "journey",
+        "selector": "checkout"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "idempotent-write",
+        "replayable": true,
+        "resetPolicy": "run-partition-reset"
+      },
+      "services": {
+        "required": [
+          "api"
+        ],
+        "participating": []
+      },
+      "defaults": {
+        "loadModel": "open",
+        "rate": 5,
+        "rateUnit": "journeys/s"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "managed-reference"
+      },
+      "diagnostics": {
+        "targets": [
+          "api"
+        ],
+        "preset": "cpu-memory",
+        "sourceLoadLevel": "first-failing"
+      },
+      "sloProfile": "checkout-default"
+    }
+  ]
+}

@@ -1,0 +1,791 @@
+{
+  "apiVersion": "perflab.io/v1",
+  "kind": "ScenarioCatalog",
+  "contractRevision": "v1",
+  "scenarios": [
+    {
+      "id": "S00",
+      "name": "control",
+      "workload": {
+        "type": "request",
+        "selector": "S00"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "S01",
+      "name": "catalog-ranking",
+      "workload": {
+        "type": "request",
+        "selector": "S01"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "S02",
+      "name": "request-continuations",
+      "workload": {
+        "type": "request",
+        "selector": "S02"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 128,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "S03",
+      "name": "shared-coordination",
+      "workload": {
+        "type": "request",
+        "selector": "S03"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 96,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "S04",
+      "name": "subscriber-lifecycle",
+      "workload": {
+        "type": "request",
+        "selector": "S04"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 32,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "gcdump"
+      }
+    },
+    {
+      "id": "S05",
+      "name": "payload-transform",
+      "workload": {
+        "type": "request",
+        "selector": "S05"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 32,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "S06",
+      "name": "work-scheduling",
+      "workload": {
+        "type": "request",
+        "selector": "S06"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "S07",
+      "name": "customer-orders",
+      "workload": {
+        "type": "request",
+        "selector": "S07"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 48,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "S08",
+      "name": "order-history-page",
+      "workload": {
+        "type": "request",
+        "selector": "S08"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 48,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "S09",
+      "name": "order-reader-lifecycle",
+      "workload": {
+        "type": "request",
+        "selector": "S09"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "S10",
+      "name": "inventory-update",
+      "workload": {
+        "type": "request",
+        "selector": "S10"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "write"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "S11",
+      "name": "order-projection",
+      "workload": {
+        "type": "request",
+        "selector": "S11"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 32,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "gcdump"
+      }
+    },
+    {
+      "id": "S12",
+      "name": "catalog-refresh",
+      "workload": {
+        "type": "request",
+        "selector": "S12"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 128,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "S13",
+      "name": "catalog-fragments",
+      "workload": {
+        "type": "request",
+        "selector": "S13"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "S14",
+      "name": "cache-session",
+      "workload": {
+        "type": "request",
+        "selector": "S14"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "S15",
+      "name": "catalog-keyspace",
+      "workload": {
+        "type": "request",
+        "selector": "S15"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "gcdump"
+      }
+    },
+    {
+      "id": "S16",
+      "name": "order-publication",
+      "workload": {
+        "type": "request",
+        "selector": "S16"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "write"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "S17",
+      "name": "order-consumption",
+      "workload": {
+        "type": "request",
+        "selector": "S17"
+      },
+      "targets": [
+        "worker"
+      ],
+      "effects": {
+        "classification": "write"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 48,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "S18",
+      "name": "failed-order",
+      "workload": {
+        "type": "request",
+        "selector": "S18"
+      },
+      "targets": [
+        "worker"
+      ],
+      "effects": {
+        "classification": "write"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 8,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    },
+    {
+      "id": "S19",
+      "name": "parallel-publication",
+      "workload": {
+        "type": "request",
+        "selector": "S19"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "write"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 128,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "S20",
+      "name": "deferred-message-read",
+      "workload": {
+        "type": "request",
+        "selector": "S20"
+      },
+      "targets": [
+        "worker"
+      ],
+      "effects": {
+        "classification": "write"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 48,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "gcdump"
+      }
+    },
+    {
+      "id": "S21",
+      "name": "database-lease-capacity",
+      "workload": {
+        "type": "request",
+        "selector": "S21"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 48,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "S22",
+      "name": "database-lease-fanout",
+      "workload": {
+        "type": "request",
+        "selector": "S22"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 96,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "S23",
+      "name": "cache-lease-capacity",
+      "workload": {
+        "type": "request",
+        "selector": "S23"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "S24",
+      "name": "cache-client-fanout",
+      "workload": {
+        "type": "request",
+        "selector": "S24"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 128,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "S25",
+      "name": "upstream-connection-capacity",
+      "workload": {
+        "type": "request",
+        "selector": "S25"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "S26",
+      "name": "upstream-connection-fanout",
+      "workload": {
+        "type": "request",
+        "selector": "S26"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 128,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "trace"
+      }
+    },
+    {
+      "id": "S27",
+      "name": "inventory-deadlock",
+      "workload": {
+        "type": "request",
+        "selector": "S27"
+      },
+      "targets": [
+        "api"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 16,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "stacks"
+      }
+    }
+  ]
+}

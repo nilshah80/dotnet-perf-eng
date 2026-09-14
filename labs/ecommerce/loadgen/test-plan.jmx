@@ -17,10 +17,10 @@
           <boolProp name="LoopController.continue_forever">false</boolProp>
           <intProp name="LoopController.loops">-1</intProp>
         </elementProp>
-        <stringProp name="ThreadGroup.num_threads">${__P(perflab.threads,1)}</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(perf.threads,1)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">0</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">${__P(perflab.duration_seconds,1)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(perf.duration_seconds,1)}</stringProp>
         <stringProp name="ThreadGroup.delay">0</stringProp>
         <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
       </ThreadGroup>
@@ -73,24 +73,24 @@ if (raw == null || raw.trim().isEmpty()) {
 def uri = URI.create(raw)
 def scenario = System.getenv("PERF_PATH") ?: "/"
 def method = (System.getenv("PERF_METHOD") ?: "GET").toUpperCase()
-vars.put("perflab.scheme", uri.getScheme() ?: "http")
-vars.put("perflab.host", uri.getHost())
+vars.put("perf.scheme", uri.getScheme() ?: "http")
+vars.put("perf.host", uri.getHost())
 def port = uri.getPort()
 if (port < 0) {
   port = "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80
 }
-vars.put("perflab.port", String.valueOf(port))
-vars.put("perflab.path", joinGeneratorPath(uri.getRawPath() ?: "", scenario))
-vars.put("perflab.method", method)
-vars.put("perflab.body", System.getenv("PERF_BODY") ?: "")
-vars.put("perflab.runId", System.getenv("PERF_RUN_ID") ?: "")
+vars.put("perf.port", String.valueOf(port))
+vars.put("perf.path", joinGeneratorPath(uri.getRawPath() ?: "", scenario))
+vars.put("perf.method", method)
+vars.put("perf.body", System.getenv("PERF_BODY") ?: "")
+vars.put("perf.runId", System.getenv("PERF_RUN_ID") ?: "")
 def headersRaw = System.getenv("PERF_HEADERS")
-vars.put("perflab.authorization", "")
+vars.put("perf.authorization", "")
 if (headersRaw != null && !headersRaw.trim().isEmpty()) {
   try {
     def parsed = new groovy.json.JsonSlurper().parseText(headersRaw)
     if (parsed instanceof Map && parsed.Authorization) {
-      vars.put("perflab.authorization", String.valueOf(parsed.Authorization))
+      vars.put("perf.authorization", String.valueOf(parsed.Authorization))
     }
   } catch (Exception ignored) {
   }
@@ -110,21 +110,21 @@ if (headersRaw != null && !headersRaw.trim().isEmpty()) {
             </elementProp>
             <elementProp name="" elementType="Header">
               <stringProp name="Header.name">X-Perf-Run-Id</stringProp>
-              <stringProp name="Header.value">${perflab.runId}</stringProp>
+              <stringProp name="Header.value">${perf.runId}</stringProp>
             </elementProp>
             <elementProp name="" elementType="Header">
               <stringProp name="Header.name">Authorization</stringProp>
-              <stringProp name="Header.value">${perflab.authorization}</stringProp>
+              <stringProp name="Header.value">${perf.authorization}</stringProp>
             </elementProp>
           </collectionProp>
         </HeaderManager>
         <hashTree/>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="PerfLab HTTP" enabled="true">
-          <stringProp name="HTTPSampler.domain">${perflab.host}</stringProp>
-          <stringProp name="HTTPSampler.port">${perflab.port}</stringProp>
-          <stringProp name="HTTPSampler.protocol">${perflab.scheme}</stringProp>
-          <stringProp name="HTTPSampler.path">${perflab.path}</stringProp>
-          <stringProp name="HTTPSampler.method">${perflab.method}</stringProp>
+          <stringProp name="HTTPSampler.domain">${perf.host}</stringProp>
+          <stringProp name="HTTPSampler.port">${perf.port}</stringProp>
+          <stringProp name="HTTPSampler.protocol">${perf.scheme}</stringProp>
+          <stringProp name="HTTPSampler.path">${perf.path}</stringProp>
+          <stringProp name="HTTPSampler.method">${perf.method}</stringProp>
           <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
           <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
           <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
@@ -132,7 +132,7 @@ if (headersRaw != null && !headersRaw.trim().isEmpty()) {
             <collectionProp name="Arguments.arguments">
               <elementProp name="" elementType="HTTPArgument">
                 <boolProp name="HTTPArgument.always_encode">false</boolProp>
-                <stringProp name="Argument.value">${perflab.body}</stringProp>
+                <stringProp name="Argument.value">${perf.body}</stringProp>
                 <stringProp name="Argument.metadata">=</stringProp>
               </elementProp>
             </collectionProp>

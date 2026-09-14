@@ -8,7 +8,9 @@
 # pyroscope_required_services, start_epoch, end_epoch, telemetry_run_id,
 # target_mode, json_escape, jqd.
 
+PERFLAB_PROFILING_TYPES="${PERFLAB_PROFILING_TYPES:-cpu}"
 PYROSCOPE_PROFILE_TYPE="${PYROSCOPE_PROFILE_TYPE:-process_cpu:cpu:nanoseconds:cpu:nanoseconds}"
+PYROSCOPE_PROFILE_CATEGORY="cpu"
 PYROSCOPE_MAX_NODES="${PYROSCOPE_MAX_NODES:-16384}"
 PYROSCOPE_CAPTURE_ATTEMPTS="${PYROSCOPE_CAPTURE_ATTEMPTS:-6}"
 PYROSCOPE_CAPTURE_SLEEP="${PYROSCOPE_CAPTURE_SLEEP:-5}"
@@ -23,6 +25,19 @@ pyroscope_service_required() {
     [[ "${required}" == "${service}" ]] && return 0
   done
   return 1
+}
+
+pyroscope_select_profile_type() {
+  PYROSCOPE_PROFILE_CATEGORY="$1"
+  case "$1" in
+    cpu) PYROSCOPE_PROFILE_TYPE="process_cpu:cpu:nanoseconds:cpu:nanoseconds" ;;
+    wall) PYROSCOPE_PROFILE_TYPE="wall:wall:nanoseconds:cpu:nanoseconds" ;;
+    allocation) PYROSCOPE_PROFILE_TYPE="memory:alloc_size:bytes:space:bytes" ;;
+    lock) PYROSCOPE_PROFILE_TYPE="lock:lock_time:nanoseconds:cpu:nanoseconds" ;;
+    exception) PYROSCOPE_PROFILE_TYPE="exception:exception:count:cpu:nanoseconds" ;;
+    live-heap) PYROSCOPE_PROFILE_TYPE="memory:inuse_space:bytes:space:bytes" ;;
+    *) return 1 ;;
+  esac
 }
 
 pyroscope_query_selector() {
@@ -70,9 +85,9 @@ pyroscope_query_service() {
   local service="$1"
   local selector file attempt reachable=0 names=0 levels=0 http_code=""
   selector="$(pyroscope_query_selector "${service}")"
-  file="${artifact_dir}/telemetry/profiles/${service}-cpu.json"
+  file="${artifact_dir}/telemetry/profiles/${service}-${PYROSCOPE_PROFILE_CATEGORY}.json"
   : > "${file}"
-  pyroscope_last_state="missing"
+  pyroscope_last_state="failed"
   pyroscope_last_reason="Pyroscope was unreachable"
   pyroscope_last_nodes=0
   pyroscope_last_attempts=0
@@ -117,27 +132,27 @@ pyroscope_query_service() {
   pyroscope_last_reachable="${reachable}"
   pyroscope_last_nodes="${names:-0}"
   if [[ "${reachable}" -eq 0 ]]; then
-    pyroscope_last_state="missing"
+    pyroscope_last_state="failed"
     pyroscope_last_reason="Pyroscope unreachable at ${pyroscope_url} after ${pyroscope_last_attempts} attempt(s) (ready=${pyroscope_ready:-unknown})"
     return 0
   fi
   case "${pyroscope_last_http}" in
     2[0-9][0-9]) : ;;
     *)
-      pyroscope_last_state="missing"
+      pyroscope_last_state="failed"
       pyroscope_last_reason="Pyroscope returned HTTP ${pyroscope_last_http} for ${service} (selector rejected or backend error)"
       return 0
       ;;
   esac
   if ! jqd -e '.flamebearer and (.flamebearer.names | type=="array") and (.flamebearer.levels | type=="array")' \
       < "${file}" >/dev/null 2>&1; then
-    pyroscope_last_state="missing"
+    pyroscope_last_state="failed"
     pyroscope_last_reason="Pyroscope returned an invalid flamebearer response for ${service}"
     return 0
   fi
   if [[ "${pyroscope_last_nodes}" -le 1 || "${levels:-0}" -le 0 ]]; then
-    pyroscope_last_state="delayed"
-    pyroscope_last_reason="Pyroscope returned no CPU samples for ${service} in the measurement window"
+    pyroscope_last_state="missing"
+    pyroscope_last_reason="Pyroscope returned no ${PYROSCOPE_PROFILE_CATEGORY} samples for ${service} in the measurement window after ${pyroscope_last_attempts} attempt(s)"
     return 0
   fi
   pyroscope_last_symbolized="$(pyroscope_symbolized_names "${file}")"
@@ -167,7 +182,7 @@ pyroscope_query_service() {
 }
 
 pyroscope_write_not_applicable() {
-  printf '%s\n' '{"captureState":"not-applicable","enabled":false,"reason":"continuous CPU profiling is disabled","files":0,"services":[]}' \
+  printf '%s\n' '{"captureState":"not-applicable","enabled":false,"reason":"continuous profiling is disabled","files":0,"services":[]}' \
     > "${artifact_dir}/telemetry/profiles-signal.json"
 }
 
@@ -183,6 +198,7 @@ pyroscope_capture_profiles() {
   fi
   mkdir -p "${artifact_dir}/telemetry/profiles"
   local service selector start_utc end_utc endpoint overall="captured" required_failed=0 files=0
+  local profile_type profile_types_json="" old_ifs
   local services_json="" service_json
   start_utc="$(date -u -r "${start_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@${start_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
   end_utc="$(date -u -r "${end_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@${end_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
@@ -206,17 +222,38 @@ pyroscope_capture_profiles() {
     telemetry_profiles_state="missing"
     return 0
   fi
+  old_ifs="${IFS}"
+  IFS=','
+  for profile_type in ${PERFLAB_PROFILING_TYPES}; do
+    if ! pyroscope_select_profile_type "${profile_type}"; then
+      echo "unsupported Pyroscope profile type '${profile_type}' in PERFLAB_PROFILING_TYPES" >&2
+      return 1
+    fi
+    [[ -n "${profile_types_json}" ]] && profile_types_json="${profile_types_json},"
+    profile_types_json="${profile_types_json}\"$(json_escape "${profile_type}")\""
+  done
+  IFS="${old_ifs}"
+  if [[ -z "${profile_types_json}" ]]; then
+    echo "PERFLAB_PROFILING_TYPES must select at least one type" >&2
+    return 1
+  fi
   pyroscope_ready=false
   pyroscope_probe_ready
-  for service in ${pyroscope_services}; do
-    pyroscope_query_service "${service}"
-    files=$((files + 1))
-    selector="$(pyroscope_query_selector "${service}")"
+  old_ifs="${IFS}"
+  IFS=','
+  for profile_type in ${PERFLAB_PROFILING_TYPES}; do
+    pyroscope_select_profile_type "${profile_type}"
+    IFS="${old_ifs}"
+    for service in ${pyroscope_services}; do
+      pyroscope_query_service "${service}"
+      files=$((files + 1))
+      selector="$(pyroscope_query_selector "${service}")"
     if [[ "${pyroscope_last_state}" == "captured" || "${pyroscope_last_state}" == "truncated" ]] && [[ "${pyroscope_last_symbolization}" != "symbolized" ]]; then
       echo "WARNING: Pyroscope profile for ${service} is ${pyroscope_last_symbolization} (${pyroscope_last_symbolized} symbolized of ${pyroscope_last_nodes} frames). On aarch64 hosts pyroscope-dotnet 1.5.1 is an unsupported build that loses every frame of tiered-up (re-jitted) methods; the lab entrypoint disables tiered compilation there unless PERFLAB_PROFILING_KEEP_TIERING=1 was set. Check the profile's dotnet_tiered_compilation label." >&2
     fi
-    service_json="$(printf '{"service":"%s","captureState":"%s","reason":"%s","nodes":%s,"symbolizedNodes":%s,"symbolization":"%s","truncated":%s,"required":%s,"attempts":%s,"httpStatus":"%s","selector":"%s"}' \
-      "$(json_escape "${service}")" "$(json_escape "${pyroscope_last_state}")" "$(json_escape "${pyroscope_last_reason}")" \
+      service_json="$(printf '{"service":"%s","profileCategory":"%s","profileType":"%s","captureState":"%s","reason":"%s","nodes":%s,"symbolizedNodes":%s,"symbolization":"%s","truncated":%s,"required":%s,"attempts":%s,"httpStatus":"%s","selector":"%s"}' \
+      "$(json_escape "${service}")" "$(json_escape "${profile_type}")" "$(json_escape "${PYROSCOPE_PROFILE_TYPE}")" \
+      "$(json_escape "${pyroscope_last_state}")" "$(json_escape "${pyroscope_last_reason}")" \
       "${pyroscope_last_nodes}" "${pyroscope_last_symbolized}" "$(json_escape "${pyroscope_last_symbolization}")" \
       "$([[ "${pyroscope_last_state}" == "truncated" ]] && echo true || echo false)" \
       "$(pyroscope_service_required "${service}" && echo true || echo false)" \
@@ -240,6 +277,9 @@ pyroscope_capture_profiles() {
         missing)
           overall="missing"
           ;;
+        failed)
+          overall="failed"
+          ;;
       esac
     fi
     if pyroscope_service_required "${service}"; then
@@ -253,11 +293,14 @@ pyroscope_capture_profiles() {
     else
       echo "NOTE: optional Pyroscope profile for ${service} is ${pyroscope_last_state}." >&2
     fi
+    done
+    IFS=','
   done
+  IFS="${old_ifs}"
   if [[ "${required_failed}" -eq 1 ]]; then
     profiles_incomplete=1
     if [[ "${overall}" == "captured" || "${overall}" == "truncated" ]]; then
-      overall="partial"
+      overall="missing"
     fi
   fi
   if [[ -z "${pyroscope_required_services}" ]]; then
@@ -266,21 +309,22 @@ pyroscope_capture_profiles() {
     local weakest="captured" st
     for st in $(printf '%s\n' "${services_json}" | tr ',' '\n' | sed -n 's/.*"captureState":"\([a-z-]*\)".*/\1/p'); do
       case "${st}" in
+        failed) weakest="failed" ;;
         missing) weakest="missing" ;;
-        delayed) [[ "${weakest}" != "missing" ]] && weakest="delayed" ;;
+        delayed) [[ "${weakest}" != "failed" && "${weakest}" != "missing" ]] && weakest="delayed" ;;
       esac
     done
     [[ "${weakest}" != "captured" ]] && overall="${weakest}"
   fi
   telemetry_profiles_state="${overall}"
-  printf '{"schemaVersion":"pyroscope-query-v1","endpoint":"%s","ready":%s,"profileType":"%s","maxNodes":%s,"startEpoch":%s,"endEpoch":%s,"startUtc":"%s","endUtc":"%s","windowScoped":%s,"attemptsPerService":%s,"services":[%s]}\n' \
-    "$(json_escape "${endpoint}")" "${pyroscope_ready}" "$(json_escape "${PYROSCOPE_PROFILE_TYPE}")" "${PYROSCOPE_MAX_NODES}" \
+  printf '{"schemaVersion":"pyroscope-query-v1","endpoint":"%s","ready":%s,"profileTypes":[%s],"maxNodes":%s,"startEpoch":%s,"endEpoch":%s,"startUtc":"%s","endUtc":"%s","windowScoped":%s,"attemptsPerService":%s,"services":[%s]}\n' \
+    "$(json_escape "${endpoint}")" "${pyroscope_ready}" "${profile_types_json}" "${PYROSCOPE_MAX_NODES}" \
     "${start_epoch}" "${end_epoch}" "$(json_escape "${start_utc}")" "$(json_escape "${end_utc}")" \
     "$([[ "${target_mode}" == "remote" ]] && echo true || echo false)" \
     "${PYROSCOPE_CAPTURE_ATTEMPTS}" "${services_json}" \
     > "${artifact_dir}/telemetry/profiles/query.json"
-  printf '{"captureState":"%s","enabled":true,"files":%s,"profileType":"%s","maxNodes":%s,"windowScoped":%s,"truncated":%s,"services":[%s]}\n' \
-    "$(json_escape "${overall}")" "${files}" "$(json_escape "${PYROSCOPE_PROFILE_TYPE}")" "${PYROSCOPE_MAX_NODES}" \
+  printf '{"captureState":"%s","enabled":true,"files":%s,"profileTypes":[%s],"maxNodes":%s,"windowScoped":%s,"truncated":%s,"services":[%s]}\n' \
+    "$(json_escape "${overall}")" "${files}" "${profile_types_json}" "${PYROSCOPE_MAX_NODES}" \
     "$([[ "${target_mode}" == "remote" ]] && echo true || echo false)" \
     "$([[ "${overall}" == "truncated" ]] && echo true || echo false)" \
     "${services_json}" \

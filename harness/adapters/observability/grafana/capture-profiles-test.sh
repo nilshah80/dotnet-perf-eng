@@ -5,6 +5,8 @@ adapter="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/capture-profiles.sh"
 test_root="$(mktemp -d)"
 trap 'rm -rf "${test_root}"' EXIT
 
+fail() { echo "capture-profiles-test: $*" >&2; exit 1; }
+
 json_escape() {
   local s="$1"
   s="${s//\\/\\\\}"
@@ -104,27 +106,27 @@ grep -q '"symbolization":"unknown"' "${test_root}/unsymbolized/telemetry/profile
 grep -q '"symbolizedNodes":0' "${test_root}/unsymbolized/telemetry/profiles-signal.json" || { echo "symbolizedNodes must be 0" >&2; exit 1; }
 grep -q 'no symbolized frames' "${test_root}/unsymbolized/telemetry/profiles-signal.json" || { echo "unsymbolized reason missing" >&2; exit 1; }
 
-run_case empty delayed ok "${empty}"
-[[ "${profiles_incomplete}" == "1" ]] || { echo "required delayed profile must be incomplete" >&2; exit 1; }
+run_case empty missing ok "${empty}"
+[[ "${profiles_incomplete}" == "1" ]] || { echo "required missing profile must be incomplete" >&2; exit 1; }
 
 stub='{"flamebearer":{"names":["total"],"levels":[[0,0,0,0]]},"metadata":{"units":"samples"}}'
-run_case stub delayed ok "${stub}"
+run_case stub missing ok "${stub}"
 [[ "${profiles_incomplete}" == "1" ]] || { echo "stub total-only profile must be incomplete" >&2; exit 1; }
 
 run_case truncated truncated ok "${truncated}"
 [[ "${profiles_incomplete}" == "0" ]] || { echo "truncated profile must remain usable" >&2; exit 1; }
 
-run_case malformed missing ok "${malformed}"
+run_case malformed failed ok "${malformed}"
 [[ "${profiles_incomplete}" == "1" ]] || { echo "malformed required profile must be incomplete" >&2; exit 1; }
 
-run_case unreachable missing down ""
+run_case unreachable failed down ""
 [[ "${profiles_incomplete}" == "1" ]] || { echo "unreachable required profile must be incomplete" >&2; exit 1; }
 grep -q '"ready":false' "${test_root}/unreachable/telemetry/profiles/query.json" || { echo "unreachable must record ready=false" >&2; exit 1; }
 grep -q 'unreachable' "${test_root}/unreachable/telemetry/profiles-signal.json" || { echo "unreachable reason missing" >&2; exit 1; }
 
-# A reachable backend rejecting the selector (HTTP 400/500) is missing WITH the
+# A reachable backend rejecting the selector (HTTP 400/500) is failed WITH the
 # status, never mis-reported as unreachable.
-run_case rejected missing 500 '{"code":"internal","message":"boom"}'
+run_case rejected failed 500 '{"code":"internal","message":"boom"}'
 [[ "${profiles_incomplete}" == "1" ]] || { echo "HTTP 500 required profile must be incomplete" >&2; exit 1; }
 grep -q '"httpStatus":"500"' "${test_root}/rejected/telemetry/profiles-signal.json" || { echo "HTTP status not recorded" >&2; cat "${test_root}/rejected/telemetry/profiles-signal.json" >&2; exit 1; }
 grep -q 'HTTP 500' "${test_root}/rejected/telemetry/profiles-signal.json" || { echo "HTTP 500 reason missing" >&2; exit 1; }
@@ -161,8 +163,21 @@ pyroscope_required_services="perflab-api" start_epoch=1 end_epoch=30 telemetry_r
 PYROSCOPE_CAPTURE_ATTEMPTS=1 PYROSCOPE_CAPTURE_SLEEP=0 \
   pyroscope_capture_profiles
 grep -q '^{"captureState":"captured"' "${artifact}/telemetry/profiles-signal.json" || { echo "optional idle worker must not degrade the signal" >&2; cat "${artifact}/telemetry/profiles-signal.json" >&2; exit 1; }
-grep -q '"service":"perflab-worker","captureState":"delayed"' "${artifact}/telemetry/profiles-signal.json" || { echo "optional worker state not retained" >&2; exit 1; }
+grep -q '"service":"perflab-worker".*"captureState":"missing"' "${artifact}/telemetry/profiles-signal.json" || { echo "optional worker state not retained" >&2; exit 1; }
 [[ "${profiles_incomplete}" == "0" ]] || { echo "optional idle worker must not make the package incomplete" >&2; exit 1; }
+
+artifact="${test_root}/multi-type"; mkdir -p "${artifact}"
+PATH="${mixed_bin}:${PATH}" artifact_dir="${artifact}" continuous_profiling=1 capture_telemetry=1 \
+PERFLAB_PROFILING_TYPES="cpu,wall,allocation,lock,exception,live-heap" \
+pyroscope_url="http://127.0.0.1:4040" pyroscope_services="perflab-api" \
+pyroscope_required_services="perflab-api" start_epoch=1 end_epoch=30 telemetry_run_id="run-1" target_mode="local" \
+PYROSCOPE_CAPTURE_ATTEMPTS=1 PYROSCOPE_CAPTURE_SLEEP=0 \
+  pyroscope_capture_profiles
+for profile_type in cpu wall allocation lock exception live-heap; do
+  [[ -s "${artifact}/telemetry/profiles/perflab-api-${profile_type}.json" ]] || fail "missing ${profile_type} profile"
+  grep -q "\"profileCategory\":\"${profile_type}\"" "${artifact}/telemetry/profiles-signal.json" || fail "missing ${profile_type} state"
+done
+grep -q '"profileTypes":\["cpu","wall","allocation","lock","exception","live-heap"\]' "${artifact}/telemetry/profiles/query.json" || fail "multi-type query manifest"
 
 artifact="${test_root}/disabled"
 mkdir -p "${artifact}"

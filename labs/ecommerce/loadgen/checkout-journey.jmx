@@ -1,0 +1,320 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="native-checkout-journey" enabled="true">
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.tearDown_on_shutdown">true</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+        <collectionProp name="Arguments.arguments"/>
+      </elementProp>
+    </TestPlan>
+    <hashTree>
+      <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="require-http-success" enabled="true">
+        <collectionProp name="Asserion.test_strings">
+          <stringProp name="http-success">^[23][0-9][0-9]$</stringProp>
+        </collectionProp>
+        <stringProp name="Assertion.custom_message">expected an HTTP 2xx or 3xx response</stringProp>
+        <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+        <boolProp name="Assertion.assume_success">false</boolProp>
+        <intProp name="Assertion.test_type">2</intProp>
+      </ResponseAssertion>
+      <hashTree/>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="checkout-users" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">stopthread</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" enabled="true">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <intProp name="LoopController.loops">-1</intProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(perf.threads,1)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">0</stringProp>
+        <boolProp name="ThreadGroup.scheduler">true</boolProp>
+        <stringProp name="ThreadGroup.duration">${__P(perf.duration_seconds,1)}</stringProp>
+        <stringProp name="ThreadGroup.delay">0</stringProp>
+        <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
+      </ThreadGroup>
+      <hashTree>
+        <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="Bind perf.* properties" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="cacheKey">true</stringProp>
+          <stringProp name="script"><![CDATA[
+import java.net.URI
+def raw = props.get("perf.base_url") ?: System.getenv("PERF_BASE_URL")
+if (raw == null || raw.trim().isEmpty()) {
+  throw new Exception("perf.base_url / PERF_BASE_URL is required")
+}
+def uri = URI.create(raw)
+vars.put("perf.scheme", uri.getScheme() ?: "http")
+vars.put("perf.host", uri.getHost())
+def port = uri.getPort()
+if (port < 0) {
+  port = "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80
+}
+vars.put("perf.port", String.valueOf(port))
+vars.put("perf.runId", props.get("perf.run_id") ?: (System.getenv("PERF_RUN_ID") ?: ""))
+vars.put("perf.loginUser", props.get("perf.login_user") ?: (System.getenv("PERF_LOGIN_USER") ?: "user1"))
+vars.put("perf.loginPassword", props.get("perf.login_password") ?: (System.getenv("PERF_LOGIN_PASSWORD") ?: "Password123!"))
+def kind = props.get("perf.workload_kind") ?: (System.getenv("PERF_WORKLOAD_KIND") ?: "journey")
+if (!"journey".equals(kind)) {
+  throw new Exception("checkout-journey.jmx requires perf.workload_kind=journey")
+}
+if (sampler != null && "op::login".equals(sampler.getName())) {
+  vars.put("perf.pollContinue", "true")
+  vars.put("perf.pollAttempt", "0")
+}
+]]></stringProp>
+        </JSR223PreProcessor>
+        <hashTree/>
+        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="perf-headers" enabled="true">
+          <collectionProp name="HeaderManager.headers">
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">Accept</stringProp>
+              <stringProp name="Header.value">application/json</stringProp>
+            </elementProp>
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">Content-Type</stringProp>
+              <stringProp name="Header.value">application/json</stringProp>
+            </elementProp>
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">X-Perf-Run-Id</stringProp>
+              <stringProp name="Header.value">${perf.runId}</stringProp>
+            </elementProp>
+          </collectionProp>
+        </HeaderManager>
+        <hashTree/>
+        <TransactionController guiclass="TransactionControllerGui" testclass="TransactionController" testname="journey::checkout" enabled="true">
+          <boolProp name="TransactionController.includeTimers">true</boolProp>
+          <boolProp name="TransactionController.parent">true</boolProp>
+        </TransactionController>
+        <hashTree>
+          <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="journey-think-time" enabled="true">
+            <stringProp name="ConstantTimer.delay">50</stringProp>
+          </ConstantTimer>
+          <hashTree/>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="op::login" enabled="true">
+            <stringProp name="HTTPSampler.domain">${perf.host}</stringProp>
+            <stringProp name="HTTPSampler.port">${perf.port}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${perf.scheme}</stringProp>
+            <stringProp name="HTTPSampler.path">/api/auth/login</stringProp>
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="" elementType="HTTPArgument">
+                  <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                  <stringProp name="Argument.value">{&quot;username&quot;:&quot;${perf.loginUser}&quot;,&quot;password&quot;:&quot;${perf.loginPassword}&quot;}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract-token" enabled="true">
+              <stringProp name="JSONPostProcessor.referenceNames">perf.token</stringProp>
+              <stringProp name="JSONPostProcessor.jsonPathExprs">$.token</stringProp>
+              <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+              <stringProp name="JSONPostProcessor.defaultValues">__MISSING__</stringProp>
+            </JSONPostProcessor>
+            <hashTree/>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="require-token" enabled="true">
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="cacheKey">true</stringProp>
+              <stringProp name="script"><![CDATA[
+def value = vars.get("perf.token")
+if (!value || "__MISSING__".equals(value)) {
+  prev.setSuccessful(false)
+  prev.setResponseMessage("login response did not contain a token")
+}
+]]></stringProp>
+            </JSR223PostProcessor>
+            <hashTree/>
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="op::browse" enabled="true">
+            <stringProp name="HTTPSampler.domain">${perf.host}</stringProp>
+            <stringProp name="HTTPSampler.port">${perf.port}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${perf.scheme}</stringProp>
+            <stringProp name="HTTPSampler.path">/api/products?page=1&amp;pageSize=25</stringProp>
+            <stringProp name="HTTPSampler.method">GET</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="op-browse-auth" enabled="true">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header">
+                  <stringProp name="Header.name">Authorization</stringProp>
+                  <stringProp name="Header.value">Bearer ${perf.token}</stringProp>
+                </elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+            <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract-product" enabled="true">
+              <stringProp name="JSONPostProcessor.referenceNames">perf.productId</stringProp>
+              <stringProp name="JSONPostProcessor.jsonPathExprs">$.items[0].id</stringProp>
+              <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+              <stringProp name="JSONPostProcessor.defaultValues">__MISSING__</stringProp>
+            </JSONPostProcessor>
+            <hashTree/>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="require-product" enabled="true">
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="cacheKey">true</stringProp>
+              <stringProp name="script"><![CDATA[
+def value = vars.get("perf.productId")
+if (!value || "__MISSING__".equals(value)) {
+  prev.setSuccessful(false)
+  prev.setResponseMessage("browse response did not contain a product id")
+}
+]]></stringProp>
+            </JSR223PostProcessor>
+            <hashTree/>
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="op::create" enabled="true">
+            <stringProp name="HTTPSampler.domain">${perf.host}</stringProp>
+            <stringProp name="HTTPSampler.port">${perf.port}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${perf.scheme}</stringProp>
+            <stringProp name="HTTPSampler.path">/api/orders</stringProp>
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="" elementType="HTTPArgument">
+                  <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                  <stringProp name="Argument.value">{&quot;items&quot;:[{&quot;productId&quot;:${perf.productId},&quot;quantity&quot;:1}],&quot;clientOrderId&quot;:&quot;${perf.runId}-${__threadNum}-${__iteration}&quot;}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="op-create-auth" enabled="true">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header">
+                  <stringProp name="Header.name">Authorization</stringProp>
+                  <stringProp name="Header.value">Bearer ${perf.token}</stringProp>
+                </elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+            <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract-order" enabled="true">
+              <stringProp name="JSONPostProcessor.referenceNames">perf.orderId</stringProp>
+              <stringProp name="JSONPostProcessor.jsonPathExprs">$.id</stringProp>
+              <stringProp name="JSONPostProcessor.match_numbers">1</stringProp>
+              <stringProp name="JSONPostProcessor.defaultValues">__MISSING__</stringProp>
+            </JSONPostProcessor>
+            <hashTree/>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="require-order" enabled="true">
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="cacheKey">true</stringProp>
+              <stringProp name="script"><![CDATA[
+def value = vars.get("perf.orderId")
+if (!value || "__MISSING__".equals(value)) {
+  prev.setSuccessful(false)
+  prev.setResponseMessage("create response did not contain an order id")
+}
+]]></stringProp>
+            </JSR223PostProcessor>
+            <hashTree/>
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="op::pay" enabled="true">
+            <stringProp name="HTTPSampler.domain">${perf.host}</stringProp>
+            <stringProp name="HTTPSampler.port">${perf.port}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${perf.scheme}</stringProp>
+            <stringProp name="HTTPSampler.path">/api/orders/${perf.orderId}/payment</stringProp>
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="" elementType="HTTPArgument">
+                  <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                  <stringProp name="Argument.value">{&quot;idempotencyKey&quot;:&quot;${perf.runId}-${__threadNum}-${__iteration}-${perf.orderId}&quot;}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="op-pay-auth" enabled="true">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header">
+                  <stringProp name="Header.name">Authorization</stringProp>
+                  <stringProp name="Header.value">Bearer ${perf.token}</stringProp>
+                </elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+          </hashTree>
+          <WhileController guiclass="WhileControllerGui" testclass="WhileController" testname="poll-until-complete" enabled="true">
+            <stringProp name="WhileController.condition">${perf.pollContinue}</stringProp>
+          </WhileController>
+          <hashTree>
+            <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="op::poll" enabled="true">
+              <stringProp name="HTTPSampler.domain">${perf.host}</stringProp>
+              <stringProp name="HTTPSampler.port">${perf.port}</stringProp>
+              <stringProp name="HTTPSampler.protocol">${perf.scheme}</stringProp>
+              <stringProp name="HTTPSampler.path">/api/orders/${perf.orderId}</stringProp>
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+              <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="op-poll-auth" enabled="true">
+                <collectionProp name="HeaderManager.headers">
+                  <elementProp name="" elementType="Header">
+                    <stringProp name="Header.name">Authorization</stringProp>
+                    <stringProp name="Header.value">Bearer ${perf.token}</stringProp>
+                  </elementProp>
+                </collectionProp>
+              </HeaderManager>
+              <hashTree/>
+              <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="evaluate-poll" enabled="true">
+                <stringProp name="scriptLanguage">groovy</stringProp>
+                <stringProp name="cacheKey">true</stringProp>
+                <stringProp name="script"><![CDATA[
+import groovy.json.JsonSlurper
+def attempt = (vars.get("perf.pollAttempt") ?: "0").toInteger() + 1
+vars.put("perf.pollAttempt", String.valueOf(attempt))
+def state = ""
+try { state = String.valueOf(new JsonSlurper().parseText(prev.getResponseDataAsString()).status ?: "") } catch (ignored) { }
+if ("completed".equalsIgnoreCase(state)) {
+  vars.put("perf.pollContinue", "false")
+} else if (attempt >= 10 || "failed".equalsIgnoreCase(state)) {
+  vars.put("perf.pollContinue", "false")
+  prev.setSuccessful(false)
+  prev.setResponseMessage("order did not reach completed state after " + attempt + " poll attempts")
+}
+]]></stringProp>
+              </JSR223PostProcessor>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="op::verify" enabled="true">
+            <stringProp name="HTTPSampler.domain">${perf.host}</stringProp>
+            <stringProp name="HTTPSampler.port">${perf.port}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${perf.scheme}</stringProp>
+            <stringProp name="HTTPSampler.path">/api/perf/runs/${perf.runId}/orders/${perf.orderId}</stringProp>
+            <stringProp name="HTTPSampler.method">GET</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="op-verify-auth" enabled="true">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header">
+                  <stringProp name="Header.name">Authorization</stringProp>
+                  <stringProp name="Header.value">Bearer ${perf.token}</stringProp>
+                </elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+          </hashTree>
+        </hashTree>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

@@ -1,0 +1,152 @@
+{
+  "contractRevision": "v1",
+  "manifestSha256": "74528d9dd29c6caf2c8a7a689119552e2e4808a007c92370fab105f9aacd08c3",
+  "hashAlgorithm": "sha256",
+  "entries": [
+    {
+      "logicalName": "catalog/scenario-catalog.schema.json",
+      "sha256": "a571b92c4304203128efdab1b9e3f0690e25acb4e08d9c6df8aeb3981e6a6112"
+    },
+    {
+      "logicalName": "comparison/legacy-request-v1.schema.json",
+      "sha256": "b6a92fc850cc660de098b2625b986de32fad76b5c77cc289b5184f1272feab17"
+    },
+    {
+      "logicalName": "fixtures/catalog/heterogeneous-mix-invalid.json",
+      "sha256": "4290593390ed7e0bca3ad2b7f66d0195ff8f3418dd115ef72566bd05fbb6781b"
+    },
+    {
+      "logicalName": "fixtures/catalog/journey-descriptor-valid.json",
+      "sha256": "e499035f131fedaddcdbfe728da662563ff0f0cfa79c57f75010d84204c093ec"
+    },
+    {
+      "logicalName": "fixtures/catalog/request-valid.json",
+      "sha256": "4dc9c51f6bbbfb28886813d6cd01ae18cef8195b4ab53ae55e7fba401638e176"
+    },
+    {
+      "logicalName": "fixtures/catalog/unknown-field-strict.json",
+      "sha256": "6e8544bec7e87720b4f2a0895c9a3fa0fb69c8c55d61cd5e90658f9bf3b897a2"
+    },
+    {
+      "logicalName": "fixtures/comparison/legacy-request-v1-eligible.json",
+      "sha256": "b8176baa2c68f7f72e9e0fb08a44fe76bc494879e8e3c503dfd4bb35fd2dd629"
+    },
+    {
+      "logicalName": "fixtures/comparison/legacy-request-v1-ineligible-journey.json",
+      "sha256": "b9c03505e53b053a96dfe4dd5ebb9db7e26deed34e233b8de03c306478a7a2ea"
+    },
+    {
+      "logicalName": "fixtures/datafault/incomplete-cleanup-fails-gate.json",
+      "sha256": "3ef44929d79cb72bac818c2a6c685a19fdd5c662a1309369b7408e623549945f"
+    },
+    {
+      "logicalName": "fixtures/distributed/never-average-percentiles.json",
+      "sha256": "a6e4abd091e9c69830f411f7d3b04f87e0d9390063b8684df7f4c790108dc20b"
+    },
+    {
+      "logicalName": "fixtures/jmeter-adapter-wire/normalize-valid.json",
+      "sha256": "c8c8024984733337353edfb7927a0b35b4e827dc64b422b4231ca4d359075305"
+    },
+    {
+      "logicalName": "fixtures/jmeter-adapter-wire/run-once-valid.json",
+      "sha256": "ab6256dcb995ee62dc7559985d3fe7acafcaacb4b3f6c695049a28f3c4441fb1"
+    },
+    {
+      "logicalName": "fixtures/jmeter-adapter-wire/version-malformed.json",
+      "sha256": "12d274a2a82af0232e3f825044d80cef6283fd399231a0d436f1b9f192e52776"
+    },
+    {
+      "logicalName": "fixtures/jmeter-adapter-wire/version-valid.json",
+      "sha256": "2f35126fae0abd4155d350c23e16d5ae076f0368bff0d3e7d32bb43fbd6d7003"
+    },
+    {
+      "logicalName": "fixtures/jmeter-journey/parent-child-labels.json",
+      "sha256": "d7b8b4d0c7648f4cceb1d4ecc0ff891c0892a2de9d06e29e8edd4d0746547a1e"
+    },
+    {
+      "logicalName": "fixtures/journey/checkout-six-ops.json",
+      "sha256": "726bb7835600d5531592762b9e0294380d62183fd4dae58dfacd276af2c46be9"
+    },
+    {
+      "logicalName": "fixtures/journey/write-ack-required.json",
+      "sha256": "01f3082563a8fd6b40319c7f85a319f357cc76a26fbbfda91d465b926840bc33"
+    },
+    {
+      "logicalName": "fixtures/legacy-request-iteration-accounting.json",
+      "sha256": "ab0989e97c87353c74aaa2bc88d38a7a2478bcb5739893e985a35d0d8ea2718d"
+    },
+    {
+      "logicalName": "fixtures/profile/steady-closed.json",
+      "sha256": "4dc96f735ed98b7941cadc46dbef210478fd47c5d4b04e9a772dddd62fe6e164"
+    },
+    {
+      "logicalName": "fixtures/profiling/no-static-perf-phase.json",
+      "sha256": "d2a13d86fa3e19dd86fc155ea88e0780a99b9f60b844428124047a588f8d87eb"
+    },
+    {
+      "logicalName": "fixtures/protocol/browser-synthetic-separate.json",
+      "sha256": "3d4307f2cbcfb29695e56ac2eeffb794cf876e9f192be0386f69b0cc10be75fa"
+    },
+    {
+      "logicalName": "fixtures/revision/unknown-revision.json",
+      "sha256": "8dfbf0a84dec57967d6afc59efc156bb4b10222016c7433c935d7ccc42af39ff"
+    },
+    {
+      "logicalName": "fixtures/session/soak-requires-base.json",
+      "sha256": "28b5e203be5d1bb0c574535dcf4026ca4921faa154225b71559e54d63ace6b86"
+    },
+    {
+      "logicalName": "fixtures/target/unmanaged-refuses-deploy.json",
+      "sha256": "724133bba42aa694e4a7cda1d97c51af426da6391682529f11557e0ae9a63031"
+    },
+    {
+      "logicalName": "load/data-fault.schema.json",
+      "sha256": "59832014e136c4620ebdf2c70c7e83c66eb0df973a407cc967f02397c53b6edf"
+    },
+    {
+      "logicalName": "load/distributed-merge.schema.json",
+      "sha256": "7b4a28d1128242b3c17dfc88f2e27d396fbf27ffda379cc6479af14f4afe34b1"
+    },
+    {
+      "logicalName": "load/jmeter-adapter-wire.schema.json",
+      "sha256": "43db82bb8d7e853c85050e119ac1decf750f47cc2f761c793a9af8bd6a80a147"
+    },
+    {
+      "logicalName": "load/jmeter-journey-v2.schema.json",
+      "sha256": "2d108f1e649e83b46f0dd4e8daac1d413dee1a65c8051b3a345f57d0fa4b1b70"
+    },
+    {
+      "logicalName": "load/k6-journey-result.schema.json",
+      "sha256": "54d00645cb8d87d0ae5ac7cbe1bfe7c158fcac7b9959a629f5039c1003c56a4d"
+    },
+    {
+      "logicalName": "load/profile-plan.schema.json",
+      "sha256": "434c770c754391ecfd0956f4754be08b223830f63ef441a554bc0be2cc7c37be"
+    },
+    {
+      "logicalName": "load/profiling-policy.schema.json",
+      "sha256": "08c605a19da044796b905c2644cc81d3bfb0a193cf60ade511cd094c9be401c5"
+    },
+    {
+      "logicalName": "load/session-runtime.schema.json",
+      "sha256": "c040fa2a27eac952c17f2f1a9941c1c3ea73ab2a92ad53a10f2ff31a4ec1bf51"
+    },
+    {
+      "logicalName": "load/target-descriptor.schema.json",
+      "sha256": "ed1ae151c4b41cd5ee76bc6a10f5091cd94a8de7b6e29d6565fe5887473475b7"
+    },
+    {
+      "logicalName": "load/workload-manifest.schema.json",
+      "sha256": "cb0948ed98e25b06263b7599967c49672b3e86b48f9dd04204dfb3505a53d120"
+    },
+    {
+      "logicalName": "meta/contract-manifest.json",
+      "sha256": "74528d9dd29c6caf2c8a7a689119552e2e4808a007c92370fab105f9aacd08c3"
+    },
+    {
+      "logicalName": "semantics/contract.md",
+      "sha256": "8e28b3deffe4a699ffb73707b3db43a0e84ba5a6194526eb19c6d3d49764327c"
+    }
+  ],
+  "aggregateSha256": "b51743f3ff2df6cadfbfe5cd21e14899af1e8479095df91b1499efa3c217db8b"
+}

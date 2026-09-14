@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # JMeter load adapter -- JMeter is NOT installed on the host; it runs via the
-# pinned PerfLab container image. run.sh <artifact-dir> <phase>
+# native container image built by package.sh. run.sh <artifact-dir> <phase>
 # phase = warmup | measure | diagnostic
 set -euo pipefail
 HARNESS_ROOT="${PERFLAB_HARNESS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
@@ -9,6 +9,8 @@ source "${HARNESS_ROOT}/core/lib/common.sh"
 
 artifact_dir="${1:?run.sh <artifact-dir> <phase>}"
 phase="${2:?phase required (warmup|measure|diagnostic)}"
+adapter_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+manifest="${adapter_dir}/adapter-manifest.json"
 
 # The compatibility envelope of a MEASURED package is immutable evidence. A
 # diagnostic replay that runs inside a measured package (isolated non-campaign
@@ -30,14 +32,14 @@ case "${phase}" in
   warmup|measure|diagnostic) ;;
   *) echo "Unknown phase '${phase}' (use warmup|measure|diagnostic)." >&2; exit 2 ;;
 esac
-if [[ "${load_profile:-steady}" != "steady" ]]; then
-  echo "JMeter supports PERFLAB_PROFILE=steady only; received '${load_profile}'." >&2
-  exit 2
-fi
+case "${load_profile:-steady}" in
+  steady|smoke|closed|load) : ;;
+  *) echo "profile '${load_profile}' requires k6; JMeter supports steady, smoke, load, and closed only." >&2; exit 1 ;;
+esac
 
 inspect_json="$(docker image inspect --format '{{json .}}' "${jmeter_image}" 2>/dev/null || true)"
 [[ -n "${inspect_json}" ]] || {
-  echo "JMeter image ${jmeter_image} is not present locally. Load it with docker pull ${jmeter_image} or package-plugin.sh jmeter (never pulled during a run)." >&2
+  echo "JMeter image ${jmeter_image} is not present locally. Load it with the native package.sh (never pulled during a run)." >&2
   exit 2
 }
 image_id="$(printf '%s' "${inspect_json}" | jqd -r '.Id // empty')"
@@ -69,36 +71,53 @@ case "${jmeter_image}" in
     ;;
 esac
 
-cpus="2"
-memory="2147483648"
-export PERFLAB_PLUGIN_ID="perflab.load.jmeter"
-export PERFLAB_PLUGIN_VERSION="0.1.0"
 export PERFLAB_PLUGIN_IMAGE_DIGEST="${asserted_digest}"
-export PERFLAB_PLUGIN_CPUS="${cpus}"
-export PERFLAB_PLUGIN_MEMORY_BYTES="${memory}"
-export PERFLAB_JMETER_PROP_BASE_URL="${PERFLAB_JMETER_PROP_BASE_URL:-perflab.base_url}"
-export PERFLAB_JMETER_PROP_THREADS="${PERFLAB_JMETER_PROP_THREADS:-perflab.threads}"
-export PERFLAB_JMETER_PROP_DURATION_SECONDS="${PERFLAB_JMETER_PROP_DURATION_SECONDS:-perflab.duration_seconds}"
-export PERFLAB_JMETER_PROP_RUN_ID="${PERFLAB_JMETER_PROP_RUN_ID:-perflab.run_id}"
-export PERFLAB_JMETER_PROP_SCENARIO="${PERFLAB_JMETER_PROP_SCENARIO:-perflab.scenario}"
+# Compatibility names; values come from the native adapter, not a peer image.
+export PERFLAB_JMETER_PROP_BASE_URL="${PERFLAB_JMETER_PROP_BASE_URL:-perf.base_url}"
+export PERFLAB_JMETER_PROP_THREADS="${PERFLAB_JMETER_PROP_THREADS:-perf.threads}"
+export PERFLAB_JMETER_PROP_DURATION_SECONDS="${PERFLAB_JMETER_PROP_DURATION_SECONDS:-perf.duration_seconds}"
+export PERFLAB_JMETER_PROP_RUN_ID="${PERFLAB_JMETER_PROP_RUN_ID:-perf.run_id}"
+export PERFLAB_JMETER_PROP_SCENARIO="${PERFLAB_JMETER_PROP_SCENARIO:-perf.scenario}"
 
 version_json="$(MSYS_NO_PATHCONV=1 docker run --rm --pull=never \
-  --env PERFLAB_PLUGIN_ID --env PERFLAB_PLUGIN_VERSION --env PERFLAB_PLUGIN_IMAGE_DIGEST \
-  --env PERFLAB_PLUGIN_CPUS --env PERFLAB_PLUGIN_MEMORY_BYTES \
+  --env PERFLAB_PLUGIN_IMAGE_DIGEST \
   "${jmeter_image}" version --json)"
+reported_id="$(printf '%s' "${version_json}" | jqd -r '.adapterId // empty')"
+reported_version="$(printf '%s' "${version_json}" | jqd -r '.adapterVersion // empty')"
 reported_digest="$(printf '%s' "${version_json}" | jqd -r '.imageDigest // empty')"
 reported_cpus="$(printf '%s' "${version_json}" | jqd -r '.cpus // 0')"
 reported_memory="$(printf '%s' "${version_json}" | jqd -r '.memoryBytes // 0')"
 reported_max="$(printf '%s' "${version_json}" | jqd -r '.maxThreads // 0')"
+[[ -n "${reported_id}" ]] || { echo "version --json omitted adapterId." >&2; exit 2; }
+[[ -n "${reported_version}" ]] || { echo "version --json omitted adapterVersion." >&2; exit 2; }
 [[ -n "${reported_digest}" ]] || { echo "version --json omitted imageDigest; host must pass PERFLAB_PLUGIN_IMAGE_DIGEST." >&2; exit 2; }
 [[ "${reported_digest}" == "${asserted_digest}" ]] || { echo "adapter image digest '${reported_digest}' does not match inspect '${asserted_digest}'." >&2; exit 2; }
-[[ "${reported_cpus}" == "${cpus}" && "${reported_memory}" == "${memory}" ]] || { echo "adapter CPU/memory ${reported_cpus}/${reported_memory} do not match host assertion ${cpus}/${memory}." >&2; exit 2; }
-[[ "${reported_max}" == "256" ]] || { echo "adapter maxThreads ${reported_max} is not the Phase 2 ceiling of 256." >&2; exit 2; }
+[[ "${reported_cpus}" =~ ^[0-9]+([.][0-9]+)?$ && "${reported_cpus}" != "0" ]] || { echo "version --json omitted a positive cpus value." >&2; exit 2; }
+[[ "${reported_memory}" =~ ^[1-9][0-9]*$ ]] || { echo "version --json omitted a positive memoryBytes value." >&2; exit 2; }
+[[ "${reported_max}" =~ ^[1-9][0-9]*$ ]] || { echo "version --json omitted a positive maxThreads value." >&2; exit 2; }
+
+if [[ -f "${manifest}" ]]; then
+  expected_id="$(jqd -r '.adapterId // empty' < "${manifest}")"
+  expected_max="$(jqd -r '.maxThreads // 0' < "${manifest}")"
+  expected_cpus="$(jqd -r '.cpus // 0' < "${manifest}")"
+  expected_memory="$(jqd -r '.memoryBytes // 0' < "${manifest}")"
+  [[ "${reported_id}" == "${expected_id}" ]] || { echo "adapterId '${reported_id}' does not match native manifest '${expected_id}'." >&2; exit 2; }
+  [[ "${reported_max}" == "${expected_max}" ]] || { echo "maxThreads '${reported_max}' does not match native manifest '${expected_max}'." >&2; exit 2; }
+  [[ "${reported_cpus}" == "${expected_cpus}" ]] || { echo "cpus '${reported_cpus}' does not match native manifest '${expected_cpus}'." >&2; exit 2; }
+  [[ "${reported_memory}" == "${expected_memory}" ]] || { echo "memoryBytes '${reported_memory}' does not match native manifest '${expected_memory}'." >&2; exit 2; }
+fi
+
+cpus="${reported_cpus}"
+memory="${reported_memory}"
+export PERFLAB_PLUGIN_ID="${reported_id}"
+export PERFLAB_PLUGIN_VERSION="${reported_version}"
+export PERFLAB_PLUGIN_CPUS="${cpus}"
+export PERFLAB_PLUGIN_MEMORY_BYTES="${memory}"
 
 conns="${PERFLAB_CONNECTIONS:?PERFLAB_CONNECTIONS not set}"
 [[ "${conns}" =~ ^[1-9][0-9]*$ ]] || { echo "PERFLAB_CONNECTIONS must be a positive integer." >&2; exit 2; }
-if (( conns > 256 )); then
-  echo "JMeter connections ${conns} exceed the 256 thread ceiling." >&2
+if (( conns > reported_max )); then
+  echo "JMeter connections ${conns} exceed adapter maxThreads ${reported_max}." >&2
   exit 2
 fi
 
@@ -177,6 +196,7 @@ plugin_env=(
   --env PERFLAB_JMETER_PROP_DURATION_SECONDS --env PERFLAB_JMETER_PROP_RUN_ID --env PERFLAB_JMETER_PROP_SCENARIO
   --env PERF_BASE_URL --env PERF_METHOD --env PERF_PATH --env PERF_BODY
   --env PERF_RUN_ID --env PERF_SCENARIO --env PERF_RUN_MODE --env PERF_HEADERS
+  --env PERF_WORKLOAD_KIND --env PERF_WRITE_ACK --env PERF_WRITE_BUDGET
   --env PERFLAB_CONNECTIONS --env PERFLAB_DURATION_SECONDS --env PERFLAB_PROFILE
   --env PERFLAB_GENERATOR_NETWORK_PATH
 )

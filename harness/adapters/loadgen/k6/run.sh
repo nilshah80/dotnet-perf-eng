@@ -159,25 +159,52 @@ case "${phase}" in
       echo "k6 summary export not found or empty: ${sfile}" >&2
       exit 1
     fi
-    # k6 trend stats are floating-point ms (numeric, comparable between k6 runs,
-    # NOT comparable to a wrk-duration string). Counters that never fire are
-    # omitted, hence "// 0". non_2xx_3xx / transport_errors come from the
-    # workload script's own counters (default.js or the lab's k6.js).
-    jqd '(.metrics // {}) as $m | [
-        {name:"http.requests_per_second",value:($m.http_reqs.rate // 0),unit:"request/s",source:"benchmark/k6-summary.json"},
-        {name:"http.latency.p50",value:($m.http_req_duration["p(50)"]),unit:"ms",source:"benchmark/k6-summary.json"},
-        {name:"http.latency.p90",value:($m.http_req_duration["p(90)"]),unit:"ms",source:"benchmark/k6-summary.json"},
-        {name:"http.latency.p95",value:($m.http_req_duration["p(95)"]),unit:"ms",source:"benchmark/k6-summary.json"},
-        {name:"http.latency.p99",value:($m.http_req_duration["p(99)"]),unit:"ms",source:"benchmark/k6-summary.json"},
-        {name:"http.responses.non_2xx_3xx",value:($m.perflab_http_non_2xx_3xx.count // 0),unit:"response",source:"benchmark/k6-summary.json"},
-        {name:"http.transport_errors",value:($m.perflab_http_transport_errors.count // 0),unit:"error",source:"benchmark/k6-summary.json"},
-        {name:"http.requests.total",value:($m.http_reqs.count // 0),unit:"request",source:"benchmark/k6-summary.json"},
-        {name:"http.error_rate",value:((($m.perflab_http_non_2xx_3xx.count // 0) + ($m.perflab_http_transport_errors.count // 0)) / (if ($m.http_reqs.count // 0) > 0 then $m.http_reqs.count else 1 end)),unit:"ratio",source:"benchmark/k6-summary.json"},
-        {name:"http.dropped_iterations",value:($m.dropped_iterations.count // 0),unit:"iteration",source:"benchmark/k6-summary.json"}
+    # Journey summaries use only measured child requests. Control/setup traffic
+    # remains visible in the raw k6 export but cannot inflate SLO throughput or
+    # latency. Single-request workloads continue to use k6's HTTP metrics.
+    jqd '(.metrics // {}) as $m |
+      ($m.journey_starts.count // 0) as $starts |
+      (if $starts > 0 then ($m.journey_wire_requests.count // 0) else ($m.http_reqs.count // 0) end) as $requests |
+      (if $starts > 0 then ($m.journey_wire_requests.rate // 0) else ($m.http_reqs.rate // 0) end) as $rate |
+      (if $starts > 0 then $m.journey_wire_latency else $m.http_req_duration end) as $latency |
+      (if $starts > 0 then ($m.journey_status_errors.count // 0) else ($m.perflab_http_non_2xx_3xx.count // 0) end) as $status_errors |
+      (if $starts > 0 then ($m.journey_transport_errors.count // 0) else ($m.perflab_http_transport_errors.count // 0) end) as $transport_errors |
+      [
+        {name:"http.requests_per_second",value:$rate,unit:"request/s",source:"benchmark/k6-summary.json"},
+        {name:"http.latency.p50",value:($latency["p(50)"]),unit:"ms",source:"benchmark/k6-summary.json"},
+        {name:"http.latency.p90",value:($latency["p(90)"]),unit:"ms",source:"benchmark/k6-summary.json"},
+        {name:"http.latency.p95",value:($latency["p(95)"]),unit:"ms",source:"benchmark/k6-summary.json"},
+        {name:"http.latency.p99",value:($latency["p(99)"]),unit:"ms",source:"benchmark/k6-summary.json"},
+        {name:"http.responses.non_2xx_3xx",value:$status_errors,unit:"response",source:"benchmark/k6-summary.json"},
+        {name:"http.transport_errors",value:$transport_errors,unit:"error",source:"benchmark/k6-summary.json"},
+        {name:"http.requests.total",value:$requests,unit:"request",source:"benchmark/k6-summary.json"},
+        {name:"http.error_rate",value:(($status_errors + $transport_errors) / (if $requests > 0 then $requests else 1 end)),unit:"ratio",source:"benchmark/k6-summary.json"},
+        {name:"http.dropped_iterations",value:($m.dropped_iterations.count // 0),unit:"iteration",source:"benchmark/k6-summary.json"},
+        {name:"journey.starts",value:$starts,unit:"iteration",source:"benchmark/k6-summary.json"},
+        {name:"journey.completed",value:($m.journey_completed.count // 0),unit:"iteration",source:"benchmark/k6-summary.json"},
+        {name:"journey.failed",value:(($m.journey_failed.count // 0) + ($m.journey_failures.count // 0)),unit:"iteration",source:"benchmark/k6-summary.json"},
+        {name:"journey.aborted",value:($m.journey_aborted.count // 0),unit:"iteration",source:"benchmark/k6-summary.json"},
+        {name:"journey.child_ops",value:($m.journey_child_ops.count // 0),unit:"operation",source:"benchmark/k6-summary.json"},
+        {name:"journey.wire_requests",value:($m.journey_wire_requests.count // 0),unit:"request",source:"benchmark/k6-summary.json"},
+        {name:"journey.retries",value:($m.journey_retries.count // 0),unit:"request",source:"benchmark/k6-summary.json"},
+        {name:"journey.request_amplification",value:(($m.journey_wire_requests.count // 0) / (if $starts > 0 then $starts else 1 end)),unit:"request/iteration",source:"benchmark/k6-summary.json"},
+        {name:"journey.duration.p95",value:($m.journey_duration["p(95)"] // 0),unit:"ms",source:"benchmark/k6-summary.json"}
       ]' < "${sfile}" > "${artifact_dir}/benchmark/observations.json"
     if ! jqd -e 'any(.[]; .name == "http.latency.p95" and (.value | type) == "number")' \
         < "${artifact_dir}/benchmark/observations.json" >/dev/null; then
       echo "k6 summary is missing the required numeric p95 latency" >&2
+      exit 1
+    fi
+    if ! jqd -e '(.metrics // {}) as $m |
+        ($m.journey_starts.count // 0) as $starts |
+        ($m.journey_completed.count // 0) as $completed |
+        (($m.journey_failed.count // 0) + ($m.journey_failures.count // 0)) as $failed |
+        ($m.journey_aborted.count // 0) as $aborted |
+        ($m.journey_child_ops.count // 0) as $children |
+        ($m.journey_wire_requests.count // 0) as $wire |
+        $starts == 0 or ($starts == ($completed + $failed + $aborted) and $wire >= $children)' \
+        < "${sfile}" >/dev/null; then
+      echo "k6 journey evidence is incomplete or cannot be reconciled" >&2
       exit 1
     fi
     ;;

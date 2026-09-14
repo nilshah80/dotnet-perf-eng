@@ -17,3 +17,6 @@ __pycache__/
 # labs/<lab>/baselines/ and the cross-commit trend in perf-history/.
 artifacts/
 perf-history/
+
+# Local JMeter runner build output. Package with package.sh; do not commit binaries.
+harness/adapters/loadgen/jmeter/runner/jmeter-runner

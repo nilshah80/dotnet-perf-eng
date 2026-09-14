@@ -8,16 +8,21 @@ namespace ECommerce.Api.Configuration;
 public sealed partial record EcommerceRunContext(
     string ScenarioId,
     string RunId,
-    string RunMode)
+    string RunMode,
+    string WorkloadKind)
 {
     public bool IsDiagnosticRun =>
         string.Equals(RunMode, "diagnose", StringComparison.OrdinalIgnoreCase);
+
+    public bool RequiresManagedPartition =>
+        string.Equals(WorkloadKind, "journey", StringComparison.OrdinalIgnoreCase);
 
     public static EcommerceRunContext FromEnvironment()
     {
         var scenarioId = Environment.GetEnvironmentVariable("PERF_SCENARIO") ?? "E00";
         var runId = Environment.GetEnvironmentVariable("PERF_RUN_ID") ?? "local-manual";
         var runMode = Environment.GetEnvironmentVariable("PERF_RUN_MODE") ?? "measure";
+        var workloadKind = Environment.GetEnvironmentVariable("PERF_WORKLOAD_KIND") ?? "request";
 
         if (!ScenarioPattern().IsMatch(scenarioId))
         {
@@ -37,7 +42,7 @@ public sealed partial record EcommerceRunContext(
                 $"PERF_RUN_MODE must be 'measure' or 'diagnose'; received '{runMode}'.");
         }
 
-        return new EcommerceRunContext(scenarioId.ToUpperInvariant(), runId, runMode);
+        return new EcommerceRunContext(scenarioId.ToUpperInvariant(), runId, runMode, workloadKind.Trim().ToLowerInvariant());
     }
 
     [GeneratedRegex("^[A-Za-z][A-Za-z0-9._-]{0,15}$", RegexOptions.CultureInvariant)]

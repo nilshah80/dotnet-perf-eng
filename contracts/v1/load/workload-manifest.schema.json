@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perflab.io/schemas/load/v1/workload-manifest.schema.json",
+  "title": "WorkloadManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "contractRevision",
+    "selectors"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "perflab.io/v1"
+    },
+    "kind": {
+      "const": "WorkloadManifest"
+    },
+    "contractRevision": {
+      "type": "string",
+      "const": "v1"
+    },
+    "selectors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/selector"
+      }
+    }
+  },
+  "$defs": {
+    "token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,128}$"
+    },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "iterationContract",
+        "generators"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/token"
+        },
+        "type": {
+          "enum": [
+            "request",
+            "journey",
+            "mix",
+            "protocol"
+          ]
+        },
+        "iterationContract": {
+          "enum": [
+            "one-request",
+            "one-journey",
+            "one-selection"
+          ]
+        },
+        "generators": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "k6",
+              "jmeter",
+              "wrk"
+            ]
+          }
+        },
+        "entrypoints": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/token"
+          }
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/token"
+          }
+        },
+        "memberKind": {
+          "enum": [
+            "request",
+            "journey"
+          ]
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "selector",
+              "weight"
+            ],
+            "properties": {
+              "selector": {
+                "$ref": "#/$defs/token"
+              },
+              "weight": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
+            }
+          }
+        },
+        "amplification": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "min": {
+              "type": "number",
+              "minimum": 1
+            },
+            "max": {
+              "type": "number",
+              "minimum": 1
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "mix"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "memberKind",
+              "members"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

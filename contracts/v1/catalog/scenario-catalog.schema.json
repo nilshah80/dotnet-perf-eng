@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perflab.io/schemas/catalog/v1/scenario-catalog.schema.json",
+  "title": "ScenarioCatalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "contractRevision",
+    "scenarios"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "perflab.io/v1"
+    },
+    "kind": {
+      "const": "ScenarioCatalog"
+    },
+    "contractRevision": {
+      "type": "string",
+      "const": "v1"
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/scenario"
+      }
+    }
+  },
+  "$defs": {
+    "token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,128}$"
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "workload"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/token"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "workload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "selector"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "request",
+                "journey",
+                "mix",
+                "protocol"
+              ]
+            },
+            "selector": {
+              "$ref": "#/$defs/token"
+            }
+          }
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/token"
+          }
+        },
+        "effects": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "classification": {
+              "enum": [
+                "read",
+                "idempotent-write",
+                "write",
+                "destructive"
+              ]
+            },
+            "replayable": {
+              "type": "boolean"
+            },
+            "resetPolicy": {
+              "type": "string"
+            }
+          }
+        },
+        "services": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "required": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/token"
+              }
+            },
+            "participating": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/token"
+              }
+            }
+          }
+        },
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "loadModel": {
+              "enum": [
+                "open",
+                "closed"
+              ]
+            },
+            "rate": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "rateUnit": {
+              "enum": [
+                "requests/s",
+                "journeys/s",
+                "selections/s",
+                "iterations/s",
+                "concurrent-iterations",
+                "concurrent-users"
+              ]
+            }
+          }
+        },
+        "lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ownership": {
+              "enum": [
+                "none",
+                "managed",
+                "delegated"
+              ]
+            }
+          }
+        },
+        "writeSafety": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "class": {
+              "enum": [
+                "none",
+                "managed-reference"
+              ]
+            }
+          }
+        },
+        "diagnostics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "targets": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/token"
+              }
+            },
+            "preset": {
+              "type": "string"
+            },
+            "sourceLoadLevel": {
+              "type": "string"
+            }
+          }
+        },
+        "sloProfile": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

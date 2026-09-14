@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perflab.io/schemas/comparison/v1/legacy-request-v1.schema.json",
+  "title": "LegacyRequestV1Projection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "projectionVersion",
+    "eligible",
+    "sourceCandidateDigest",
+    "projectedDigest",
+    "omittedFields",
+    "eligibilityChecks"
+  ],
+  "properties": {
+    "projectionVersion": {
+      "const": "legacy-request-v1"
+    },
+    "eligible": {
+      "type": "boolean"
+    },
+    "sourceCandidateDigest": {
+      "type": "string"
+    },
+    "projectedDigest": {
+      "type": "string"
+    },
+    "omittedFields": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "eligibilityChecks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "baselineApprovalId": {
+      "type": "string"
+    }
+  }
+}

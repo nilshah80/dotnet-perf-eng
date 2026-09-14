@@ -2,6 +2,11 @@
 -- (harness/adapters/loadgen/wrk/default.lua): scenariolab endpoints are
 -- unauthenticated single-request scenarios. It lives here so the lab owns its
 -- workload; a project that needs auth provides its own copy.
+-- wrk is request-only: journeys and mixes are rejected before any traffic.
+local workload_kind = os.getenv("PERF_WORKLOAD_KIND") or "request"
+if workload_kind == "journey" or workload_kind == "mix" then
+  error("capability generator.wrk.journey is unsupported; rejected before traffic")
+end
 local method = os.getenv("PERF_METHOD") or "GET"
 local path = os.getenv("PERF_PATH") or "/"
 local body = os.getenv("PERF_BODY") or ""

@@ -18,6 +18,7 @@ if [[ -n "${PERF_MIX:-}" ]]; then
   # PERF_MIX and ignores PERF_METHOD/PATH/BODY.
   method="MIX"; path="(weighted mix)"; body=""
   connections="${PERFLAB_CONNECTIONS:?PERFLAB_CONNECTIONS is required for a PERF_MIX run}"
+  export PERF_WORKLOAD_KIND="mix"
   # The app validates PERF_SCENARIO against its own catalog (and rejects a long
   # label), so a mix -- which is not a catalog scenario -- is tagged with the
   # lab's first scenario id for the APP, while the artifact dir and telemetry run
@@ -30,7 +31,45 @@ else
   body="$(scenario_value "${scenario_id}" body)"
   connections="$(scenario_value "${scenario_id}" connections)"
   perf_scenario="${scenario_id}"
+  export PERF_WORKLOAD_KIND="$(scenario_value "${scenario_id}" type)"
+  if [[ "${PERF_WORKLOAD_KIND}" == "journey" ]]; then
+    export PERF_PARTITION_READY="${PERF_PARTITION_READY:-0}"
+  fi
 fi
+if [[ "${PERF_WORKLOAD_KIND}" == "journey" || "${PERF_WORKLOAD_KIND}" == "mix" || "${PERF_MIX_KIND:-}" == "journey" ]] && [[ "${load_generator}" == "wrk" ]]; then
+  echo "capability generator.wrk.journey is unsupported; rejected before traffic" >&2
+  exit 1
+fi
+go run "${harness_core_dir}/performance/cmd" capability advertise "${load_generator}" "${PERF_WORKLOAD_KIND:-request}" >/dev/null || {
+  echo "capability advertisement rejected before traffic" >&2
+  exit 1
+}
+if [[ "${PERF_WORKLOAD_KIND:-request}" == "protocol" ]]; then
+  echo "protocol workloads are not implemented; refusing before traffic" >&2
+  go run "${harness_core_dir}/performance/cmd" protocol "${PERF_PROTOCOL:-grpc}" >/dev/null || true
+  exit 1
+fi
+if [[ "${PERFLAB_SHARDS:-1}" != "1" ]]; then
+  echo "distributed execution is not implemented; refusing shards rather than averaging percentiles" >&2
+  exit 1
+fi
+profiling_preflight_json='{"captureState":"not-applicable","reason":"continuous profiling is disabled"}'
+if [[ "${continuous_profiling:-0}" == "1" ]]; then
+  profiling_preflight_json="$(go run "${harness_core_dir}/performance/cmd" profiling)" || {
+    echo "continuous profiling policy rejected before traffic" >&2
+    exit 1
+  }
+fi
+if [[ "${load_profile}" == "soak" ]]; then
+  go run "${harness_core_dir}/performance/cmd" session adapter "${load_generator}" >/dev/null || {
+    echo "soak rejected before traffic: ${load_generator} does not supply Start/Snapshot/Stop" >&2
+    exit 1
+  }
+fi
+go run "${harness_core_dir}/performance/cmd" profile "${load_profile}" >/dev/null || {
+  echo "canonical profile ${load_profile} rejected before traffic" >&2
+  exit 1
+}
 run_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 scenario_lower="$(printf '%s' "${scenario_id}" | tr '[:upper:]' '[:lower:]')"
 telemetry_run_id="${PERFLAB_TELEMETRY_RUN_ID:-${scenario_lower}-${run_stamp}}"
@@ -41,6 +80,7 @@ suite_scenario_index="${PERFLAB_SUITE_SCENARIO_INDEX:-}"
 suite_scenario_count="${PERFLAB_SUITE_SCENARIO_COUNT:-}"
 
 mkdir -p "${artifact_dir}/benchmark" "${artifact_dir}/analysis"
+printf '%s\n' "${profiling_preflight_json}" > "${artifact_dir}/analysis/profiling-preflight.json"
 # telemetry/dependencies/runtime hold OWNED-target captures; a remote package has
 # none, so creating them would leave misleading empty stubs. Local target only.
 if [[ "${target_mode}" == "local" ]]; then
@@ -81,8 +121,9 @@ remote_telemetry_json=false; [[ "${remote_telemetry:-0}" == "1" ]] && remote_tel
 continuous_profiling_json=false; [[ "${continuous_profiling:-0}" == "1" ]] && continuous_profiling_json=true
 profiling_keep_tiering_json=false
 [[ "${continuous_profiling:-0}" == "1" && "${profiling_keep_tiering:-0}" == "1" ]] && profiling_keep_tiering_json=true
-printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","mode":"measure","target":"%s","remoteTelemetry":%s,"continuousProfiling":%s,"profilingKeepTiering":%s,"workload":{"loadGenerator":"%s","baseUrl":"%s","readyUrl":"%s","method":"%s","path":"%s","body":"%s","datasetIdentity":"%s","durationSeconds":%s,"requestedDurationSeconds":%s,"connections":%s,"profile":"%s"},"startedAt":"%s","startedEpoch":%s,"source":{"gitRevision":"%s"}%s%s}\n' \
+printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","mode":"measure","target":"%s","remoteTelemetry":%s,"continuousProfiling":%s,"profilingKeepTiering":%s,"profilingPolicy":"%s","profilingTypes":"%s","profilingPreflight":"analysis/profiling-preflight.json","workload":{"loadGenerator":"%s","baseUrl":"%s","readyUrl":"%s","method":"%s","path":"%s","body":"%s","datasetIdentity":"%s","durationSeconds":%s,"requestedDurationSeconds":%s,"connections":%s,"profile":"%s"},"startedAt":"%s","startedEpoch":%s,"source":{"gitRevision":"%s"}%s%s}\n' \
   "$(json_escape "${package_run_id}")" "$(json_escape "${telemetry_run_id}")" "$(json_escape "${scenario_id}")" "$(json_escape "${target_mode}")" "${remote_telemetry_json}" "${continuous_profiling_json}" "${profiling_keep_tiering_json}" \
+  "$(json_escape "${PERFLAB_PROFILING_POLICY}")" "$(json_escape "${PERFLAB_PROFILING_TYPES}")" \
   "$(json_escape "${load_generator}")" "$(json_escape "${base_url}")" "$(json_escape "${ready_url}")" "$(json_escape "${method}")" "$(json_escape "${path}")" "$(json_escape "${body}")" "$(json_escape "${dataset_identity}")" \
   "${effective_duration}" "${duration_seconds}" "${connections}" "$(json_escape "${load_profile}")" "$(json_escape "${started_at}")" "${started_epoch}" \
   "$(json_escape "${git_revision}")" "${suite_field}" "${fault_field}" \
@@ -90,7 +131,22 @@ printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","mode":"measure","
 
 export PERF_SCENARIO="${perf_scenario}" PERF_RUN_ID="${telemetry_run_id}" PERF_RUN_MODE="measure"
 export PERF_METHOD="${method}" PERF_PATH="${path}" PERF_BODY="${body}" PERF_BASE_URL="${base_url}"
+export PERF_WORKLOAD_KIND="${PERF_WORKLOAD_KIND:-request}"
 export PERFLAB_CONNECTIONS="${connections}" PERFLAB_DURATION_SECONDS="${duration_seconds}" PERFLAB_PROFILE="${load_profile}"
+
+partition_cleanup_required=0
+partition_cleanup_done=0
+cleanup_partition() {
+  [[ "${partition_cleanup_required}" == "1" && "${partition_cleanup_done}" == "0" ]] || return 0
+  partition_cleanup_done=1
+  if bash "${harness_core_dir}/datafault/managed-reference.sh" "${telemetry_run_id}" "${base_url}" cleanup; then
+    : > "${artifact_dir}/cleanup-complete"
+  else
+    : > "${artifact_dir}/cleanup-incomplete"
+    export PERFLAB_CAPTURE_INCOMPLETE=1
+  fi
+  return 0
+}
 
 if [[ "${target_mode}" == "remote" ]]; then
   # Remote target: the app is already deployed and is NOT owned here. No Compose
@@ -119,6 +175,10 @@ if [[ "${target_mode}" == "remote" ]]; then
   fi
 else
   echo "Starting local stack for ${scenario_id} (${telemetry_run_id})..."
+  go run "${harness_core_dir}/performance/cmd" target deploy-check managed-compose managed || {
+    echo "local compose target refused deploy/start before compose up" >&2
+    exit 1
+  }
   # Free the shared host ports first: other labs bind the same 8080/5432/etc.
   stop_conflicting_lab_stacks
   # shellcheck disable=SC2086
@@ -129,6 +189,20 @@ else
   for dep in ${dependencies}; do
     "$(dependency_dir "${dep}")/reset.sh" "${artifact_dir}"
   done
+  if [[ "${PERF_WORKLOAD_KIND:-request}" == "journey" ]]; then
+    if [[ "${PERF_WRITE_ACK:-}" != "managed-reference" ]]; then
+      echo "managed-reference journey requires explicit PERF_WRITE_ACK=managed-reference" >&2
+      exit 1
+    fi
+    if [[ ! "${PERF_WRITE_BUDGET:-}" =~ ^[1-9][0-9]*$ ]]; then
+      echo "managed-reference journey requires an explicit positive PERF_WRITE_BUDGET" >&2
+      exit 1
+    fi
+    bash "${harness_core_dir}/datafault/managed-reference.sh" "${telemetry_run_id}" "${base_url}"
+    export PERF_PARTITION_READY=1
+    partition_cleanup_required=1
+    trap cleanup_partition INT TERM EXIT
+  fi
 fi
 
 echo "Warming up for 10 seconds with ${load_generator}..."
@@ -228,16 +302,27 @@ restore_fault_dep() {
   # have already restored the dependency.
   [[ -n "${fault_pid:-}" ]]   && { kill "${fault_pid}"   2>/dev/null || true; wait "${fault_pid}"   2>/dev/null || true; }
   [[ -n "${midload_pid:-}" ]] && { kill "${midload_pid}" 2>/dev/null || true; wait "${midload_pid}" 2>/dev/null || true; }
+  [[ -n "${load_pid:-}" ]]    && { kill "${load_pid}"    2>/dev/null || true; wait "${load_pid}"    2>/dev/null || true; }
   [[ -n "${PERFLAB_FAULT_DEP:-}" ]] || return 0
   compose unpause "${PERFLAB_FAULT_DEP}" >/dev/null 2>&1 || true
   compose start "${PERFLAB_FAULT_DEP}" >/dev/null 2>&1 || true
 }
 
 echo "Measuring for ${effective_duration}s at ${connections} connections with ${load_generator}..."
+if [[ "${load_profile}" == "soak" ]]; then
+  mkdir -p "${artifact_dir}/benchmark/session"
+  if [[ -f "${artifact_dir}/benchmark/session/start.json" ]]; then
+    echo "soak session already started; generator restart refused" >&2
+    exit 1
+  fi
+  printf '{"event":"start","generator":"%s","profile":"soak"}\n' "$(json_escape "${load_generator}")" \
+    > "${artifact_dir}/benchmark/session/start.json"
+fi
 midload_pid=""; fault_pid=""
 if [[ "${target_mode}" == "local" ]]; then
-  # Arm the fault-cleanup trap only for a fault run, so a normal run adds no trap.
-  [[ -n "${PERFLAB_FAULT_DEP:-}" ]] && trap restore_fault_dep INT TERM EXIT
+  if [[ -n "${PERFLAB_FAULT_DEP:-}" || "${partition_cleanup_required}" == "1" ]]; then
+    trap 'restore_fault_dep; cleanup_partition' INT TERM EXIT
+  fi
   # Mid-load sampling and fault injection both act on OWNED dependencies/compose,
   # so they run only for a local target. A remote target measures the load
   # generator's SLIs against base_url with no dependency/compose probing.
@@ -245,8 +330,37 @@ if [[ "${target_mode}" == "local" ]]; then
   inject_fault & fault_pid=$!
 fi
 measure_started_epoch="$(date -u +%s)"
-loadgen_measure "${artifact_dir}" measure
+load_pid=""
+if [[ "${load_profile}" == "soak" ]]; then
+  snapshot_interval="${PERFLAB_SOAK_SNAPSHOT_SECONDS:-300}"
+  [[ "${snapshot_interval}" =~ ^[1-9][0-9]*$ ]] || { echo "PERFLAB_SOAK_SNAPSHOT_SECONDS must be a positive integer" >&2; exit 1; }
+  loadgen_measure "${artifact_dir}" measure & load_pid=$!
+  next_snapshot=$((measure_started_epoch + snapshot_interval))
+  while kill -0 "${load_pid}" 2>/dev/null; do
+    now_epoch="$(date -u +%s)"
+    printf '{"event":"heartbeat","atEpoch":%s,"generatorPid":%s}\n' "${now_epoch}" "${load_pid}" \
+      >> "${artifact_dir}/benchmark/session/heartbeats.ndjson"
+    if (( now_epoch >= next_snapshot )); then
+      printf '{"event":"snapshot","atEpoch":%s,"generatorPid":%s}\n' "${now_epoch}" "${load_pid}" \
+        >> "${artifact_dir}/benchmark/session/snapshots.ndjson"
+      next_snapshot=$((now_epoch + snapshot_interval))
+    fi
+    sleep 5
+  done
+  load_rc=0
+  wait "${load_pid}" || load_rc=$?
+  load_pid=""
+  (( load_rc == 0 )) || { echo "soak generator exited with status ${load_rc}" >&2; exit "${load_rc}"; }
+else
+  loadgen_measure "${artifact_dir}" measure
+fi
 measure_ended_epoch="$(date -u +%s)"
+if [[ "${load_profile}" == "soak" ]]; then
+  printf '{"event":"snapshot","atEpoch":%s,"final":true}\n' "${measure_ended_epoch}" \
+    > "${artifact_dir}/benchmark/session/snapshot.json"
+  printf '{"event":"stop","generator":"%s"}\n' "$(json_escape "${load_generator}")" \
+    > "${artifact_dir}/benchmark/session/stop.json"
+fi
 [[ -n "${midload_pid}" ]] && { wait "${midload_pid}" 2>/dev/null || true; }
 fault_rc=0; [[ -n "${fault_pid}" ]] && { wait "${fault_pid}" 2>/dev/null || fault_rc=$?; }
 # Record whether the fault applied AND whether the dependency recovered within the
@@ -267,6 +381,8 @@ sleep 6
 # heap) are not inflated into false "growth" and the trend/leak analysis reflects
 # the measurement rather than process initialization.
 export PERFLAB_MEASURE_START_EPOCH="${measure_started_epoch}" PERFLAB_MEASURE_END_EPOCH="${measure_ended_epoch}"
+cleanup_partition
+
 "${harness_core_dir}/capture/capture-evidence.sh" "${artifact_dir}"
 
 # Server-side analyzers read Prometheus. A black-box remote measurement must not

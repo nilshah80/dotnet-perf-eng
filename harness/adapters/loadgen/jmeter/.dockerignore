@@ -1,0 +1,6 @@
+# Native JMeter adapter image. Do not copy PerfLab plugin binaries or source.
+runner/testdata
+**/*_test.go
+**/.git
+**/.gitignore
+*.md

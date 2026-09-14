@@ -80,6 +80,11 @@ while IFS=$'\t' read -r n v; do [[ -n "${n}" ]] && OBS["${n}"]="${v}"; done < <(
 
 # --- 1. Absolute SLO checks -------------------------------------------------
 fail=0; checked=0
+journey_failed="${OBS[journeys.failed]:-0}"
+if awk -v value="${journey_failed}" 'BEGIN { exit !((value + 0) > 0) }'; then
+  fail=$((fail+1)); checked=$((checked+1))
+  echo "  journeys.failed                    max 0           observed=${journey_failed} FAIL (correctness)"
+fi
 if [[ -s "${slos_file}" ]]; then
   echo "Absolute SLOs:"
   while IFS=$'\t' read -r metric op thr; do
@@ -133,7 +138,19 @@ elif [[ "${use_baseline}" == "true" ]]; then
   echo "Regression vs baseline: none stored at ${baseline} (record one with update-baseline.sh)."
 fi
 
-# --- 3. Steady-state requirement (opt-in) -----------------------------------
+# --- 4. Managed-reference cleanup (fail-closed) ------------------------------
+if [[ -f "${run_dir}/cleanup-incomplete" ]]; then
+  echo "gate cannot pass: cleanup is incomplete" >&2
+  exit 1
+fi
+if [[ "$(jqd -r '.writeSafety.class // .writeSafetyClass // empty' < "${facts}" 2>/dev/null || true)" == "managed-reference" ]]; then
+  if [[ ! -f "${run_dir}/cleanup-complete" ]]; then
+    echo "gate cannot pass: cleanup is incomplete" >&2
+    exit 1
+  fi
+fi
+
+# --- 5. Verdict --------------------------------------------------------------
 # The absolute SLOs and the baseline compare a single p99/throughput number -- but
 # that number is only trustworthy if the measure window was in STEADY STATE. When
 # asked, refuse unless the candidate's verdict is exactly "steady".

@@ -120,7 +120,7 @@ require_loadgen() {
     jmeter)
       require_command docker
       [[ -n "${PERFLAB_JMETER_IMAGE:-}" ]] || {
-        echo "jmeter runs via Docker; set PERFLAB_JMETER_IMAGE to the pinned PerfLab JMeter image." >&2
+        echo "jmeter runs via Docker; set PERFLAB_JMETER_IMAGE to the native adapter image (build with harness/adapters/loadgen/jmeter/package.sh)." >&2
         exit 1
       }
       ;;
@@ -187,6 +187,23 @@ loadgen_script() {
     jmeter) ext="jmx"; override="${PERFLAB_JMETER_PLAN:-}" ;;
     *)   echo "loadgen_script: unknown generator '${load_generator}'." >&2; return 1 ;;
   esac
+  if [[ "${PERF_WORKLOAD_KIND:-}" == "journey" || "${PERF_WORKLOAD_KIND:-}" == "mix" ]]; then
+    if [[ "${load_generator}" == "wrk" ]]; then
+      echo "capability generator.wrk.journey is unsupported; rejected before traffic" >&2
+      return 1
+    fi
+  fi
+  if [[ "${PERF_WORKLOAD_KIND:-}" == "journey" || "${PERF_MIX_KIND:-}" == "journey" ]]; then
+    if [[ "${load_generator}" == "k6" && -f "${lab_dir}/loadgen/journey.js" ]]; then
+      printf '%s' "${lab_dir}/loadgen/journey.js"; return 0
+    fi
+    if [[ "${load_generator}" == "k6" && -f "${harness_root}/adapters/loadgen/k6/journey.js" ]]; then
+      printf '%s' "${harness_root}/adapters/loadgen/k6/journey.js"; return 0
+    fi
+    if [[ "${load_generator}" == "jmeter" && -f "${lab_dir}/loadgen/checkout-journey.jmx" ]]; then
+      printf '%s' "${lab_dir}/loadgen/checkout-journey.jmx"; return 0
+    fi
+  fi
   if [[ -n "${override}" ]]; then resolve_repo_path "${override}"; return 0; fi
   lab_script="${lab_dir}/loadgen/${load_generator}.${ext}"
   if [[ -f "${lab_script}" ]]; then printf '%s' "${lab_script}"; return 0; fi
@@ -204,6 +221,7 @@ loadgen_supports() {
   local gen="${1:-${load_generator}}" op="${2:?loadgen_supports <generator> <operation>}"
   case "${gen}:${op}" in
     k6:*) return 0 ;;
+    jmeter:session) return 0 ;;
     jmeter:repeat) return 0 ;;
     *) return 1 ;;
   esac
@@ -267,15 +285,41 @@ scenario_value() {
   case "$field" in
     id) col=1 ;; name) col=2 ;; method) col=3 ;; path) col=4 ;; body) col=5 ;;
     target) col=6 ;; diagnostic) col=7 ;; connections) col=8 ;;
+    type) col=0 ;;
     *) echo "Unknown scenario field '${field}'." >&2; return 1 ;;
   esac
-  awk -F'\t' -v id="${id}" -v c="${col}" '
-    $0 ~ /^[[:space:]]*#/ { next }
-    $1 == id { print $c; exit }
-  ' "${scenario_catalog}"
+  if [[ -n "${scenario_catalog:-}" && -f "${scenario_catalog}" && "$field" != "type" ]]; then
+    local from_tsv
+    from_tsv="$(awk -F'\t' -v id="${id}" -v c="${col}" '
+      $0 ~ /^[[:space:]]*#/ { next }
+      $1 == id { print $c; exit }
+    ' "${scenario_catalog}")"
+    if [[ -n "${from_tsv}" || "$field" == "body" ]]; then
+      if awk -F'\t' -v id="${id}" '$0 !~ /^[[:space:]]*#/ && $1 == id { found=1 } END { exit !found }' "${scenario_catalog}"; then
+        printf '%s' "${from_tsv}"
+        return 0
+      fi
+    fi
+  fi
+  if [[ "$field" == "type" ]] && awk -F'\t' -v id="${id}" '$0 !~ /^[[:space:]]*#/ && $1 == id { found=1 } END { exit !found }' "${scenario_catalog}" 2>/dev/null; then
+    printf 'request'
+    return 0
+  fi
+  if [[ -n "${json_catalog:-}" && -f "${json_catalog}" ]]; then
+    local tsv_arg=()
+    [[ -n "${scenario_catalog:-}" && -f "${scenario_catalog}" ]] && tsv_arg=("${scenario_catalog}")
+    go run "${harness_core_dir}/catalog/cmd" lookup "${json_catalog}" "${id}" "${field}" "${tsv_arg[@]}"
+    return
+  fi
+  echo "Unknown scenario '${id}'." >&2
+  return 1
 }
 
 scenario_ids_all() {
+  if [[ -n "${json_catalog:-}" && -f "${json_catalog}" ]]; then
+    go run "${harness_core_dir}/catalog/cmd" list "${json_catalog}"
+    return
+  fi
   awk -F'\t' '
     $0 ~ /^[[:space:]]*#/ { next }
     NF >= 8 && $1 != "" { print $1 }
@@ -284,14 +328,20 @@ scenario_ids_all() {
 
 require_scenario() {
   local id="$1"
-  if ! awk -F'\t' -v id="${id}" '
+  if [[ -n "${scenario_catalog:-}" && -f "${scenario_catalog}" ]] && awk -F'\t' -v id="${id}" '
         $0 ~ /^[[:space:]]*#/ { next }
         $1 == id { found = 1 }
         END { exit !found }
       ' "${scenario_catalog}"; then
-    echo "Unknown scenario '${id}'. Available: $(scenario_ids_all | tr '\n' ' ')" >&2
-    exit 1
+    return 0
   fi
+  if [[ -n "${json_catalog:-}" && -f "${json_catalog}" ]]; then
+    if go run "${harness_core_dir}/catalog/cmd" lookup "${json_catalog}" "${id}" id >/dev/null; then
+      return 0
+    fi
+  fi
+  echo "Unknown scenario '${id}'. Available: $(scenario_ids_all | tr '\n' ' ')" >&2
+  exit 1
 }
 
 wait_for_api() {

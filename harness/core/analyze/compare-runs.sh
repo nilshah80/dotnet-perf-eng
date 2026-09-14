@@ -41,6 +41,16 @@ b_file="$(resolve "${candidate}")"
 echo "Baseline:  ${a_file}"
 echo "Candidate: ${b_file}"
 
+workload_kind="$(jqd -r '.workloadKind // .workload.kind // empty' < "${b_file}" 2>/dev/null || true)"
+if jqd -e 'any((.observations // [])[]; (.name // "") | startswith("journey."))' < "${b_file}" >/dev/null 2>&1; then
+  workload_kind="${workload_kind:-journey}"
+fi
+if [[ "${workload_kind}" == "journey" || "${workload_kind}" == "mix" || "${workload_kind}" == "protocol" ]]; then
+  echo "legacy-request-v1 projection ineligible for ${workload_kind}; comparison is inconclusive" >&2
+  go run "${harness_core_dir}/performance/cmd" compare "${workload_kind}" >/dev/null || true
+  exit 2
+fi
+
 # Warn when the two sides are from different experiment settings -- the numbers
 # are only comparable when scenario, load generator, and profile match. (A
 # multi-scenario suite has no top-level scenarioId, so that field is skipped.)

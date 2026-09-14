@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "$id": "https://perflab.io/v1/jmeter-journey-v2.schema.json",
+  "required": [
+    "sampleSemantics",
+    "parentLabel"
+  ],
+  "properties": {
+    "sampleSemantics": {
+      "const": "journey-v2"
+    },
+    "parentLabel": {
+      "type": "string"
+    },
+    "childLabels": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

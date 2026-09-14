@@ -1,0 +1,10 @@
+{
+  "activeRevision": "v1",
+  "revisions": [
+    {
+      "revision": "v1",
+      "manifestSha256": "74528d9dd29c6caf2c8a7a689119552e2e4808a007c92370fab105f9aacd08c3",
+      "aggregateSha256": "b51743f3ff2df6cadfbfe5cd21e14899af1e8479095df91b1499efa3c217db8b"
+    }
+  ]
+}

@@ -34,9 +34,13 @@ mix_file="${lab_dir}/loadgen/mixes/${mix_name}.json"
   exit 1
 }
 jqd -e 'type=="array" and length>0' < "${mix_file}" >/dev/null 2>&1 || {
-  echo "Mix file must be a non-empty JSON array of {method,path,body,weight}: ${mix_file}" >&2; exit 1; }
+  echo "Mix file must be a non-empty JSON array of {method,path,body,weight} or {selector,weight}: ${mix_file}" >&2; exit 1; }
 
 export PERF_MIX="$(cat "${mix_file}")"
+export PERF_MIX_SEED="${PERF_MIX_SEED:-${PERF_RUN_ID:-native-mix}}"
+if jqd -e 'any(.[]; (.selector // "") != "")' < "${mix_file}" >/dev/null 2>&1; then
+  export PERF_MIX_KIND="journey"
+fi
 export PERFLAB_CONNECTIONS="${connections}"
 echo "Workload mix '${mix_name}': ${connections} connections, ${duration}s, profile ${PERFLAB_PROFILE:-steady}"
 exec "${harness_core_dir}/run/run-scenario.sh" "mix-${mix_name}" "${duration}"

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "$id": "https://perflab.io/v1/target-descriptor.schema.json",
+  "required": [
+    "kind",
+    "ownership"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string"
+    },
+    "ownership": {
+      "enum": [
+        "none",
+        "managed",
+        "delegated"
+      ]
+    }
+  }
+}

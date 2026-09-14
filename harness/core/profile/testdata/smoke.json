@@ -1,0 +1,21 @@
+{
+  "name": "smoke",
+  "loadModel": "closed",
+  "rateUnit": "concurrent-iterations",
+  "sessionRequired": false,
+  "updateLoadRequired": false,
+  "stages": [
+    {
+      "name": "warmup",
+      "kind": "warmup",
+      "durationSeconds": 2,
+      "target": 1
+    },
+    {
+      "name": "measure",
+      "kind": "measure",
+      "durationSeconds": 10,
+      "target": 1
+    }
+  ]
+}

@@ -1,0 +1,215 @@
+{
+  "contractRevision": "v1",
+  "entries": [
+    {
+      "logicalName": "catalog/scenario-catalog.schema.json",
+      "kind": "schema",
+      "mediaType": "application/schema+json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "comparison/legacy-request-v1.schema.json",
+      "kind": "schema",
+      "mediaType": "application/schema+json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/catalog/heterogeneous-mix-invalid.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/catalog/journey-descriptor-valid.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/catalog/request-valid.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/catalog/unknown-field-strict.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/comparison/legacy-request-v1-eligible.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/comparison/legacy-request-v1-ineligible-journey.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/datafault/incomplete-cleanup-fails-gate.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/distributed/never-average-percentiles.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/jmeter-adapter-wire/normalize-valid.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/jmeter-adapter-wire/run-once-valid.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/jmeter-adapter-wire/version-malformed.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/jmeter-adapter-wire/version-valid.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/jmeter-journey/parent-child-labels.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/journey/checkout-six-ops.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/journey/write-ack-required.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/legacy-request-iteration-accounting.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/profile/steady-closed.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/profiling/no-static-perf-phase.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/protocol/browser-synthetic-separate.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/revision/unknown-revision.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/session/soak-requires-base.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "fixtures/target/unmanaged-refuses-deploy.json",
+      "kind": "fixture",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "load/data-fault.schema.json",
+      "kind": "schema",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "load/distributed-merge.schema.json",
+      "kind": "schema",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "load/jmeter-adapter-wire.schema.json",
+      "kind": "schema",
+      "mediaType": "application/schema+json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "load/jmeter-journey-v2.schema.json",
+      "kind": "schema",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "load/k6-journey-result.schema.json",
+      "kind": "schema",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "load/profile-plan.schema.json",
+      "kind": "schema",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "load/profiling-policy.schema.json",
+      "kind": "schema",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "load/session-runtime.schema.json",
+      "kind": "schema",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "load/target-descriptor.schema.json",
+      "kind": "schema",
+      "mediaType": "application/json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "load/workload-manifest.schema.json",
+      "kind": "schema",
+      "mediaType": "application/schema+json",
+      "contentMode": "text"
+    },
+    {
+      "logicalName": "semantics/contract.md",
+      "kind": "semantics",
+      "mediaType": "text/markdown",
+      "contentMode": "text"
+    }
+  ]
+}

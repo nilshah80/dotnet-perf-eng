@@ -67,6 +67,13 @@ services:
       - ./infra/observability/loki-config.yaml:/otel-lgtm/loki-config.yaml:ro
     mem_limit: 4g
 
+  diagnostic-permissions:
+    image: alpine:3.22
+    user: "0:0"
+    command: ["sh", "-c", "chown -R 1654:1654 /diag && chmod 0770 /diag"]
+    volumes:
+      - diagnostic-ipc:/diag
+
   dotnet-monitor:
     image: mcr.microsoft.com/dotnet/monitor:10.0
     command:
@@ -84,6 +91,9 @@ services:
       - "127.0.0.1:18325:52325"
     volumes:
       - diagnostic-ipc:/diag
+    depends_on:
+      diagnostic-permissions:
+        condition: service_completed_successfully
     mem_limit: 512m
     restart: unless-stopped
 
@@ -93,7 +103,7 @@ services:
       dockerfile: src/ECommerce.Api/Dockerfile
     environment:
       ASPNETCORE_URLS: http://+:8080
-      ConnectionStrings__PostgreSql: Host=postgres;Port=5432;Database=ecommerce;Username=ecommerce;Password=${POSTGRES_PASSWORD:-ecommerce};Maximum Pool Size=20;Minimum Pool Size=0;Timeout=5;Command Timeout=5;GSS Encryption Mode=Disable;Application Name=ecommerce-api
+      ConnectionStrings__PostgreSql: Host=postgres;Port=5432;Database=ecommerce;Username=ecommerce;Password=${POSTGRES_PASSWORD:-ecommerce};Maximum Pool Size=20;Minimum Pool Size=0;Timeout=5;Command Timeout=5;Application Name=ecommerce-api
       Jwt__Key: ${JWT_KEY:-ecommerce-lab-local-dev-signing-key-do-not-use-in-production}
       Jwt__Issuer: ecommerce-lab
       Jwt__Audience: ecommerce-lab
@@ -103,7 +113,10 @@ services:
       PERF_RUN_MODE: ${PERF_RUN_MODE:-measure}
       SEED_SCALE: ${SEED_SCALE:-smoke}
       PERFLAB_CONTINUOUS_PROFILING: ${PERFLAB_CONTINUOUS_PROFILING:-0}
+      PERFLAB_PROFILING_TYPES: ${PERFLAB_PROFILING_TYPES:-cpu}
       PERFLAB_PROFILING_KEEP_TIERING: ${PERFLAB_PROFILING_KEEP_TIERING:-0}
+      PERFLAB_PROFILING_MIN_CORES_THRESHOLD: ${PERFLAB_PROFILING_MIN_CORES_THRESHOLD:-0.1}
+      PERFLAB_PROFILING_EFFECTIVE_CPU_CORES: "1"
       PYROSCOPE_SERVER_ADDRESS: http://lgtm:4040
       PYROSCOPE_APPLICATION_NAME: ecommerce-api
       OTEL_SERVICE_VERSION: ${OTEL_SERVICE_VERSION:-lab}

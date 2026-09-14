@@ -50,6 +50,19 @@ case "${PERFLAB_CONTINUOUS_PROFILING:-0}" in
 esac
 # Compose interpolates this; normalize aliases so the container sees 0 or 1.
 export PERFLAB_CONTINUOUS_PROFILING="${continuous_profiling}"
+export PERFLAB_PROFILING_POLICY="${PERFLAB_PROFILING_POLICY:-cpu}"
+if [[ -z "${PERFLAB_PROFILING_TYPES:-}" ]]; then
+  case "${PERFLAB_PROFILING_POLICY}" in
+    cpu) PERFLAB_PROFILING_TYPES="cpu" ;;
+    cpu-wall) PERFLAB_PROFILING_TYPES="cpu,wall" ;;
+    memory|soak-memory) PERFLAB_PROFILING_TYPES="allocation,live-heap" ;;
+    contention) PERFLAB_PROFILING_TYPES="lock" ;;
+    exceptions) PERFLAB_PROFILING_TYPES="exception" ;;
+    all-diagnostic) PERFLAB_PROFILING_TYPES="cpu,wall,allocation,lock,exception,live-heap" ;;
+    *) echo "unknown PERFLAB_PROFILING_POLICY '${PERFLAB_PROFILING_POLICY}'" >&2; exit 1 ;;
+  esac
+fi
+export PERFLAB_PROFILING_TYPES
 profiling_keep_tiering=0
 case "${PERFLAB_PROFILING_KEEP_TIERING:-0}" in
   1|true|yes|on) profiling_keep_tiering=1 ;;
@@ -93,6 +106,10 @@ if [[ "${target_mode}" == "remote" ]]; then
     fi
     if [[ -z "${PERFLAB_PYROSCOPE_SERVICES:-}" ]]; then
       echo "PERFLAB_CONTINUOUS_PROFILING=1 on a remote target requires PERFLAB_PYROSCOPE_SERVICES (the deployed app's exact Pyroscope service_name labels); the harness cannot guess a remote identity." >&2
+      exit 1
+    fi
+    if [[ -z "${PERFLAB_PROFILING_VERIFICATION_URL:-}" ]]; then
+      echo "PERFLAB_CONTINUOUS_PROFILING=1 on a remote target requires PERFLAB_PROFILING_VERIFICATION_URL for a read-only profiler configuration endpoint." >&2
       exit 1
     fi
   fi
@@ -151,6 +168,12 @@ if [[ "${continuous_profiling}" == "1" && "${target_mode}" == "local" && -z "${p
   echo "PERFLAB_CONTINUOUS_PROFILING=1 requires PERFLAB_PYROSCOPE_SERVICES (exact Pyroscope service_name labels) in the lab descriptor." >&2
   exit 1
 fi
+export PERFLAB_PYROSCOPE_SERVICES="${pyroscope_services}"
+export PERFLAB_PYROSCOPE_ROLE_SERVICES="${PERFLAB_PYROSCOPE_ROLE_SERVICES:-}"
+export PERFLAB_PROFILING_VERIFICATION_URL="${PERFLAB_PROFILING_VERIFICATION_URL:-}"
+export PERFLAB_PROFILING_MIN_CORES_THRESHOLD="${PERFLAB_PROFILING_MIN_CORES_THRESHOLD:-}"
+export PERFLAB_PROFILING_SERVICE_QUOTAS="${PERFLAB_PROFILING_SERVICE_QUOTAS:-}"
+export PERFLAB_PROFILING_QUOTA_SOURCE="${PERFLAB_PROFILING_QUOTA_SOURCE:-}"
 
 dependencies="${PERFLAB_DEPENDENCIES:-}"
 artifacts_root="$(resolve_repo_path "${PERFLAB_ARTIFACTS_ROOT:-artifacts}")"
@@ -179,6 +202,24 @@ rabbit_queues="${PERFLAB_RABBIT_QUEUES:-}"
 # The current lab's own directory (holds lab.config.sh, compose, infra, and the
 # per-lab loadgen/ and dependencies/ override folders).
 lab_dir="$(cd "$(dirname "${lab_config}")" && pwd)"
+json_catalog=""
+if [[ -n "${PERFLAB_CATALOG:-}" ]]; then
+  json_catalog="$(resolve_repo_path "${PERFLAB_CATALOG}")"
+elif [[ -f "${lab_dir}/catalog.json" ]]; then
+  json_catalog="${lab_dir}/catalog.json"
+fi
+workload_manifest=""
+if [[ -n "${PERFLAB_WORKLOAD_MANIFEST:-}" ]]; then
+  workload_manifest="$(resolve_repo_path "${PERFLAB_WORKLOAD_MANIFEST}")"
+elif [[ -f "${lab_dir}/workload-manifest.json" ]]; then
+  workload_manifest="${lab_dir}/workload-manifest.json"
+fi
+if [[ -n "${workload_manifest}" && -f "${workload_manifest}" ]]; then
+  go run "${harness_root}/core/performance/cmd" workload "${workload_manifest}" >/dev/null || {
+    echo "workload manifest ${workload_manifest} rejected before target lease or traffic" >&2
+    exit 1
+  }
+fi
 # Project-specific dependency probes are discovered here by convention:
 #   <lab>/dependencies/<dep>/<phase>.sh   (phase = reset|sample-midload|snapshot)
 lab_dep_hooks_dir="${PERFLAB_DEP_HOOKS_DIR:-${lab_dir}/dependencies}"
@@ -206,11 +247,15 @@ wrk_image="${PERFLAB_WRK_IMAGE:-}"
 # PERFLAB_SPIKE_VUS, PERFLAB_TARGET_RPS, PERFLAB_START_RPS,
 # PERFLAB_SOAK_DURATION_SECONDS.
 load_profile="${PERFLAB_PROFILE:-steady}"
-case " steady ramp stress spike soak capacity arrival " in
+case " smoke load steady ramp stress breakpoint capacity knee spike open closed soak arrival " in
   *" ${load_profile} "*) : ;;
   *) echo "PERFLAB_PROFILE must be one of: steady ramp stress spike soak capacity arrival; received '${load_profile}'." >&2; exit 1 ;;
 esac
-if [[ "${load_profile}" != "steady" && "${load_generator}" != "k6" ]]; then
-  echo "PERFLAB_PROFILE='${load_profile}' needs PERFLAB_LOAD_GENERATOR=k6 (load-shape executors are k6-only; wrk/jmeter support 'steady')." >&2
-  exit 1
-fi
+case "${load_generator}" in
+  wrk)
+    case "${load_profile}" in steady|smoke|load) : ;; *) echo "PERFLAB_PROFILE='${load_profile}' requires k6; wrk supports steady, smoke, and load only." >&2; exit 1 ;; esac
+    ;;
+  jmeter)
+    case "${load_profile}" in steady|smoke|load|closed) : ;; *) echo "PERFLAB_PROFILE='${load_profile}' requires k6; JMeter supports steady, smoke, load, and closed only." >&2; exit 1 ;; esac
+    ;;
+esac

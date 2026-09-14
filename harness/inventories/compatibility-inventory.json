@@ -1,0 +1,369 @@
+{
+  "product": "dotnet-perf-eng",
+  "contractRevision": "v1",
+  "commands": [
+    {
+      "path": "run-scenario.sh",
+      "positionals": [
+        "scenario",
+        "duration?"
+      ],
+      "env": [
+        "PERFLAB_LAB",
+        "PERFLAB_LOAD_GENERATOR",
+        "PERFLAB_PROFILE",
+        "PERFLAB_TARGET",
+        "PERF_WRITE_BUDGET",
+        "PERF_WRITE_ACK",
+        "PERF_WORKLOAD_KIND",
+        "PERF_MIX_KIND"
+      ]
+    },
+    {
+      "path": "run-scenarios.sh",
+      "positionals": [
+        "selectors",
+        "duration?"
+      ],
+      "flags": [
+        {
+          "name": "with-runtime",
+          "kind": "bool"
+        },
+        {
+          "name": "no-runtime",
+          "kind": "bool",
+          "aliases": [
+            "measure-only"
+          ]
+        },
+        {
+          "name": "continue-on-error",
+          "kind": "bool"
+        }
+      ]
+    },
+    {
+      "path": "run-repeat.sh",
+      "flags": [
+        {
+          "name": "repeats",
+          "kind": "int"
+        },
+        {
+          "name": "reseed",
+          "kind": "bool"
+        },
+        {
+          "name": "profile",
+          "kind": "string"
+        }
+      ]
+    },
+    {
+      "path": "run-sweep.sh",
+      "flags": [
+        {
+          "name": "rates",
+          "kind": "string"
+        }
+      ]
+    },
+    {
+      "path": "run-mix.sh",
+      "flags": [
+        {
+          "name": "connections",
+          "kind": "int"
+        },
+        {
+          "name": "profile",
+          "kind": "string"
+        }
+      ]
+    },
+    {
+      "path": "run-data-scale.sh",
+      "flags": [
+        {
+          "name": "scales",
+          "kind": "string"
+        },
+        {
+          "name": "profile",
+          "kind": "string"
+        }
+      ]
+    },
+    {
+      "path": "run-fault.sh",
+      "flags": [
+        {
+          "name": "dependency",
+          "kind": "string"
+        },
+        {
+          "name": "kind",
+          "kind": "string"
+        },
+        {
+          "name": "at",
+          "kind": "string"
+        },
+        {
+          "name": "for",
+          "kind": "string"
+        },
+        {
+          "name": "profile",
+          "kind": "string"
+        }
+      ]
+    },
+    {
+      "path": "gate.sh",
+      "flags": [
+        {
+          "name": "baseline",
+          "kind": "string"
+        },
+        {
+          "name": "slos",
+          "kind": "string"
+        },
+        {
+          "name": "threshold",
+          "kind": "float"
+        },
+        {
+          "name": "no-baseline",
+          "kind": "bool"
+        },
+        {
+          "name": "allow-missing",
+          "kind": "bool"
+        },
+        {
+          "name": "allow-partial",
+          "kind": "bool"
+        },
+        {
+          "name": "require-steady",
+          "kind": "bool"
+        }
+      ]
+    },
+    {
+      "path": "compare-runs.sh",
+      "flags": [
+        {
+          "name": "threshold",
+          "kind": "float"
+        },
+        {
+          "name": "allow-generator-mismatch",
+          "kind": "bool"
+        }
+      ]
+    },
+    {
+      "path": "find-knee.sh",
+      "flags": [
+        {
+          "name": "p99-ms",
+          "kind": "float"
+        },
+        {
+          "name": "slos",
+          "kind": "string"
+        },
+        {
+          "name": "step",
+          "kind": "string"
+        }
+      ]
+    },
+    {
+      "path": "capture-runtime.sh",
+      "positionals": [
+        "kind"
+      ],
+      "flags": [
+        {
+          "name": "preset",
+          "kind": "string"
+        },
+        {
+          "name": "include-dump",
+          "kind": "bool"
+        }
+      ]
+    },
+    {
+      "path": "catalog",
+      "positionals": [
+        "validate-catalog|migrate-catalog|list|lookup",
+        "args..."
+      ]
+    },
+    {
+      "path": "performance",
+      "positionals": [
+        "catalog|capability|profile|session|target|compare|partition",
+        "args..."
+      ]
+    }
+  ],
+  "environmentNames": [
+    "PERFLAB_APP_METRIC_PREFIX",
+    "PERFLAB_APP_SERVICES",
+    "PERFLAB_ARTIFACTS_ROOT",
+    "PERFLAB_ARTIFACT_DIR",
+    "PERFLAB_BASE_URL",
+    "PERFLAB_BOTTLENECK",
+    "PERFLAB_BUILD_COMMAND",
+    "PERFLAB_BUILD_DIR",
+    "PERFLAB_CAPTURE_INCOMPLETE",
+    "PERFLAB_CATALOG",
+    "PERFLAB_COMPOSE_FILE",
+    "PERFLAB_COMPOSE_NETWORK",
+    "PERFLAB_CONFIG",
+    "PERFLAB_CONNECTIONS",
+    "PERFLAB_CONTINUOUS_PROFILING",
+    "PERFLAB_CONTRACT_DIGEST",
+    "PERFLAB_DATASET_IDENTITY",
+    "PERFLAB_DEPENDENCIES",
+    "PERFLAB_DEP_HOOKS_DIR",
+    "PERFLAB_DIAGNOSTICS_URL",
+    "PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES",
+    "PERFLAB_DIAGNOSTIC_INCLUDE_DUMP",
+    "PERFLAB_DIAGNOSTIC_PRESET",
+    "PERFLAB_DIAGNOSTIC_RECOVERY_SECONDS",
+    "PERFLAB_DIAG_TARGETS",
+    "PERFLAB_DUMP_ACK",
+    "PERFLAB_DURATION_SECONDS",
+    "PERFLAB_ENABLE_DOTNET_MONITOR_STACKS",
+    "PERFLAB_FAULT_APPLIED",
+    "PERFLAB_FAULT_AT",
+    "PERFLAB_FAULT_DEP",
+    "PERFLAB_FAULT_FOR",
+    "PERFLAB_FAULT_KIND",
+    "PERFLAB_FAULT_RESTORED",
+    "PERFLAB_GENERATOR_NETWORK_PATH",
+    "PERFLAB_HARNESS_ROOT",
+    "PERFLAB_INTERNAL_BASE_URL",
+    "PERFLAB_JMETER_FILES",
+    "PERFLAB_JMETER_IMAGE",
+    "PERFLAB_JMETER_PLAN",
+    "PERFLAB_JMETER_PROP_BASE_URL",
+    "PERFLAB_JMETER_PROP_DURATION_SECONDS",
+    "PERFLAB_JMETER_PROP_RUN_ID",
+    "PERFLAB_JMETER_PROP_SCENARIO",
+    "PERFLAB_JMETER_PROP_THREADS",
+    "PERFLAB_JQ_IMAGE",
+    "PERFLAB_K6_PROM_RW",
+    "PERFLAB_K6_SCRIPT",
+    "PERFLAB_LAB",
+    "PERFLAB_LAB_OPTIONAL",
+    "PERFLAB_LEAK_GROWTH_THRESHOLD",
+    "PERFLAB_LOAD_GENERATOR",
+    "PERFLAB_LOAD_GENERATOR_DEFAULT",
+    "PERFLAB_LOKI_URL",
+    "PERFLAB_MAX_HTTP_ERROR_RATE",
+    "PERFLAB_MAX_VUS",
+    "PERFLAB_MEASURE_END_EPOCH",
+    "PERFLAB_MEASURE_START_EPOCH",
+    "PERFLAB_METRIC_ROLES",
+    "PERFLAB_PACKAGE_RUN_ID",
+    "PERFLAB_PG_DB",
+    "PERFLAB_PG_SERVICE",
+    "PERFLAB_PG_USER",
+    "PERFLAB_PLUGIN_CPUS",
+    "PERFLAB_PLUGIN_ID",
+    "PERFLAB_PLUGIN_IMAGE_DIGEST",
+    "PERFLAB_PLUGIN_MEMORY_BYTES",
+    "PERFLAB_PLUGIN_VERSION",
+    "PERFLAB_PRIMARY_APP_SERVICE",
+    "PERFLAB_PROFILE",
+    "PERFLAB_PROFILING_EFFECTIVE_CPU_CORES",
+    "PERFLAB_PROFILING_KEEP_TIERING",
+    "PERFLAB_PROFILING_MIN_CORES_THRESHOLD",
+    "PERFLAB_PROFILING_POLICY",
+    "PERFLAB_PROFILING_QUOTA_SOURCE",
+    "PERFLAB_PROFILING_SERVICE_QUOTAS",
+    "PERFLAB_PROFILING_TYPES",
+    "PERFLAB_PROFILING_VERIFICATION_URL",
+    "PERFLAB_PROJECT",
+    "PERFLAB_PROMETHEUS_URL",
+    "PERFLAB_PROM_JOB_REGEX",
+    "PERFLAB_PYROSCOPE_REQUIRED_SERVICES",
+    "PERFLAB_PYROSCOPE_ROLE_SERVICES",
+    "PERFLAB_PYROSCOPE_SERVICES",
+    "PERFLAB_PYROSCOPE_URL",
+    "PERFLAB_PY_IMAGE",
+    "PERFLAB_RABBIT_METRICS_URL",
+    "PERFLAB_RABBIT_MGMT_URL",
+    "PERFLAB_RABBIT_QUEUES",
+    "PERFLAB_RABBIT_SERVICE",
+    "PERFLAB_RABBIT_USER",
+    "PERFLAB_READY_URL",
+    "PERFLAB_RECORD_TREND",
+    "PERFLAB_REDIS_SERVICE",
+    "PERFLAB_REMOTE_ALLOW_UNHEALTHY",
+    "PERFLAB_REMOTE_DIAGNOSTICS",
+    "PERFLAB_REMOTE_DIAG_ACK",
+    "PERFLAB_REMOTE_TELEMETRY",
+    "PERFLAB_REMOTE_WRITE_ACK",
+    "PERFLAB_REPEATS",
+    "PERFLAB_REPEAT_RESEED",
+    "PERFLAB_RUNTIME",
+    "PERFLAB_RUN_ID_ATTR",
+    "PERFLAB_SCENARIOS",
+    "PERFLAB_SEED_SCALES",
+    "PERFLAB_SEED_SCALES_VALID",
+    "PERFLAB_SERVICE_NAME_REGEX",
+    "PERFLAB_SHARDS",
+    "PERFLAB_SOAK_DURATION_SECONDS",
+    "PERFLAB_SOAK_SNAPSHOT_SECONDS",
+    "PERFLAB_SPIKE_VUS",
+    "PERFLAB_START_RPS",
+    "PERFLAB_STEADY_STATE",
+    "PERFLAB_SUITE_RUN_ID",
+    "PERFLAB_SUITE_SCENARIO_COUNT",
+    "PERFLAB_SUITE_SCENARIO_INDEX",
+    "PERFLAB_SWEEP_RATES",
+    "PERFLAB_TARGET",
+    "PERFLAB_TARGET_RPS",
+    "PERFLAB_TELEMETRY_RUN_ID",
+    "PERFLAB_TEMPO_URL",
+    "PERFLAB_TRACE_SAMPLE_RATIO",
+    "PERFLAB_USE_CPU_SAT",
+    "PERFLAB_USE_DEP_SHARE",
+    "PERFLAB_USE_GC_SAT",
+    "PERFLAB_USE_LOCK_SAT",
+    "PERFLAB_USE_TPQ_SAT",
+    "PERFLAB_WARMUP_SECONDS",
+    "PERFLAB_WORKLOAD_MANIFEST",
+    "PERFLAB_WRK_IMAGE",
+    "PERFLAB_WRK_SCRIPT",
+    "PERF_BASE_URL",
+    "PERF_BODY",
+    "PERF_HEADERS",
+    "PERF_LOGIN_PASSWORD",
+    "PERF_LOGIN_USER",
+    "PERF_METHOD",
+    "PERF_MIX",
+    "PERF_MIX_KIND",
+    "PERF_MIX_SEED",
+    "PERF_PARTITION_READY",
+    "PERF_PATH",
+    "PERF_PROTOCOL",
+    "PERF_RUN_ID",
+    "PERF_RUN_MODE",
+    "PERF_SCENARIO",
+    "PERF_SHARD_ID",
+    "PERF_WORKLOAD_KIND",
+    "PERF_WRITE_ACK",
+    "PERF_WRITE_BUDGET"
+  ]
+}

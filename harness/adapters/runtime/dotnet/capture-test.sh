@@ -42,6 +42,7 @@ case "${url}" in
     if [[ "${PERFLAB_TEST_FAIL_FIRST_GCDUMP:-0}" == "1" && "${count}" == "1" ]]; then exit 22; fi
     printf 'gcdump-%s' "${count}" ;;
   */trace) printf 'nettrace' ;;
+  */stacks) printf 'Thread: (0x1)\n  Fixture.Api!Program.Main\n' ;;
   */dump) printf 'dump' ;;
   *) exit 22 ;;
 esac
@@ -121,5 +122,17 @@ PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
 [[ -s "${dump_output}/runtime/captures/dump/process.dmp" ]]
 [[ ! -s "${test_root}/dump-only-calls" ]]
 grep -q '"diagnosticLoadState":"not-applicable"' "${dump_output}/runtime/campaign.json"
+
+stacks_output="${test_root}/stacks-only"
+mkdir -p "${stacks_output}"; : > "${test_root}/stacks-only-calls"
+PATH="${test_root}/bin:${PATH}" \
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_CALLS="${test_root}/stacks-only-calls" \
+PERFLAB_TEST_GCDUMP_COUNT="${test_root}/stacks-only-gcdumps" \
+PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
+  bash "${adapter_dir}/capture.sh" "${stacks_output}" stacks 1 api >/dev/null 2>&1
+[[ -s "${stacks_output}/runtime/api/stacks.txt" ]]
+grep -q '"requestedDiagnostic":"stacks","effectiveDiagnostic":"stacks"' \
+  "${stacks_output}/runtime/capture.json"
 
 echo "dotnet runtime campaign adapter tests passed"

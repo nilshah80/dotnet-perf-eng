@@ -1,0 +1,145 @@
+{
+  "manifest": "contracts/contract-manifest.json",
+  "paths": [
+    {
+      "logicalName": "catalog/scenario-catalog.schema.json",
+      "path": "contracts/v1/catalog/scenario-catalog.schema.json"
+    },
+    {
+      "logicalName": "comparison/legacy-request-v1.schema.json",
+      "path": "contracts/v1/comparison/legacy-request-v1.schema.json"
+    },
+    {
+      "logicalName": "fixtures/catalog/heterogeneous-mix-invalid.json",
+      "path": "contracts/v1/fixtures/catalog/heterogeneous-mix-invalid.json"
+    },
+    {
+      "logicalName": "fixtures/catalog/journey-descriptor-valid.json",
+      "path": "contracts/v1/fixtures/catalog/journey-descriptor-valid.json"
+    },
+    {
+      "logicalName": "fixtures/catalog/request-valid.json",
+      "path": "contracts/v1/fixtures/catalog/request-valid.json"
+    },
+    {
+      "logicalName": "fixtures/catalog/unknown-field-strict.json",
+      "path": "contracts/v1/fixtures/catalog/unknown-field-strict.json"
+    },
+    {
+      "logicalName": "fixtures/comparison/legacy-request-v1-eligible.json",
+      "path": "contracts/v1/fixtures/comparison/legacy-request-v1-eligible.json"
+    },
+    {
+      "logicalName": "fixtures/comparison/legacy-request-v1-ineligible-journey.json",
+      "path": "contracts/v1/fixtures/comparison/legacy-request-v1-ineligible-journey.json"
+    },
+    {
+      "logicalName": "fixtures/datafault/incomplete-cleanup-fails-gate.json",
+      "path": "contracts/v1/fixtures/datafault/incomplete-cleanup-fails-gate.json"
+    },
+    {
+      "logicalName": "fixtures/distributed/never-average-percentiles.json",
+      "path": "contracts/v1/fixtures/distributed/never-average-percentiles.json"
+    },
+    {
+      "logicalName": "fixtures/jmeter-adapter-wire/normalize-valid.json",
+      "path": "contracts/v1/fixtures/jmeter-adapter-wire/normalize-valid.json"
+    },
+    {
+      "logicalName": "fixtures/jmeter-adapter-wire/run-once-valid.json",
+      "path": "contracts/v1/fixtures/jmeter-adapter-wire/run-once-valid.json"
+    },
+    {
+      "logicalName": "fixtures/jmeter-adapter-wire/version-malformed.json",
+      "path": "contracts/v1/fixtures/jmeter-adapter-wire/version-malformed.json"
+    },
+    {
+      "logicalName": "fixtures/jmeter-adapter-wire/version-valid.json",
+      "path": "contracts/v1/fixtures/jmeter-adapter-wire/version-valid.json"
+    },
+    {
+      "logicalName": "fixtures/jmeter-journey/parent-child-labels.json",
+      "path": "contracts/v1/fixtures/jmeter-journey/parent-child-labels.json"
+    },
+    {
+      "logicalName": "fixtures/journey/checkout-six-ops.json",
+      "path": "contracts/v1/fixtures/journey/checkout-six-ops.json"
+    },
+    {
+      "logicalName": "fixtures/journey/write-ack-required.json",
+      "path": "contracts/v1/fixtures/journey/write-ack-required.json"
+    },
+    {
+      "logicalName": "fixtures/legacy-request-iteration-accounting.json",
+      "path": "contracts/v1/fixtures/legacy-request-iteration-accounting.json"
+    },
+    {
+      "logicalName": "fixtures/profile/steady-closed.json",
+      "path": "contracts/v1/fixtures/profile/steady-closed.json"
+    },
+    {
+      "logicalName": "fixtures/profiling/no-static-perf-phase.json",
+      "path": "contracts/v1/fixtures/profiling/no-static-perf-phase.json"
+    },
+    {
+      "logicalName": "fixtures/protocol/browser-synthetic-separate.json",
+      "path": "contracts/v1/fixtures/protocol/browser-synthetic-separate.json"
+    },
+    {
+      "logicalName": "fixtures/revision/unknown-revision.json",
+      "path": "contracts/v1/fixtures/revision/unknown-revision.json"
+    },
+    {
+      "logicalName": "fixtures/session/soak-requires-base.json",
+      "path": "contracts/v1/fixtures/session/soak-requires-base.json"
+    },
+    {
+      "logicalName": "fixtures/target/unmanaged-refuses-deploy.json",
+      "path": "contracts/v1/fixtures/target/unmanaged-refuses-deploy.json"
+    },
+    {
+      "logicalName": "load/data-fault.schema.json",
+      "path": "contracts/v1/load/data-fault.schema.json"
+    },
+    {
+      "logicalName": "load/distributed-merge.schema.json",
+      "path": "contracts/v1/load/distributed-merge.schema.json"
+    },
+    {
+      "logicalName": "load/jmeter-adapter-wire.schema.json",
+      "path": "contracts/v1/load/jmeter-adapter-wire.schema.json"
+    },
+    {
+      "logicalName": "load/jmeter-journey-v2.schema.json",
+      "path": "contracts/v1/load/jmeter-journey-v2.schema.json"
+    },
+    {
+      "logicalName": "load/k6-journey-result.schema.json",
+      "path": "contracts/v1/load/k6-journey-result.schema.json"
+    },
+    {
+      "logicalName": "load/profile-plan.schema.json",
+      "path": "contracts/v1/load/profile-plan.schema.json"
+    },
+    {
+      "logicalName": "load/profiling-policy.schema.json",
+      "path": "contracts/v1/load/profiling-policy.schema.json"
+    },
+    {
+      "logicalName": "load/session-runtime.schema.json",
+      "path": "contracts/v1/load/session-runtime.schema.json"
+    },
+    {
+      "logicalName": "load/target-descriptor.schema.json",
+      "path": "contracts/v1/load/target-descriptor.schema.json"
+    },
+    {
+      "logicalName": "load/workload-manifest.schema.json",
+      "path": "contracts/v1/load/workload-manifest.schema.json"
+    },
+    {
+      "logicalName": "semantics/contract.md",
+      "path": "contracts/v1/semantics/contract.md"
+    }
+  ]
+}

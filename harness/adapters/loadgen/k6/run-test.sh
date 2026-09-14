@@ -13,7 +13,7 @@ printf '%s\n' \
   'relative_to_repo() { printf "labs/fixture/loadgen/k6.js"; }' \
   'json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf "%s" "${s}"; }' \
   'jqd() {' \
-  '  if [[ "${1:-}" == "-e" ]]; then local data; data="$(cat)"; [[ "${data}" =~ \"http.latency.p95\",\"value\":-?[0-9] ]]; return; fi' \
+  '  if [[ "${1:-}" == "-e" ]]; then local data; data="$(cat)"; [[ "${data}" == *\"metrics\"* ]] && return 0; [[ "${data}" =~ \"http.latency.p95\",\"value\":-?[0-9] ]]; return; fi' \
   '  local value=12.5; [[ "${PERFLAB_TEST_NULL_P95:-0}" == "1" ]] && value=null' \
   '  cat >/dev/null; printf "[{\"name\":\"http.latency.p95\",\"value\":%s,\"unit\":\"ms\",\"source\":\"benchmark/k6-summary.json\"}]\n" "${value}"' \
   '}' \

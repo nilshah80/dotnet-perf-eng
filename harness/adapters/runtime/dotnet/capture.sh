@@ -6,7 +6,7 @@
 # PERFLAB_LOAD_GENERATOR, PERF_SCENARIO).
 #
 # Contract:  capture.sh <artifact-dir> <requested-kind|preset:name> <duration-seconds> <target-service>
-# Kinds:     trace | gcdump | stacks | dump  (stacks falls back to trace by default)
+# Kinds:     trace | gcdump | stacks | dump
 # Presets:   cpu | memory | cpu-memory | hang | dump
 set -euo pipefail
 HARNESS_ROOT="${PERFLAB_HARNESS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
@@ -29,12 +29,12 @@ if [[ -z "${assembly_name}" ]]; then
   exit 1
 fi
 
-# dotnet-monitor /stacks is unreliable in this Docker Desktop sidecar topology,
-# so a managed-stacks request captures a CPU trace fallback unless explicitly
-# re-enabled. The requested vs effective kind is recorded in capture.json.
+# Stacks are captured directly by default. An operator can explicitly disable
+# that endpoint and retain the recorded CPU-trace fallback for an environment
+# where dotnet-monitor's in-process stack channel is unavailable.
 kind="${requested_kind}"
 fallback_reason=""
-if [[ -z "${campaign_preset}" && "${kind}" == "stacks" && "${PERFLAB_ENABLE_DOTNET_MONITOR_STACKS:-false}" != "true" ]]; then
+if [[ -z "${campaign_preset}" && "${kind}" == "stacks" && "${PERFLAB_ENABLE_DOTNET_MONITOR_STACKS:-true}" != "true" ]]; then
   kind="trace"
   fallback_reason="dotnet-monitor /stacks is disabled by default because its in-process profiler channel is unreliable in this Docker Desktop sidecar topology"
   echo "Requested stacks for ${target}; capturing a CPU trace fallback instead."
@@ -281,7 +281,7 @@ case "${kind}" in
   stacks)
     run_load & load_pid=$!
     sleep 5
-    pull "${out}/stacks.json" --get --data-urlencode "uid=${runtime_uid}" "${diagnostics_url}/stacks"
+    pull "${out}/stacks.txt" --get --data-urlencode "uid=${runtime_uid}" "${diagnostics_url}/stacks"
     wait "${load_pid}"; load_pid=""
     ;;
   dump)

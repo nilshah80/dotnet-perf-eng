@@ -368,11 +368,7 @@ fi
   if [[ "${load_gen}" == "jmeter" && -n "${PERFLAB_JMETER_IMAGE:-}" ]]; then
     echo "--- jmeter ---"
     MSYS_NO_PATHCONV=1 docker run --rm --pull=never \
-      --env PERFLAB_PLUGIN_ID=perflab.load.jmeter \
-      --env PERFLAB_PLUGIN_VERSION=0.1.0 \
       --env PERFLAB_PLUGIN_IMAGE_DIGEST="${PERFLAB_PLUGIN_IMAGE_DIGEST:-}" \
-      --env PERFLAB_PLUGIN_CPUS=2 \
-      --env PERFLAB_PLUGIN_MEMORY_BYTES=2147483648 \
       "${PERFLAB_JMETER_IMAGE}" version --json || true
   fi
   claude --version
@@ -388,9 +384,17 @@ fi
 # facts.json: wrap the load generator's observations.json with run identity.
 obs_file="${artifact_dir}/benchmark/observations.json"
 [[ -s "${obs_file}" ]] || { echo "Missing ${obs_file}; the load generator did not emit observations." >&2; exit 1; }
-printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","loadGenerator":"%s","observations":%s}\n' \
+write_safety_class="none"
+lifecycle_ownership="none"
+if [[ "${target_mode}" == "local" ]]; then
+  lifecycle_ownership="managed"
+fi
+if [[ "${PERF_WORKLOAD_KIND:-}" == "journey" || "${PERF_WRITE_ACK:-}" == "managed-reference" ]]; then
+  write_safety_class="managed-reference"
+fi
+printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","loadGenerator":"%s","writeSafety":{"class":"%s"},"lifecycle":{"ownership":"%s"},"observations":%s}\n' \
   "$(json_escape "${run_id}")" "$(json_escape "${telemetry_run_id}")" "$(json_escape "${scenario_id}")" \
-  "$(json_escape "${load_gen}")" "$(cat "${obs_file}")" \
+  "$(json_escape "${load_gen}")" "$(json_escape "${write_safety_class}")" "$(json_escape "${lifecycle_ownership}")" "$(cat "${obs_file}")" \
   > "${artifact_dir}/facts.json"
 if [[ -s "${artifact_dir}/benchmark/compatibility.json" ]]; then
   if cat "${artifact_dir}/facts.json" "${artifact_dir}/benchmark/compatibility.json" \

@@ -36,6 +36,9 @@ PERFLAB_PYROSCOPE_URL="${PERFLAB_PYROSCOPE_URL:-http://127.0.0.1:4040}"
 PERFLAB_PYROSCOPE_SERVICES="ecommerce-api"
 PERFLAB_PYROSCOPE_REQUIRED_SERVICES="ecommerce-api"
 PERFLAB_PYROSCOPE_ROLE_SERVICES="api:ecommerce-api"
+PERFLAB_PROFILING_MIN_CORES_THRESHOLD="0.1"
+PERFLAB_PROFILING_SERVICE_QUOTAS="api:1"
+PERFLAB_PROFILING_QUOTA_SOURCE="compose.cpus"
 PERFLAB_DIAGNOSTICS_URL="http://127.0.0.1:18323"
 
 # --- Load generators ---
@@ -43,7 +46,9 @@ PERFLAB_LOAD_GENERATOR_DEFAULT="k6"
 PERFLAB_INTERNAL_BASE_URL="http://api:8080"
 PERFLAB_COMPOSE_NETWORK="ecommerce_default"
 PERFLAB_WRK_IMAGE=""
-# JMeter is optional and uses the shared PerfLab image. k6.js is unchanged.
+# JMeter is optional and container-only. Build the native image with
+# harness/adapters/loadgen/jmeter/package.sh, then pin PERFLAB_JMETER_IMAGE
+# to that digest. k6.js is unchanged.
 # PERFLAB_JMETER_IMAGE="sha256:<local-image-id>"
 # PERFLAB_JMETER_PLAN="labs/ecommerce/loadgen/test-plan.jmx"
 # PERFLAB_JMETER_FILES='[]'
@@ -70,3 +75,5 @@ PERFLAB_BUILD_COMMAND="dotnet build ECommerce.slnx -c Release"
 # --- Paths ---
 PERFLAB_ARTIFACTS_ROOT="artifacts"
 PERFLAB_SCENARIOS="labs/ecommerce/scenarios.tsv"
+PERFLAB_CATALOG="labs/ecommerce/catalog.json"
+PERFLAB_WORKLOAD_MANIFEST="labs/ecommerce/workload-manifest.json"

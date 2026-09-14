@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perflab.io/schemas/load/v1/jmeter-adapter-wire.schema.json",
+  "title": "JMeterAdapterWire",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "generator",
+    "adapterId",
+    "adapterVersion",
+    "imageDigest",
+    "cpus",
+    "memoryBytes",
+    "maxThreads",
+    "modes",
+    "fingerprint",
+    "capabilityRevision",
+    "contractDigest"
+  ],
+  "properties": {
+    "generator": {
+      "const": "jmeter"
+    },
+    "adapterId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "adapterVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "imageDigest": {
+      "type": "string"
+    },
+    "cpus": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "memoryBytes": {
+      "type": "integer",
+      "exclusiveMinimum": 0
+    },
+    "maxThreads": {
+      "type": "integer",
+      "exclusiveMinimum": 0
+    },
+    "modes": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "run-once",
+          "normalize",
+          "version"
+        ]
+      }
+    },
+    "fingerprint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capabilityRevision": {
+      "type": "string"
+    },
+    "contractDigest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

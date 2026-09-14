@@ -117,6 +117,13 @@ services:
     # container limits inside the Docker VM's 8 GiB budget.
     mem_limit: 4g
 
+  diagnostic-permissions:
+    image: alpine:3.22
+    user: "0:0"
+    command: ["sh", "-c", "chown -R 1654:1654 /diag && chmod 0770 /diag"]
+    volumes:
+      - diagnostic-ipc:/diag
+
   dotnet-monitor:
     image: mcr.microsoft.com/dotnet/monitor:10.0
     command:
@@ -134,6 +141,9 @@ services:
       - "127.0.0.1:18325:52325"
     volumes:
       - diagnostic-ipc:/diag
+    depends_on:
+      diagnostic-permissions:
+        condition: service_completed_successfully
     mem_limit: 512m
     restart: unless-stopped
 
@@ -143,7 +153,7 @@ services:
       dockerfile: src/PerfLab.Api/Dockerfile
     environment:
       ASPNETCORE_URLS: http://+:8080
-      ConnectionStrings__PostgreSql: Host=postgres;Port=5432;Database=perflab;Username=perflab;Password=${POSTGRES_PASSWORD:-perflab};Maximum Pool Size=20;Minimum Pool Size=0;Timeout=5;Command Timeout=5;GSS Encryption Mode=Disable;Application Name=perflab-api
+      ConnectionStrings__PostgreSql: Host=postgres;Port=5432;Database=perflab;Username=perflab;Password=${POSTGRES_PASSWORD:-perflab};Maximum Pool Size=20;Minimum Pool Size=0;Timeout=5;Command Timeout=5;Application Name=perflab-api
       ConnectionStrings__Redis: redis:6379,abortConnect=false,connectTimeout=5000,syncTimeout=3000
       RabbitMq__Host: rabbitmq
       RabbitMq__Port: 5672
@@ -154,7 +164,10 @@ services:
       PERF_RUN_MODE: ${PERF_RUN_MODE:-measure}
       SEED_SCALE: ${SEED_SCALE:-smoke}
       PERFLAB_CONTINUOUS_PROFILING: ${PERFLAB_CONTINUOUS_PROFILING:-0}
+      PERFLAB_PROFILING_TYPES: ${PERFLAB_PROFILING_TYPES:-cpu}
       PERFLAB_PROFILING_KEEP_TIERING: ${PERFLAB_PROFILING_KEEP_TIERING:-0}
+      PERFLAB_PROFILING_MIN_CORES_THRESHOLD: ${PERFLAB_PROFILING_MIN_CORES_THRESHOLD:-0.1}
+      PERFLAB_PROFILING_EFFECTIVE_CPU_CORES: "1"
       PYROSCOPE_SERVER_ADDRESS: http://lgtm:4040
       PYROSCOPE_APPLICATION_NAME: perflab-api
       OTEL_SERVICE_VERSION: ${OTEL_SERVICE_VERSION:-lab}
@@ -199,7 +212,7 @@ services:
       context: ../../source/dotnet/scenariolab
       dockerfile: src/PerfLab.Worker/Dockerfile
     environment:
-      ConnectionStrings__PostgreSql: Host=postgres;Port=5432;Database=perflab;Username=perflab;Password=${POSTGRES_PASSWORD:-perflab};Maximum Pool Size=20;Minimum Pool Size=0;Timeout=5;Command Timeout=5;GSS Encryption Mode=Disable;Application Name=perflab-worker
+      ConnectionStrings__PostgreSql: Host=postgres;Port=5432;Database=perflab;Username=perflab;Password=${POSTGRES_PASSWORD:-perflab};Maximum Pool Size=20;Minimum Pool Size=0;Timeout=5;Command Timeout=5;Application Name=perflab-worker
       RabbitMq__Host: rabbitmq
       RabbitMq__Port: 5672
       RabbitMq__User: perflab
@@ -208,7 +221,10 @@ services:
       PERF_RUN_ID: ${PERF_RUN_ID:-local-manual}
       PERF_RUN_MODE: ${PERF_RUN_MODE:-measure}
       PERFLAB_CONTINUOUS_PROFILING: ${PERFLAB_CONTINUOUS_PROFILING:-0}
+      PERFLAB_PROFILING_TYPES: ${PERFLAB_PROFILING_TYPES:-cpu}
       PERFLAB_PROFILING_KEEP_TIERING: ${PERFLAB_PROFILING_KEEP_TIERING:-0}
+      PERFLAB_PROFILING_MIN_CORES_THRESHOLD: ${PERFLAB_PROFILING_MIN_CORES_THRESHOLD:-0.1}
+      PERFLAB_PROFILING_EFFECTIVE_CPU_CORES: "0.75"
       PYROSCOPE_SERVER_ADDRESS: http://lgtm:4040
       PYROSCOPE_APPLICATION_NAME: perflab-worker
       OTEL_SERVICE_VERSION: ${OTEL_SERVICE_VERSION:-lab}

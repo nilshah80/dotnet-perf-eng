@@ -3,6 +3,11 @@
 -- a lab gets when it ships no <lab>/loadgen/wrk.lua of its own. A project that
 -- needs auth or per-request data provides its own per-lab wrk.lua instead of
 -- editing this file -- see harness/core/lib/common.sh:loadgen_script.
+-- wrk is request-only: journeys and mixes are rejected before any traffic.
+local workload_kind = os.getenv("PERF_WORKLOAD_KIND") or "request"
+if workload_kind == "journey" or workload_kind == "mix" then
+  error("capability generator.wrk.journey is unsupported; rejected before traffic")
+end
 local method = os.getenv("PERF_METHOD") or "GET"
 local path = os.getenv("PERF_PATH") or "/"
 local body = os.getenv("PERF_BODY") or ""

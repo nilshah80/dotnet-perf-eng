@@ -1,0 +1,15 @@
+go 1.22
+
+use (
+	./harness/adapters/loadgen/jmeter/runner
+	./harness/core/capability
+	./harness/core/catalog
+	./harness/core/comparison
+	./harness/core/contract
+	./harness/core/datafault
+	./harness/core/profile
+	./harness/core/performance
+	./harness/core/session
+	./harness/core/target
+	./harness/core/workload
+)

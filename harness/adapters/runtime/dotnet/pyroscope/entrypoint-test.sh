@@ -42,6 +42,8 @@ fi
 enabled_env="$(
   env -i PATH="${PATH}" \
     PERFLAB_CONTINUOUS_PROFILING=1 \
+    PERFLAB_PROFILING_MIN_CORES_THRESHOLD=0.1 \
+    PERFLAB_PROFILING_EFFECTIVE_CPU_CORES=0.75 \
     PYROSCOPE_SERVER_ADDRESS=http://lgtm:4040 \
     PYROSCOPE_APPLICATION_NAME=perflab-api \
     PERF_RUN_ID=s01-run \
@@ -73,6 +75,30 @@ printf '%s\n' "${enabled_env}" | grep -q 'PYROSCOPE_LABELS=.*service_name:' && f
 printf '%s\n' "${enabled_env}" | grep -q 'perf_phase:' && fail "static perf_phase label must not be set"
 printf '%s\n' "${enabled_env}" | grep -q 'PYROSCOPE_PROFILING_ALLOCATION_ENABLED=true' && fail "allocation profiling must stay off"
 printf '%s\n' "${enabled_env}" | grep -q 'PYROSCOPE_PROFILING_HEAP_ENABLED=true' && fail "heap profiling must stay off"
+
+all_env="$(
+  env -i PATH="${PATH}" PERFLAB_CONTINUOUS_PROFILING=1 \
+    PERFLAB_PROFILING_TYPES=cpu,wall,allocation,lock,exception,live-heap \
+    PERFLAB_PROFILING_MIN_CORES_THRESHOLD=0.1 PERFLAB_PROFILING_EFFECTIVE_CPU_CORES=0.75 \
+    PYROSCOPE_SERVER_ADDRESS=http://lgtm:4040 PYROSCOPE_APPLICATION_NAME=perflab-api \
+    "${wrapper}" /usr/bin/env
+)"
+for enabled_flag in \
+  PYROSCOPE_PROFILING_CPU_ENABLED=true \
+  PYROSCOPE_PROFILING_WALLTIME_ENABLED=true \
+  PYROSCOPE_PROFILING_ALLOCATION_ENABLED=true \
+  PYROSCOPE_PROFILING_LOCK_ENABLED=true \
+  PYROSCOPE_PROFILING_EXCEPTION_ENABLED=true \
+  PYROSCOPE_PROFILING_HEAP_ENABLED=true
+do
+  printf '%s\n' "${all_env}" | grep -Fxq "${enabled_flag}" || fail "missing ${enabled_flag}"
+done
+if env -i PATH="${PATH}" PERFLAB_CONTINUOUS_PROFILING=1 PERFLAB_PROFILING_TYPES=cpu,unknown \
+    PERFLAB_PROFILING_MIN_CORES_THRESHOLD=0.1 PERFLAB_PROFILING_EFFECTIVE_CPU_CORES=0.75 \
+    PYROSCOPE_SERVER_ADDRESS=http://lgtm:4040 PYROSCOPE_APPLICATION_NAME=perflab-api \
+    "${wrapper}" /usr/bin/true 2>/dev/null; then
+  fail "unknown profile type was accepted"
+fi
 host_arch="$(uname -m)"
 case "${host_arch}" in
   aarch64|arm64)
@@ -82,6 +108,7 @@ case "${host_arch}" in
       || fail "ARM64 enabled path must disable tiered compilation (unsupported arm64 build loses re-jitted frames)"
     printf '%s\n' "${enabled_env}" | grep -q 'PYROSCOPE_LABELS=.*dotnet_tiered_compilation:0' || fail "tiering label"
     keep_env="$(env -i PATH="${PATH}" PERFLAB_CONTINUOUS_PROFILING=1 PERFLAB_PROFILING_KEEP_TIERING=1 \
+      PERFLAB_PROFILING_MIN_CORES_THRESHOLD=0.1 PERFLAB_PROFILING_EFFECTIVE_CPU_CORES=0.75 \
       PYROSCOPE_SERVER_ADDRESS=http://lgtm:4040 PYROSCOPE_APPLICATION_NAME=perflab-api "${wrapper}" /usr/bin/env)"
     printf '%s\n' "${keep_env}" | grep -q '^DOTNET_TieredCompilation=' && fail "PERFLAB_PROFILING_KEEP_TIERING=1 must leave tiering alone"
     printf '%s\n' "${keep_env}" | grep -q 'dotnet_tiered_compilation:1' || fail "keep-tiering label"
@@ -96,9 +123,17 @@ case "${host_arch}" in
 esac
 
 if env -i PATH="${PATH}" PERFLAB_CONTINUOUS_PROFILING=1 PYROSCOPE_SERVER_ADDRESS=http://lgtm:4040 \
+    PERFLAB_PROFILING_MIN_CORES_THRESHOLD=0.1 PERFLAB_PROFILING_EFFECTIVE_CPU_CORES=0.75 \
     PYROSCOPE_APPLICATION_NAME=perflab-api PERF_RUN_ID='bad:value' \
     "${wrapper}" /usr/bin/true 2>/dev/null; then
   fail "colon in a label value was accepted"
+fi
+
+if env -i PATH="${PATH}" PERFLAB_CONTINUOUS_PROFILING=1 \
+    PERFLAB_PROFILING_MIN_CORES_THRESHOLD=0.8 PERFLAB_PROFILING_EFFECTIVE_CPU_CORES=0.75 \
+    PYROSCOPE_SERVER_ADDRESS=http://lgtm:4040 PYROSCOPE_APPLICATION_NAME=perflab-api \
+    "${wrapper}" /usr/bin/true 2>/dev/null; then
+  fail "threshold above the effective quota was accepted"
 fi
 
 echo "entrypoint tests passed"

@@ -1,0 +1,14 @@
+{
+  "projectionVersion": "legacy-request-v1",
+  "eligible": true,
+  "sourceCandidateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "projectedDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "omittedFields": [],
+  "eligibilityChecks": [
+    "legacy-request",
+    "single-operation",
+    "not-journey",
+    "not-mix"
+  ],
+  "baselineApprovalId": "bl-1"
+}

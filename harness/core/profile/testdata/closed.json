@@ -1,0 +1,15 @@
+{
+  "name": "closed",
+  "loadModel": "closed",
+  "rateUnit": "concurrent-iterations",
+  "sessionRequired": false,
+  "updateLoadRequired": false,
+  "stages": [
+    {
+      "name": "measure",
+      "kind": "measure",
+      "durationSeconds": 30,
+      "target": 8
+    }
+  ]
+}

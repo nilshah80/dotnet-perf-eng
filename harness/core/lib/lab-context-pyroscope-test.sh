@@ -30,11 +30,22 @@ if out="$(PERFLAB_LAB=remote-example PERFLAB_CONTINUOUS_PROFILING=1 PERFLAB_REMO
 fi
 printf '%s\n' "${out}" | grep -q 'PERFLAB_PYROSCOPE_SERVICES' || fail "missing remote service identity error"
 
-# Explicit remote Pyroscope URL + services are accepted (sourcing stops after lab-context).
+# Explicit remote Pyroscope URL + services still require read-only verification.
+if out="$(PERFLAB_LAB=remote-example PERFLAB_CONTINUOUS_PROFILING=1 PERFLAB_REMOTE_TELEMETRY=1 \
+    PERFLAB_PROMETHEUS_URL=https://prom.example PERFLAB_TEMPO_URL=https://tempo.example \
+    PERFLAB_LOKI_URL=https://loki.example PERFLAB_PROM_JOB_REGEX=api PERFLAB_SERVICE_NAME_REGEX=api \
+    PERFLAB_PYROSCOPE_URL=https://pyroscope.example PERFLAB_PYROSCOPE_SERVICES=checkout-api \
+    bash -c 'source "'"${repo}/harness/core/lib/common.sh"'"' 2>&1)"; then
+  fail "remote profiling without verification URL was accepted:\n${out}"
+fi
+printf '%s\n' "${out}" | grep -q 'PERFLAB_PROFILING_VERIFICATION_URL' || fail "missing verification URL error"
+
+# Explicit remote endpoints, services, and verification source are accepted by context loading.
 out="$(PERFLAB_LAB=remote-example PERFLAB_CONTINUOUS_PROFILING=1 PERFLAB_REMOTE_TELEMETRY=1 \
     PERFLAB_PROMETHEUS_URL=https://prom.example PERFLAB_TEMPO_URL=https://tempo.example \
     PERFLAB_LOKI_URL=https://loki.example PERFLAB_PROM_JOB_REGEX=api PERFLAB_SERVICE_NAME_REGEX=api \
     PERFLAB_PYROSCOPE_URL=https://pyroscope.example PERFLAB_PYROSCOPE_SERVICES=checkout-api \
+    PERFLAB_PROFILING_VERIFICATION_URL=https://agent.example/profiling \
     bash -c 'source "'"${repo}/harness/core/lib/common.sh"'"; printf "url=%s profiling=%s\n" "${pyroscope_url}" "${continuous_profiling}"' 2>&1)" \
   || fail "explicit remote Pyroscope URL was rejected:\n${out}"
 printf '%s\n' "${out}" | grep -q 'url=https://pyroscope.example' || fail "pyroscope_url not recorded: ${out}"

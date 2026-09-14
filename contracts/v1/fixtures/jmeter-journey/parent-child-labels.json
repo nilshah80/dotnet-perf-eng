@@ -1,0 +1,12 @@
+{
+  "sampleSemantics": "journey-v2",
+  "parentLabel": "journey::checkout",
+  "childLabels": [
+    "op::login",
+    "op::browse",
+    "op::create",
+    "op::pay",
+    "op::poll",
+    "op::verify"
+  ]
+}
