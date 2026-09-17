@@ -203,26 +203,63 @@ else
   echo "WARNING: runtime adapter '${runtime}' has no metrics.sh; runtime metrics not captured." >&2
 fi
 
-# Tempo traces, scoped by service.name + the run-id resource attribute. Retry
-# (Tempo needs time to ingest a burst); presence check uses grep (no jq in the
-# loop); the top-10-by-duration selection uses jqd once.
+# Tempo traces, scoped by service.name + the run-id resource attribute. Tempo's
+# search API has no portable cursor, so bounded time slices are recursively split
+# when saturated. This expands the searchable population without one huge request.
 trace_query="{ resource.service.name =~ \"${service_name_regex}\"${trace_run_id_pred} }"
 trace_search_file="${artifact_dir}/telemetry/traces/search.json"
-: > "${trace_search_file}"
+trace_pages_dir="${artifact_dir}/telemetry/traces/search-pages"
+trace_population_file="${artifact_dir}/telemetry/traces/population.ndjson"
+mkdir -p "${trace_pages_dir}"
+: > "${trace_population_file}"
 tempo_reachable=0
-for _ in $(seq 1 6); do
-  # Stage through .tmp and promote only on success, so a later FAILED retry cannot
-  # truncate a valid response an earlier retry already returned (empty or not).
-  if curl -fsS --max-time 20 --get \
-      --data-urlencode "q=${trace_query}" \
-      --data-urlencode "start=${start_epoch}" --data-urlencode "end=${end_epoch}" --data-urlencode "limit=200" \
-      "${tempo_url}/api/search" > "${trace_search_file}.tmp" 2>/dev/null; then
-    tempo_reachable=1
-    mv "${trace_search_file}.tmp" "${trace_search_file}"
-    grep -q '"traceID"' "${trace_search_file}" 2>/dev/null && break
+trace_page=0
+trace_population_seen=0
+trace_saturated=0
+trace_next_cursor=""
+capture_tempo_slice() { # <start-seconds> <end-seconds>
+  local slice_start="$1" slice_end="$2" remaining page_limit page_file count middle attempt
+  (( trace_population_seen >= trace_limit )) && { trace_saturated=1; trace_next_cursor="${slice_start}000000000"; return 0; }
+  remaining=$((trace_limit - trace_population_seen)); page_limit=1000
+  (( remaining < page_limit )) && page_limit="${remaining}"
+  trace_page=$((trace_page + 1))
+  page_file="${trace_pages_dir}/search-$(printf '%05d' "${trace_page}").json"
+  for attempt in $(seq 1 6); do
+    if curl -fsS --max-time 20 --get \
+        --data-urlencode "q=${trace_query}" \
+        --data-urlencode "start=${slice_start}" --data-urlencode "end=${slice_end}" --data-urlencode "limit=${page_limit}" \
+        --data-urlencode "most_recent=true" \
+        "${tempo_url}/api/search" > "${page_file}.tmp" 2>/dev/null; then
+      tempo_reachable=1; mv "${page_file}.tmp" "${page_file}"; break
+    fi
+    rm -f "${page_file}.tmp"; (( attempt < 6 )) && sleep 5
+  done
+  [[ -s "${page_file}" ]] || return 1
+  count="$(jqd -r '(.traces // []) | length' < "${page_file}" 2>/dev/null || echo 0)"
+  if (( count >= page_limit && slice_end - slice_start > 1 )); then
+    middle=$((slice_start + (slice_end - slice_start) / 2))
+    capture_tempo_slice "${slice_start}" "${middle}"
+    capture_tempo_slice "${middle}" "${slice_end}"
+    return 0
   fi
-  rm -f "${trace_search_file}.tmp"; sleep 5
+  jqd -c '.traces[]?' < "${page_file}" >> "${trace_population_file}" 2>/dev/null || true
+  trace_population_seen=$((trace_population_seen + count))
+  if (( count >= page_limit )); then
+    trace_saturated=1; trace_next_cursor="${slice_end}000000000"
+  fi
+}
+slice_start="${start_epoch}"
+while (( slice_start < end_epoch && trace_population_seen < trace_limit )); do
+  slice_end=$((slice_start + 60)); (( slice_end > end_epoch )) && slice_end="${end_epoch}"
+  capture_tempo_slice "${slice_start}" "${slice_end}" || break
+  slice_start="${slice_end}"
 done
+if [[ -s "${trace_population_file}" ]]; then
+  jqd -s --argjson lim "${trace_limit}" '{traces:([.[]] | unique_by(.traceID) | .[:$lim])}' \
+    < "${trace_population_file}" > "${trace_search_file}"
+else
+  printf '{"traces":[]}\n' > "${trace_search_file}"
+fi
 # An empty-but-reachable Tempo stays best-effort (ingest lag or sampling can leave a
 # window with no traces). A TRANSPORT/HTTP failure on every retry is different: the
 # backend was unreachable, so the traces are MISSING (not absent) -- mark partial.
@@ -234,7 +271,7 @@ if [[ "${tempo_reachable}" -eq 1 ]]; then
   telemetry_trace_results="$(jqd -r '(.traces // []) | length' < "${trace_search_file}" 2>/dev/null || echo 0)"
   if [[ "${telemetry_trace_results}" -eq 0 ]]; then
     telemetry_trace_state="delayed"
-  elif [[ "${telemetry_trace_results}" -ge 200 ]]; then
+  elif [[ "${trace_saturated}" -eq 1 || "${telemetry_trace_results}" -ge "${trace_limit}" ]]; then
     telemetry_trace_state="truncated"
   else
     telemetry_trace_state="captured"
@@ -255,7 +292,16 @@ if grep -q '"traceID"' "${trace_search_file}" 2>/dev/null; then
     else
       rm -f "${detail}.tmp"; trace_detail_failures=$((trace_detail_failures + 1))
     fi
-  done < <(jqd -r '.traces | sort_by(.durationMs // 0) | reverse | .[:10][] | .traceID' < "${trace_search_file}" 2>/dev/null)
+  done < <(jqd -r '
+    .traces as $all | ($all | sort_by(.durationMs // 0)) as $sorted |
+    ([
+      $sorted[($sorted|length)/2|floor],
+      $sorted[((($sorted|length)*95/100)|floor)],
+      $sorted[((($sorted|length)*99/100)|floor)],
+      $sorted[-1],
+      ($sorted | max_by((.spanSet.matched // 0) + ([.spanSets[]?.matched // 0] | add // 0)))
+    ] + [$all[] | select((.|tostring|test("error|status.*(error|true|2)";"i")))][:100])
+    | map(select(. != null) | .traceID) | unique[]' < "${trace_search_file}" 2>/dev/null)
   if [[ "${trace_detail_failures}" -gt 0 ]]; then
     echo "WARNING: ${trace_detail_failures} trace detail fetch(es) failed; this evidence package is INCOMPLETE." >&2
     capture_incomplete=1
@@ -264,9 +310,8 @@ if grep -q '"traceID"' "${trace_search_file}" 2>/dev/null; then
 fi
 telemetry_trace_details="$(find "${artifact_dir}/telemetry/traces/details" -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
 
-# Loki logs. Retry with a temp file so a timeout cannot truncate the artifact.
-# Verbose exception records can exceed Loki's 4 MiB gRPC response cap at
-# 2,000 entries. Match PerfLab's bounded 1,000-entry query.
+# Loki logs use backward pagination with transport pages capped at 1,000 records.
+# PERFLAB_LOG_LIMIT is the total phase budget, not a single-response size.
 log_query="{service_name=~\"${service_name_regex}\"}"
 if [[ "${target_mode}" == "local" ]]; then
   # Match PerfLab's canonical Loki query: resource labels select the service and
@@ -275,25 +320,49 @@ if [[ "${target_mode}" == "local" ]]; then
   log_query+=" | ${run_id_label}=\"${telemetry_run_id}\""
 fi
 log_file="${artifact_dir}/telemetry/logs/query-range.json"
-: > "${log_file}"
+log_pages_dir="${artifact_dir}/telemetry/logs/pages"
+mkdir -p "${log_pages_dir}"
 log_reachable=0
-for _ in $(seq 1 6); do
-  if curl -fsS --max-time 30 --get \
-      --data-urlencode "query=${log_query}" \
-      --data-urlencode "start=${start_epoch}000000000" --data-urlencode "end=${end_epoch}000000000" \
-      --data-urlencode "limit=1000" \
-      "${loki_url}/loki/api/v1/query_range" > "${log_file}.tmp" 2>/dev/null; then
-    log_reachable=1
-    mv "${log_file}.tmp" "${log_file}"
-    grep -q '"values":\[\[' "${log_file}" 2>/dev/null && break
-  fi
-  rm -f "${log_file}.tmp"; sleep 5
+log_end="${end_epoch}000000000"
+log_start="${start_epoch}000000000"
+log_page=0
+log_total=0
+log_more=0
+while (( log_total < log_limit )); do
+  log_page=$((log_page + 1)); log_page_limit=1000
+  log_remaining=$((log_limit - log_total)); (( log_remaining < log_page_limit )) && log_page_limit="${log_remaining}"
+  log_page_file="${log_pages_dir}/page-$(printf '%05d' "${log_page}").json"
+  page_ok=0
+  for attempt in $(seq 1 6); do
+    if curl -fsS --max-time 30 --get \
+        --data-urlencode "query=${log_query}" \
+        --data-urlencode "start=${log_start}" --data-urlencode "end=${log_end}" \
+        --data-urlencode "direction=backward" --data-urlencode "limit=${log_page_limit}" \
+        "${loki_url}/loki/api/v1/query_range" > "${log_page_file}.tmp" 2>/dev/null; then
+      log_reachable=1; page_ok=1; mv "${log_page_file}.tmp" "${log_page_file}"; break
+    fi
+    rm -f "${log_page_file}.tmp"; (( attempt < 6 )) && sleep 5
+  done
+  (( page_ok == 1 )) || break
+  page_count="$(jqd -r '[.data.result[]?.values[]?] | length' < "${log_page_file}" 2>/dev/null || echo 0)"
+  log_total=$((log_total + page_count))
+  if (( page_count < log_page_limit )); then log_more=0; break; fi
+  oldest="$(jqd -r '[.data.result[]?.values[]?[0] | tonumber] | min // empty' < "${log_page_file}" 2>/dev/null || true)"
+  if [[ -z "${oldest}" ]] || (( oldest <= log_start )); then log_more=0; break; fi
+  log_end=$((oldest - 1)); log_more=1
 done
+log_cursor=""
+[[ "${log_more}" -eq 1 ]] && log_cursor="${log_end}"
+if compgen -G "${log_pages_dir}/page-*.json" >/dev/null; then
+  for captured_log_page in "${log_pages_dir}"/page-*.json; do
+    jqd -c . < "${captured_log_page}"
+  done | jqd -s '{status:"success",data:{resultType:"streams",result:[.[]?.data.result[]?]}}' > "${log_file}"
+else
+  printf '{"status":"success","data":{"resultType":"streams","result":[]}}\n' > "${log_file}"
+fi
 # A silently empty capture is worse than a loud failure: it makes an incomplete
 # package look diagnosable. Empty-but-reachable stays best-effort; unreachable on
 # every retry (transport/HTTP failure) makes the logs MISSING -> mark partial.
-grep -q '"values":\[\[' "${log_file}" 2>/dev/null || \
-  echo "WARNING: log capture produced no entries at ${log_file}; treat these logs as MISSING, not as evidence of a quiet run." >&2
 if [[ "${log_reachable}" -eq 0 ]]; then
   echo "WARNING: Loki unreachable at ${loki_url} after retries; logs are MISSING." >&2
   capture_incomplete=1
@@ -301,8 +370,9 @@ if [[ "${log_reachable}" -eq 0 ]]; then
 else
   telemetry_log_records="$(jqd -r '[.data.result[]?.values[]?] | length' < "${log_file}" 2>/dev/null || echo 0)"
   if [[ "${telemetry_log_records}" -eq 0 ]]; then
+    echo "WARNING: log capture produced no entries at ${log_file}; treat these logs as MISSING, not as evidence of a quiet run." >&2
     telemetry_log_state="delayed"
-  elif [[ "${telemetry_log_records}" -ge 1000 ]]; then
+  elif [[ "${log_more}" -eq 1 || "${telemetry_log_records}" -ge "${log_limit}" ]]; then
     telemetry_log_state="truncated"
   else
     telemetry_log_state="captured"
@@ -492,12 +562,13 @@ jqd -n \
   --arg package_status "${capture_status}" \
   --arg metrics_state "${telemetry_metrics_state}" --argjson metric_files "${telemetry_metric_files}" --argjson metric_failures "${metric_query_failures}" \
   --arg traces_state "${telemetry_trace_state}" --argjson trace_results "${telemetry_trace_results}" --argjson trace_details "${telemetry_trace_details}" \
-  --arg logs_state "${telemetry_log_state}" --argjson log_records "${telemetry_log_records}" \
+  --argjson trace_limit "${trace_limit}" --arg trace_cursor "${trace_next_cursor:-}" --argjson trace_pages "${trace_page:-0}" \
+  --arg logs_state "${telemetry_log_state}" --argjson log_records "${telemetry_log_records}" --argjson log_limit "${log_limit}" --argjson log_pages "${log_page:-0}" --arg log_cursor "${log_cursor:-}" \
   --arg profiles_state "${telemetry_profiles_state}" \
   '{schemaVersion:"telemetry-capture-v1",packageStatus:$package_status,signals:{
     metrics:{captureState:$metrics_state,files:$metric_files,queryFailures:$metric_failures},
-    traces:{captureState:$traces_state,returned:$trace_results,retainedDetails:$trace_details,limit:200,truncated:($traces_state=="truncated")},
-    logs:{captureState:$logs_state,returned:$log_records,limit:1000,truncated:($logs_state=="truncated")},
+    traces:{captureState:$traces_state,returned:$trace_results,retainedDetails:$trace_details,limit:$trace_limit,pages:$trace_pages,nextCursor:(if $trace_cursor=="" then null else $trace_cursor end),truncated:($traces_state=="truncated")},
+    logs:{captureState:$logs_state,returned:$log_records,limit:$log_limit,pages:$log_pages,nextCursor:(if $log_cursor=="" then null else $log_cursor end),truncated:($logs_state=="truncated")},
     profiles:{captureState:$profiles_state}
   }}' > "${artifact_dir}/telemetry/capture-status.json"
 if [[ -s "${artifact_dir}/telemetry/profiles-signal.json" ]]; then

@@ -82,4 +82,14 @@ scenariolab_keep="$(grep -c 'PERFLAB_PROFILING_KEEP_TIERING: ${PERFLAB_PROFILING
 ecommerce_keep="$(grep -c 'PERFLAB_PROFILING_KEEP_TIERING: ${PERFLAB_PROFILING_KEEP_TIERING:-0}' "${repo}/labs/ecommerce/compose.yaml" || true)"
 [[ "${ecommerce_keep}" == "1" ]] || fail "ecommerce compose must forward keep-tiering on api (got ${ecommerce_keep})"
 
+for managed_lab in scenariolab ecommerce; do
+  out="$(PERFLAB_LAB="${managed_lab}" bash -c '
+    source "'"${repo}"'/harness/core/lib/common.sh"
+    source "'"${repo}"'/harness/core/lib/performance.sh"
+    performance_profiling_preflight
+  ' 2>&1)" || fail "${managed_lab} profiling preflight failed:\n${out}"
+  printf '%s\n' "${out}" | grep -q '"captureState":"captured"' ||
+    fail "${managed_lab} profiling preflight did not emit captured evidence: ${out}"
+done
+
 echo "lab-context pyroscope tests passed"

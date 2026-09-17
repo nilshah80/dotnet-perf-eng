@@ -1,5 +1,5 @@
 import http from 'k6/http';
-import { Counter } from 'k6/metrics';
+import { Counter, Trend } from 'k6/metrics';
 import { mixEnabled, pickRequest } from '../../../harness/adapters/loadgen/k6/mix.js';
 
 // eCommerce k6 workload. The endpoints are JWT-protected, so this per-lab script
@@ -21,6 +21,8 @@ const loginPassword = __ENV.PERF_LOGIN_PASSWORD || 'Password123!';
 // evidence contract every lab's k6 workload must honor.
 const nonSuccessResponses = new Counter('perflab_http_non_2xx_3xx');
 const transportErrors = new Counter('perflab_http_transport_errors');
+const primaryRequests = new Counter('perflab_primary_requests');
+const primaryRequestLatency = new Trend('perflab_primary_request_latency');
 
 // Per-VU monotonic counter used to expand the literal token __PERF_SEQ__ in a
 // request body into a value that changes on every iteration. A scenario whose
@@ -89,6 +91,9 @@ export default function (data) {
     `${baseUrl}${p}`,
     requestBody,
     params);
+
+  primaryRequests.add(1);
+  primaryRequestLatency.add(response.timings.duration);
 
   if (response.status === 0) {
     transportErrors.add(1);

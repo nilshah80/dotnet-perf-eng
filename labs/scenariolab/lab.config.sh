@@ -21,8 +21,8 @@ PERFLAB_RUNTIME="dotnet"
 PERFLAB_COMPOSE_FILE="labs/scenariolab/compose.yaml"
 PERFLAB_APP_SERVICES="api worker"        # rebuilt/recreated by the harness
 PERFLAB_PRIMARY_APP_SERVICE="api"        # used for app-socket snapshots
-PERFLAB_BASE_URL="http://127.0.0.1:8080"
-PERFLAB_READY_URL="http://127.0.0.1:8080/health/ready"
+PERFLAB_BASE_URL="${PERFLAB_BASE_URL:-http://127.0.0.1:8080}"
+PERFLAB_READY_URL="${PERFLAB_READY_URL:-http://127.0.0.1:8080/health/ready}"
 
 # --- Telemetry correlation ---
 PERFLAB_PROM_JOB_REGEX="perflab-.*"           # Prometheus job selector
@@ -38,7 +38,7 @@ PERFLAB_PYROSCOPE_SERVICES="perflab-api perflab-worker"
 PERFLAB_PYROSCOPE_REQUIRED_SERVICES="perflab-api"
 PERFLAB_PYROSCOPE_ROLE_SERVICES="api:perflab-api worker:perflab-worker"
 PERFLAB_PROFILING_MIN_CORES_THRESHOLD="0.1"
-PERFLAB_PROFILING_SERVICE_QUOTAS="api:1 worker:0.75"
+PERFLAB_PROFILING_SERVICE_QUOTAS="api=1 worker=0.75"
 PERFLAB_PROFILING_QUOTA_SOURCE="compose.cpus"
 PERFLAB_DIAGNOSTICS_URL="http://127.0.0.1:18323"   # dotnet-monitor (runtime adapter)
 

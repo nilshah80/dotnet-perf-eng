@@ -12,7 +12,6 @@ from pathlib import Path
 ENVIRONMENT_NAME = re.compile(r"\b(?:PERFLAB|PERF)_[A-Z][A-Z0-9_]*[A-Z0-9]\b")
 TEXT_SUFFIXES = {
     ".cs",
-    ".go",
     ".jmx",
     ".js",
     ".json",
@@ -32,7 +31,7 @@ def source_files(root: Path):
             parts = path.relative_to(root).parts
             if "vendor" in parts or "testdata" in parts or "inventories" in parts:
                 continue
-            if path.name.endswith("-test.sh") or path.name.endswith("_test.go"):
+            if path.name.endswith("-test.sh"):
                 continue
             yield path
 

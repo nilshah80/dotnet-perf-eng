@@ -1,5 +1,0 @@
-timeStamp,elapsed,label,responseCode,responseMessage,success,Latency
-1700000000000,10,GET /health,200,OK,true,8
-1700000000012,20,GET /health,200,OK,true,14
-1700000000035,40,GET /health,500,Internal Server Error,false,32
-1700000000080,5,GET /health,200,OK,true,4

@@ -1,0 +1,19 @@
+{
+  "apiVersion": "perflab.io/v1",
+  "kind": "WorkloadManifest",
+  "contractRevision": "v1",
+  "selectors": [
+    {"id":"P00","type":"request","iterationContract":"one-request","generators":["k6","jmeter","wrk"]},
+    {"id":"P01","type":"protocol","iterationContract":"one-operation","generators":["k6"],"protocol":"grpc","entrypoints":{"k6":"labs/protocol-reliability/loadgen/protocol.js"}},
+    {"id":"P02","type":"protocol","iterationContract":"one-operation","generators":["k6"],"protocol":"websocket","entrypoints":{"k6":"labs/protocol-reliability/loadgen/protocol.js"}},
+    {"id":"P03","type":"protocol","iterationContract":"one-operation","generators":["k6"],"protocol":"websocket","entrypoints":{"k6":"labs/protocol-reliability/loadgen/protocol.js"}},
+    {"id":"P04","type":"protocol","iterationContract":"one-operation","generators":["k6"],"protocol":"messaging","entrypoints":{"k6":"labs/protocol-reliability/loadgen/protocol.js"}},
+    {"id":"P05","type":"request","iterationContract":"one-request","generators":["k6","jmeter"]},
+    {"id":"P06","type":"request","iterationContract":"one-request","generators":["k6","jmeter"]},
+    {"id":"P07","type":"request","iterationContract":"one-request","generators":["k6","jmeter"]},
+    {"id":"P08","type":"request","iterationContract":"one-request","generators":["k6","jmeter"]},
+    {"id":"P09","type":"request","iterationContract":"one-request","generators":["k6","jmeter"]},
+    {"id":"P10","type":"protocol","iterationContract":"one-journey","generators":["k6"],"protocol":"browser-synthetic","entrypoints":{"k6":"labs/protocol-reliability/loadgen/browser.js"}},
+    {"id":"P11","type":"request","iterationContract":"one-request","generators":["k6","jmeter"]}
+  ]
+}

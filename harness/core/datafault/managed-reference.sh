@@ -3,6 +3,8 @@
 # journey. Seeds and resets only the unique runId partition. Cleanup is a
 # separate invocation so an incomplete cleanup cannot pass a later gate.
 set -euo pipefail
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 
 run_id="${1:?managed-reference.sh <run-id> <base-url> [cleanup]}"
 base_url="${2:?base-url required}"
@@ -38,6 +40,16 @@ if [[ "${action}" == "cleanup" ]]; then
     exit 1
   }
   echo "managed-reference partition ${run_id} cleaned"
+  exit 0
+fi
+
+if [[ "${action}" == "reset" ]]; then
+  reset_json="$(curl -fsS -X POST "${base_url}/api/perf/runs/${run_id}/reset" "${auth[@]}" --data '{}')"
+  [[ "$(printf '%s' "${reset_json}" | jqd -r '.ready // false')" == "true" ]] || {
+    echo "managed-reference partition did not reset after warm-up" >&2
+    exit 1
+  }
+  echo "managed-reference partition ${run_id} reset after warm-up"
   exit 0
 fi
 

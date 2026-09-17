@@ -1,9 +1,9 @@
 {
-  "planSha256": "f4a14ade21d795178c67a5f65410571a19ce852e1a9febf50d6661efc5059691",
+  "planSha256": "9838db44e0c3b57b9798d4ec36842eeed8843cd796ccfa4b8ca0717ad7852476",
   "contractRevision": "v1",
-  "manifestSha256": "74528d9dd29c6caf2c8a7a689119552e2e4808a007c92370fab105f9aacd08c3",
-  "aggregateSha256": "b51743f3ff2df6cadfbfe5cd21e14899af1e8479095df91b1499efa3c217db8b",
-  "contractIndexSha256": "b7156883909f3b5481c4dd0b6dc0bfea0c0f4ef7e66b84fcc9c86a324b1e1902",
+  "manifestSha256": "033fa27700df50600740586fee5d4b9647297b235c7eb32021d1c0b57c04cdb3",
+  "aggregateSha256": "ede69f141ed06e09640d56794146f3eb3348df1779a87e5e06870c500c97fb7f",
+  "contractIndexSha256": "17ae3ad78481881f6cf1c2bed6074f9aeeae762a556de098b4069ddfd43f66c5",
   "perflabInventorySha256": "d91d92d6e6ea9afe8ff773ec50534e44fa506f69745631443af2b78ef7a25c27",
-  "dotnetPerfEngInventorySha256": "b37eabc6f16ea941bcffee86e75ec32cf1da78d940b26ba244880af891622b15"
+  "dotnetPerfEngInventorySha256": "9ce38cbf84be6ea2018aa553000d556ec8e7f5ea1e33fb7823397d62125abdd7"
 }

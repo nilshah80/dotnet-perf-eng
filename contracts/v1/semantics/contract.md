@@ -96,12 +96,10 @@ Shard plans do not multiply intended load. Aggregation preserves counts and
 histograms and never averages percentiles. A release repeats coordinated parity
 against independently produced attestations.
 
-## Legacy request baseline projection
+## Stable baseline compatibility
 
-Projection `legacy-request-v1` is eligible only when both sides are legacy
-single-operation request workloads. Journeys, mixes, protocol workloads,
-distributed execution, continuous profiling, diagnostic campaigns, faults,
-scaling, and other stable-v1-only dimensions are ineligible.
-
-The projection is a derived comparison artifact. It never mutates the approved
-baseline or candidate evidence. Failed eligibility is inconclusive.
+Request, journey, homogeneous mix, and protocol workloads use the complete
+stable `v1` comparison model. A comparison proceeds only when every dimension
+required by policy is present and compatible. Missing or different workload,
+generator, load, dataset, environment, configuration, profiling, fault, or
+evidence dimensions are inconclusive. Lossy projections are forbidden.

@@ -1,0 +1,103 @@
+{
+  "apiVersion": "perflab.io/v1",
+  "kind": "ScenarioCatalog",
+  "contractRevision": "v1",
+  "scenarios": [
+    {
+      "id": "P00", "name": "http-control",
+      "workload": {"type": "request", "selector": "P00"},
+      "targets": ["api-a"], "effects": {"classification": "read"},
+      "defaults": {"loadModel": "closed", "rate": 8, "rateUnit": "concurrent-iterations"},
+      "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
+      "diagnostics": {"preset": "trace"}
+    },
+    {
+      "id": "P01", "name": "grpc-unary",
+      "workload": {"type": "protocol", "selector": "grpc"},
+      "targets": ["api-a"], "effects": {"classification": "read"},
+      "defaults": {"loadModel": "closed", "rate": 8, "rateUnit": "concurrent-iterations"},
+      "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
+      "diagnostics": {"preset": "trace"}
+    },
+    {
+      "id": "P02", "name": "websocket-echo",
+      "workload": {"type": "protocol", "selector": "websocket"},
+      "targets": ["api-a"], "effects": {"classification": "read"},
+      "defaults": {"loadModel": "closed", "rate": 8, "rateUnit": "concurrent-iterations"},
+      "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
+      "diagnostics": {"preset": "stacks"}
+    },
+    {
+      "id": "P03", "name": "signalr-echo",
+      "workload": {"type": "protocol", "selector": "websocket"},
+      "targets": ["api-a"], "effects": {"classification": "read"},
+      "defaults": {"loadModel": "closed", "rate": 8, "rateUnit": "concurrent-iterations"},
+      "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
+      "diagnostics": {"preset": "stacks"}
+    },
+    {
+      "id": "P04", "name": "messaging-backlog",
+      "workload": {"type": "protocol", "selector": "messaging"},
+      "targets": ["api-a"], "effects": {"classification": "write"},
+      "defaults": {"loadModel": "closed", "rate": 32, "rateUnit": "concurrent-iterations"},
+      "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
+      "diagnostics": {"preset": "trace"}
+    },
+    {
+      "id": "P05", "name": "bounded-backpressure",
+      "workload": {"type": "request", "selector": "P05"},
+      "targets": ["api-a"], "effects": {"classification": "write"},
+      "defaults": {"loadModel": "closed", "rate": 96, "rateUnit": "concurrent-iterations"},
+      "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
+      "diagnostics": {"preset": "stacks"}
+    },
+    {
+      "id": "P06", "name": "lock-contention",
+      "workload": {"type": "request", "selector": "P06"},
+      "targets": ["api-a"], "effects": {"classification": "read"},
+      "defaults": {"loadModel": "closed", "rate": 32, "rateUnit": "concurrent-iterations"},
+      "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
+      "diagnostics": {"preset": "stacks"}
+    },
+    {
+      "id": "P07", "name": "cpu-pressure",
+      "workload": {"type": "request", "selector": "P07"},
+      "targets": ["api-a"], "effects": {"classification": "read"},
+      "defaults": {"loadModel": "closed", "rate": 16, "rateUnit": "concurrent-iterations"},
+      "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
+      "diagnostics": {"preset": "trace"}
+    },
+    {
+      "id": "P08", "name": "memory-pressure",
+      "workload": {"type": "request", "selector": "P08"},
+      "targets": ["api-a"], "effects": {"classification": "read"},
+      "defaults": {"loadModel": "closed", "rate": 8, "rateUnit": "concurrent-iterations"},
+      "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
+      "diagnostics": {"preset": "gcdump"}
+    },
+    {
+      "id": "P09", "name": "tenant-noisy-neighbor",
+      "workload": {"type": "request", "selector": "P09"},
+      "targets": ["api-a"], "effects": {"classification": "read"},
+      "defaults": {"loadModel": "closed", "rate": 32, "rateUnit": "concurrent-iterations"},
+      "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
+      "diagnostics": {"preset": "trace"}
+    },
+    {
+      "id": "P10", "name": "browser-synthetic",
+      "workload": {"type": "protocol", "selector": "browser-synthetic"},
+      "targets": ["api-a"], "effects": {"classification": "read"},
+      "defaults": {"loadModel": "closed", "rate": 1, "rateUnit": "concurrent-iterations"},
+      "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
+      "diagnostics": {"preset": "trace"}
+    },
+    {
+      "id": "P11", "name": "exception-pressure",
+      "workload": {"type": "request", "selector": "P11"},
+      "targets": ["api-a"], "effects": {"classification": "read"},
+      "defaults": {"loadModel": "closed", "rate": 8, "rateUnit": "concurrent-iterations"},
+      "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
+      "diagnostics": {"preset": "trace"}
+    }
+  ]
+}

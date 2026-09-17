@@ -5,6 +5,8 @@
 set -euo pipefail
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+# shellcheck disable=SC1091
+source "${harness_core_dir}/lib/performance.sh"
 
 require_loadgen
 
@@ -26,12 +28,21 @@ if [[ -n "${PERF_MIX:-}" ]]; then
   perf_scenario="$(scenario_ids_all | head -1)"
 else
   require_scenario "${scenario_id}"
-  method="$(scenario_value "${scenario_id}" method)"
-  path="$(scenario_value "${scenario_id}" path)"
-  body="$(scenario_value "${scenario_id}" body)"
+  export PERF_WORKLOAD_KIND="$(scenario_value "${scenario_id}" type)"
+  export PERF_PROTOCOL="$(scenario_value "${scenario_id}" selector || true)"
+  if [[ "${PERF_WORKLOAD_KIND}" == "journey" ]]; then
+    # Journeys are declared in catalog.json and implemented by the project-owned
+    # load script. They intentionally have no single HTTP method/path/body.
+    method="JOURNEY"
+    path="${PERF_PROTOCOL}"
+    body=""
+  else
+    method="$(scenario_value "${scenario_id}" method)"
+    path="$(scenario_value "${scenario_id}" path)"
+    body="$(scenario_value "${scenario_id}" body)"
+  fi
   connections="$(scenario_value "${scenario_id}" connections)"
   perf_scenario="${scenario_id}"
-  export PERF_WORKLOAD_KIND="$(scenario_value "${scenario_id}" type)"
   if [[ "${PERF_WORKLOAD_KIND}" == "journey" ]]; then
     export PERF_PARTITION_READY="${PERF_PARTITION_READY:-0}"
   fi
@@ -40,33 +51,28 @@ if [[ "${PERF_WORKLOAD_KIND}" == "journey" || "${PERF_WORKLOAD_KIND}" == "mix" |
   echo "capability generator.wrk.journey is unsupported; rejected before traffic" >&2
   exit 1
 fi
-go run "${harness_core_dir}/performance/cmd" capability advertise "${load_generator}" "${PERF_WORKLOAD_KIND:-request}" >/dev/null || {
+performance_capability_preflight "${load_generator}" "${PERF_WORKLOAD_KIND:-request}" "${PERF_PROTOCOL:-}" || {
   echo "capability advertisement rejected before traffic" >&2
   exit 1
 }
-if [[ "${PERF_WORKLOAD_KIND:-request}" == "protocol" ]]; then
-  echo "protocol workloads are not implemented; refusing before traffic" >&2
-  go run "${harness_core_dir}/performance/cmd" protocol "${PERF_PROTOCOL:-grpc}" >/dev/null || true
-  exit 1
-fi
 if [[ "${PERFLAB_SHARDS:-1}" != "1" ]]; then
   echo "distributed execution is not implemented; refusing shards rather than averaging percentiles" >&2
   exit 1
 fi
 profiling_preflight_json='{"captureState":"not-applicable","reason":"continuous profiling is disabled"}'
 if [[ "${continuous_profiling:-0}" == "1" ]]; then
-  profiling_preflight_json="$(go run "${harness_core_dir}/performance/cmd" profiling)" || {
+  profiling_preflight_json="$(performance_profiling_preflight)" || {
     echo "continuous profiling policy rejected before traffic" >&2
     exit 1
   }
 fi
 if [[ "${load_profile}" == "soak" ]]; then
-  go run "${harness_core_dir}/performance/cmd" session adapter "${load_generator}" >/dev/null || {
+  performance_session_preflight "${load_generator}" || {
     echo "soak rejected before traffic: ${load_generator} does not supply Start/Snapshot/Stop" >&2
     exit 1
   }
 fi
-go run "${harness_core_dir}/performance/cmd" profile "${load_profile}" >/dev/null || {
+performance_profile_preflight "${load_profile}" "${load_generator}" || {
   echo "canonical profile ${load_profile} rejected before traffic" >&2
   exit 1
 }
@@ -134,6 +140,12 @@ export PERF_METHOD="${method}" PERF_PATH="${path}" PERF_BODY="${body}" PERF_BASE
 export PERF_WORKLOAD_KIND="${PERF_WORKLOAD_KIND:-request}"
 export PERFLAB_CONNECTIONS="${connections}" PERFLAB_DURATION_SECONDS="${duration_seconds}" PERFLAB_PROFILE="${load_profile}"
 
+managed_partition_required=0
+if [[ "${PERF_WORKLOAD_KIND}" == "journey" || "${PERF_MIX_KIND:-}" == "journey" || "${PERF_REQUIRES_MANAGED_PARTITION:-0}" == "1" ]]; then
+  managed_partition_required=1
+  export PERF_REQUIRES_MANAGED_PARTITION=1
+fi
+
 partition_cleanup_required=0
 partition_cleanup_done=0
 cleanup_partition() {
@@ -175,7 +187,7 @@ if [[ "${target_mode}" == "remote" ]]; then
   fi
 else
   echo "Starting local stack for ${scenario_id} (${telemetry_run_id})..."
-  go run "${harness_core_dir}/performance/cmd" target deploy-check managed-compose managed || {
+  performance_target_preflight managed-compose managed deploy || {
     echo "local compose target refused deploy/start before compose up" >&2
     exit 1
   }
@@ -189,7 +201,7 @@ else
   for dep in ${dependencies}; do
     "$(dependency_dir "${dep}")/reset.sh" "${artifact_dir}"
   done
-  if [[ "${PERF_WORKLOAD_KIND:-request}" == "journey" ]]; then
+  if [[ "${managed_partition_required}" == "1" ]]; then
     if [[ "${PERF_WRITE_ACK:-}" != "managed-reference" ]]; then
       echo "managed-reference journey requires explicit PERF_WRITE_ACK=managed-reference" >&2
       exit 1
@@ -205,8 +217,12 @@ else
   fi
 fi
 
-echo "Warming up for 10 seconds with ${load_generator}..."
+echo "Warming up for ${PERFLAB_WARMUP_SECONDS:-10} seconds with ${load_generator}..."
 loadgen_warmup "${artifact_dir}"
+
+if [[ "${target_mode}" == "local" && "${managed_partition_required}" == "1" ]]; then
+  bash "${harness_core_dir}/datafault/managed-reference.sh" "${telemetry_run_id}" "${base_url}" reset
+fi
 
 # Reset cumulative-since-reset dependency statistics (pg_stat_statements, redis
 # stat counters/slowlog/latency) AFTER warm-up, so those snapshots reflect the

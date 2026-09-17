@@ -3,8 +3,8 @@
   "revisions": [
     {
       "revision": "v1",
-      "manifestSha256": "74528d9dd29c6caf2c8a7a689119552e2e4808a007c92370fab105f9aacd08c3",
-      "aggregateSha256": "b51743f3ff2df6cadfbfe5cd21e14899af1e8479095df91b1499efa3c217db8b"
+      "manifestSha256": "033fa27700df50600740586fee5d4b9647297b235c7eb32021d1c0b57c04cdb3",
+      "aggregateSha256": "ede69f141ed06e09640d56794146f3eb3348df1779a87e5e06870c500c97fb7f"
     }
   ]
 }

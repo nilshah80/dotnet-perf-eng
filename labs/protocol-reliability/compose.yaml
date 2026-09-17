@@ -1,0 +1,136 @@
+name: protocol-reliability
+
+x-api: &api
+  build:
+    context: ../../source/dotnet/protocol-reliability
+    dockerfile: Dockerfile
+  environment: &api-environment
+    PERF_ADMIN_TOKEN: ${PERF_ADMIN_TOKEN:-protocol-reliability-local}
+    PERF_RUN_ID: ${PERF_RUN_ID:-local-manual}
+    PERF_SCENARIO: ${PERF_SCENARIO:-P00}
+    PERF_RUN_MODE: ${PERF_RUN_MODE:-measure}
+    QUEUE_CAPACITY: "64"
+    PERFLAB_CONTINUOUS_PROFILING: ${PERFLAB_CONTINUOUS_PROFILING:-0}
+    PERFLAB_PROFILING_TYPES: ${PERFLAB_PROFILING_TYPES:-cpu}
+    PERFLAB_PROFILING_KEEP_TIERING: ${PERFLAB_PROFILING_KEEP_TIERING:-0}
+    PERFLAB_PROFILING_MIN_CORES_THRESHOLD: ${PERFLAB_PROFILING_MIN_CORES_THRESHOLD:-0.1}
+    PERFLAB_PROFILING_EFFECTIVE_CPU_CORES: "0.5"
+    PYROSCOPE_SERVER_ADDRESS: http://lgtm:4040
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4317
+    OTEL_METRIC_EXPORT_INTERVAL: "5000"
+    OTEL_BSP_SCHEDULE_DELAY: "1000"
+    OTEL_TRACES_SAMPLER: parentbased_traceidratio
+    OTEL_TRACES_SAMPLER_ARG: ${PERFLAB_TRACE_SAMPLE_RATIO:-0.25}
+    Logging__LogLevel__Microsoft.AspNetCore: Warning
+    OTEL_SERVICE_VERSION: reference
+  depends_on:
+    lgtm:
+      condition: service_started
+  cpus: 0.5
+  mem_limit: 384m
+  restart: unless-stopped
+
+services:
+  lgtm:
+    image: grafana/otel-lgtm:0.31.0
+    environment:
+      ENABLE_LOGS_OTELCOL: "true"
+      ENABLE_LOGS_LOKI: "true"
+      PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=12h --storage.tsdb.retention.size=2GB
+    ports:
+      - "127.0.0.1:13000:3000"
+      - "127.0.0.1:13100:3100"
+      - "127.0.0.1:13200:3200"
+      - "127.0.0.1:14040:4040"
+      - "127.0.0.1:14317:4317"
+      - "127.0.0.1:14318:4318"
+      - "127.0.0.1:19090:9090"
+    volumes:
+      - lgtm-data:/data
+
+  diagnostic-permissions:
+    image: alpine:3.22
+    user: "0:0"
+    command: ["sh", "-c", "chown -R 1654:1654 /diag && chmod 0770 /diag"]
+    volumes:
+      - diagnostic-ipc:/diag
+
+  dotnet-monitor:
+    image: mcr.microsoft.com/dotnet/monitor:10.0
+    command: ["collect", "--no-auth"]
+    environment:
+      DOTNETMONITOR_DiagnosticPort__ConnectionMode: Listen
+      DOTNETMONITOR_DiagnosticPort__EndpointName: /diag/dotnet-monitor.sock
+      DOTNETMONITOR_Storage__DefaultSharedPath: /diag
+      DOTNETMONITOR_Urls: http://+:52323
+      DOTNETMONITOR_Metrics__Endpoints: http://+:52325
+      DOTNETMONITOR_InProcessFeatures__Enabled: "true"
+    ports:
+      - "127.0.0.1:19323:52323"
+      - "127.0.0.1:19325:52325"
+    volumes:
+      - diagnostic-ipc:/diag
+    depends_on:
+      diagnostic-permissions:
+        condition: service_completed_successfully
+
+  api-a:
+    <<: *api
+    ports:
+      - "127.0.0.1:18082:8080"
+    environment:
+      <<: *api-environment
+      INSTANCE_ID: api-a
+      PYROSCOPE_APPLICATION_NAME: protocol-reliability-a
+      OTEL_SERVICE_NAME: protocol-reliability-a
+      DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
+    volumes:
+      - diagnostic-ipc:/diag
+    depends_on:
+      lgtm:
+        condition: service_started
+      dotnet-monitor:
+        condition: service_started
+
+  api-b:
+    <<: *api
+    ports:
+      - "127.0.0.1:18083:8080"
+    environment:
+      <<: *api-environment
+      INSTANCE_ID: api-b
+      PYROSCOPE_APPLICATION_NAME: protocol-reliability-b
+      OTEL_SERVICE_NAME: protocol-reliability-b
+      DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
+    volumes:
+      - diagnostic-ipc:/diag
+    depends_on:
+      lgtm:
+        condition: service_started
+      dotnet-monitor:
+        condition: service_started
+
+  gateway:
+    image: nginx:1.29-alpine
+    ports:
+      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:18081:8081"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api-a
+      - api-b
+
+  diagnostics:
+    profiles: ["tools"]
+    build:
+      context: ../../harness/adapters/runtime/dotnet/diagnostics
+      dockerfile: Dockerfile
+    working_dir: /workspace
+    volumes:
+      - ../../source/dotnet/protocol-reliability:/workspace:ro
+      - ../../artifacts:/artifacts
+
+volumes:
+  lgtm-data:
+  diagnostic-ipc:

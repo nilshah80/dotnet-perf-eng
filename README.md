@@ -11,6 +11,11 @@ against PostgreSQL, Redis, and RabbitMQ, exporting OpenTelemetry
 logs/metrics/traces to Grafana OTEL-LGTM and runtime diagnostics through a
 `dotnet-monitor` sidecar. Nothing runs in the cloud; every port is loopback-only.
 
+This repository is the canonical owner of the actual .NET application source,
+Compose definitions, catalogs, and generator workloads for ScenarioLab,
+Ecommerce, and Protocol Reliability. Other orchestrators may reference these
+assets, but must not carry independent copies of the lab applications.
+
 Onboarding another project or runtime means **adding files, not editing the
 core**.
 
@@ -102,6 +107,7 @@ auto-discovers the sole lab; with several, select one via `PERFLAB_LAB=<name>`.
 |---|---|---|---|
 | `scenariolab` | `source/dotnet/scenariolab` (`PerfLab.Api` + worker) | postgres, redis, rabbitmq | the reference planted-defect catalog (`S00`–`S27`) |
 | `ecommerce` | `source/dotnet/ecommerce` (`ECommerce.Api`) | postgres | a JWT-protected CRUD API (`E00`–`E14`); per-lab k6 workload that logs in via `setup()`, and postgres db/user `ecommerce` (parameterized dependency adapter) |
+| `protocol-reliability` | `source/dotnet/protocol-reliability` (`ProtocolReliability.Api`) | none | HTTP control, gRPC, WebSocket, SignalR, messaging, browser synthetic, failover, backpressure, and recovery (`P00`–`P11`) |
 | `remote-example` | *already-deployed endpoint* (not owned here) | none | the **remote target mode** (`PERFLAB_TARGET=remote`): a black-box load/capacity test against a URL, no Compose/telemetry ownership (`R00`–`R02`) |
 
 With more than one lab present, **every command needs a lab selected**, e.g.
@@ -229,6 +235,13 @@ labs use the **same** host ports; `ecommerce` simply omits Redis and RabbitMQ.
 | Prometheus | Metrics query API (OTLP + remote-write receivers on) | `http://127.0.0.1:9090` | both |
 | Loki | Log query API | `http://127.0.0.1:3100` | both |
 | Tempo | Trace query API | `http://127.0.0.1:3200` | both |
+
+Evidence collection defaults to `PERFLAB_LOG_LIMIT=25000` and
+`PERFLAB_TRACE_LIMIT=1000` per measured phase. Both accept values through
+10,000,000. Loki is read backward in 1,000-record transport pages. Tempo is
+searched in bounded time slices; saturated slices are recursively divided and
+trace IDs are deduplicated before representative details are retained. The
+limits are evidence budgets, not backend page sizes.
 | Pyroscope | Continuous multi-type profiles (opt-in) | `http://127.0.0.1:4040` | both |
 | OTLP ingest | Collector gRPC / HTTP | `127.0.0.1:4317` / `4318` | both |
 | dotnet-monitor | Diagnostic API (trace/gcdump/stacks/dump) | `http://127.0.0.1:18323` | both |

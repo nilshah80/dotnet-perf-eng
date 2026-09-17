@@ -84,7 +84,7 @@ services:
       # last seven scenarios. Prometheus is not the problem (1.5 MB, ~5k series),
       # so the trace volume is capped at the source with sampling below; this is
       # belt-and-braces so a long session cannot grow the metric store unbounded.
-      PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=6h --storage.tsdb.retention.size=512MB
+      PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=12h --storage.tsdb.retention.size=2GB
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/grafana/conf/provisioning/dashboards/custom/00-overview.json
       # Merge an additive collector overlay (infra/observability/otelcol-extra.yaml)
       # so Postgres/Redis/RabbitMQ exporter metrics land in the SAME Prometheus as

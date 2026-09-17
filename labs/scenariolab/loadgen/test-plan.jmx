@@ -83,7 +83,6 @@ vars.put("perf.port", String.valueOf(port))
 vars.put("perf.path", joinGeneratorPath(uri.getRawPath() ?: "", scenario))
 vars.put("perf.method", method)
 vars.put("perf.body", System.getenv("PERF_BODY") ?: "")
-vars.put("perf.runId", System.getenv("PERF_RUN_ID") ?: "")
 def headersRaw = System.getenv("PERF_HEADERS")
 vars.put("perf.authorization", "")
 if (headersRaw != null && !headersRaw.trim().isEmpty()) {
@@ -107,10 +106,6 @@ if (headersRaw != null && !headersRaw.trim().isEmpty()) {
             <elementProp name="" elementType="Header">
               <stringProp name="Header.name">Content-Type</stringProp>
               <stringProp name="Header.value">application/json</stringProp>
-            </elementProp>
-            <elementProp name="" elementType="Header">
-              <stringProp name="Header.name">X-Perf-Run-Id</stringProp>
-              <stringProp name="Header.value">${perf.runId}</stringProp>
             </elementProp>
             <elementProp name="" elementType="Header">
               <stringProp name="Header.name">Authorization</stringProp>
@@ -138,6 +133,11 @@ if (headersRaw != null && !headersRaw.trim().isEmpty()) {
             </collectionProp>
           </elementProp>
         </HTTPSamplerProxy>
+        <hashTree/>
+        <ConstantThroughputTimer guiclass="TestBeanGUI" testclass="ConstantThroughputTimer" testname="Stable v1 arrival pacing" enabled="true">
+          <stringProp name="throughput">${__groovy(((props.get('perf.profile') ?: '') ==~ /open|arrival|capacity|knee/) ? ((props.get('perf.target_rps') ?: '1') as double) * 60 : 600000000)}</stringProp>
+          <intProp name="calcMode">4</intProp>
+        </ConstantThroughputTimer>
         <hashTree/>
       </hashTree>
     </hashTree>

@@ -1,5 +1,5 @@
 import http from 'k6/http';
-import { Counter } from 'k6/metrics';
+import { Counter, Trend } from 'k6/metrics';
 import { mixEnabled, pickRequest } from '../../../harness/adapters/loadgen/k6/mix.js';
 
 // scenariolab k6 workload. scenariolab's endpoints are unauthenticated and each
@@ -12,12 +12,13 @@ const baseUrl = __ENV.PERF_BASE_URL || 'http://127.0.0.1:8080';
 const method = (__ENV.PERF_METHOD || 'GET').toUpperCase();
 const path = __ENV.PERF_PATH || '/';
 const body = __ENV.PERF_BODY || '';
-const runId = __ENV.PERF_RUN_ID || 'k6-manual';
 const extraHeaders = __ENV.PERF_HEADERS || '';
 
 // These two counter names are the evidence contract read by k6/run.sh; keep them.
 const nonSuccessResponses = new Counter('perflab_http_non_2xx_3xx');
 const transportErrors = new Counter('perflab_http_transport_errors');
+const primaryRequests = new Counter('perflab_primary_requests');
+const primaryRequestLatency = new Trend('perflab_primary_request_latency');
 
 export const options = {
   discardResponseBodies: true,
@@ -29,7 +30,6 @@ export const options = {
 const params = {
   headers: {
     Accept: 'application/json',
-    'X-Perf-Run-Id': runId,
   },
 };
 
@@ -58,6 +58,9 @@ export default function () {
     : params;
 
   const response = http.request(m, `${baseUrl}${p}`, sends ? b : null, rp);
+
+  primaryRequests.add(1);
+  primaryRequestLatency.add(response.timings.duration);
 
   if (response.status === 0) {
     transportErrors.add(1);

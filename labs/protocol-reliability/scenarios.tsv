@@ -1,0 +1,13 @@
+# id	name	method	path	body	target	diagnostic	connections
+P00	http-control	GET	/api/reliability/status		api-a	trace	8
+P01	grpc-unary	POST	/reliability.v1.Reliability/Ping		api-a	trace	8
+P02	websocket-echo	GET	/ws		api-a	stacks	8
+P03	signalr-echo	GET	/signalr		api-a	stacks	8
+P04	messaging-backlog	POST	/api/reliability/messages?tenant=default		api-a	trace	32
+P05	bounded-backpressure	POST	/api/reliability/messages?tenant=backpressure		api-a	stacks	96
+P06	lock-contention	GET	/api/reliability/contention?holdMs=20		api-a	stacks	32
+P07	cpu-pressure	GET	/api/reliability/cpu?milliseconds=40		api-a	trace	16
+P08	memory-pressure	GET	/api/reliability/memory?megabytes=4&holdMs=100		api-a	gcdump	8
+P09	tenant-noisy-neighbor	GET	/api/reliability/tenant/noisy?workUnits=2000		api-a	trace	32
+P10	browser-synthetic	GET	/		api-a	trace	1
+P11	exception-pressure	GET	/api/reliability/exceptions?count=500		api-a	trace	8

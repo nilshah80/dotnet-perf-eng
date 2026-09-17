@@ -8,7 +8,7 @@
       "contentMode": "text"
     },
     {
-      "logicalName": "comparison/legacy-request-v1.schema.json",
+      "logicalName": "comparison/workload-comparison.schema.json",
       "kind": "schema",
       "mediaType": "application/schema+json",
       "contentMode": "text"
@@ -38,13 +38,7 @@
       "contentMode": "text"
     },
     {
-      "logicalName": "fixtures/comparison/legacy-request-v1-eligible.json",
-      "kind": "fixture",
-      "mediaType": "application/json",
-      "contentMode": "text"
-    },
-    {
-      "logicalName": "fixtures/comparison/legacy-request-v1-ineligible-journey.json",
+      "logicalName": "fixtures/comparison/stable-workload-compatible.json",
       "kind": "fixture",
       "mediaType": "application/json",
       "contentMode": "text"
@@ -104,7 +98,7 @@
       "contentMode": "text"
     },
     {
-      "logicalName": "fixtures/legacy-request-iteration-accounting.json",
+      "logicalName": "fixtures/request-iteration-accounting.json",
       "kind": "fixture",
       "mediaType": "application/json",
       "contentMode": "text"

@@ -103,13 +103,14 @@ case "${profile}" in
     exit 0 ;;
 esac
 
-# Bucket count: equal TIME buckets, each wide enough for a meaningful windowed p99
-# (>=8s). B is clamped so width>=8s; <3 buckets -> the window is too short to judge.
+# Bucket count: equal TIME buckets, each wide enough for at least two 10-second
+# OTLP exports. Shorter rate windows randomly lack the two samples Prometheus
+# needs. B is clamped so width>=20s; <3 buckets is too short to judge.
 B="${buckets}"
-maxb=$(( window / 8 )); (( B > maxb )) && B="${maxb}"
+maxb=$(( window / 20 )); (( B > maxb )) && B="${maxb}"
 if (( B < 3 )); then
-  finish_early "insufficient-data" "window ${window}s is too short for 3 buckets of >=8s; lengthen the run"
-  echo "steady-state: window ${window}s too short (need >=24s). Wrote ${out}." >&2
+  finish_early "insufficient-data" "window ${window}s is too short for 3 buckets of >=20s; lengthen the run"
+  echo "steady-state: window ${window}s too short (need >=60s). Wrote ${out}." >&2
   exit 3
 fi
 width=$(( window / B ))
@@ -129,9 +130,15 @@ else
 fi
 
 prom_instant() { # <query> <time-epoch> -> scalar or ""
-  curl -fsS -G "${prometheus_url}/api/v1/query" \
-    --data-urlencode "query=$1" --data-urlencode "time=$2" 2>/dev/null \
-    | jqd -r '.data.result[0].value[1] // empty' 2>/dev/null | head -1
+  local value="" attempt
+  for attempt in $(seq 1 6); do
+    value="$(curl -fsS -G "${prometheus_url}/api/v1/query" \
+      --data-urlencode "query=$1" --data-urlencode "time=$2" 2>/dev/null \
+      | jqd -r '.data.result[0].value[1] // empty' 2>/dev/null | head -1 || true)"
+    [[ -n "${value}" && "${value}" != "NaN" ]] && { printf '%s\n' "${value}"; return 0; }
+    (( attempt < 6 )) && sleep 2
+  done
+  return 0
 }
 
 # Per-bucket windowed throughput + p99. Buckets TILE the window exactly: bucket i is

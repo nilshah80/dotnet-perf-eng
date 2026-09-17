@@ -131,8 +131,21 @@ PERFLAB_TEST_CALLS="${test_root}/stacks-only-calls" \
 PERFLAB_TEST_GCDUMP_COUNT="${test_root}/stacks-only-gcdumps" \
 PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
   bash "${adapter_dir}/capture.sh" "${stacks_output}" stacks 1 api >/dev/null 2>&1
-[[ -s "${stacks_output}/runtime/api/stacks.txt" ]]
-grep -q '"requestedDiagnostic":"stacks","effectiveDiagnostic":"stacks"' \
+[[ -s "${stacks_output}/runtime/api/cpu.nettrace" ]]
+grep -q '"requestedDiagnostic":"stacks","effectiveDiagnostic":"trace"' \
   "${stacks_output}/runtime/capture.json"
+
+direct_stacks_output="${test_root}/direct-stacks"
+mkdir -p "${direct_stacks_output}"; : > "${test_root}/direct-stacks-calls"
+PATH="${test_root}/bin:${PATH}" \
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_CALLS="${test_root}/direct-stacks-calls" \
+PERFLAB_TEST_GCDUMP_COUNT="${test_root}/direct-stacks-gcdumps" \
+PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true \
+PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
+  bash "${adapter_dir}/capture.sh" "${direct_stacks_output}" stacks 1 api >/dev/null 2>&1
+[[ -s "${direct_stacks_output}/runtime/api/stacks.txt" ]]
+grep -q '"requestedDiagnostic":"stacks","effectiveDiagnostic":"stacks"' \
+  "${direct_stacks_output}/runtime/capture.json"
 
 echo "dotnet runtime campaign adapter tests passed"

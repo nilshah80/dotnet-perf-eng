@@ -91,6 +91,14 @@ resolve_repo_path() {
   esac
 }
 
+# jqd: jq inside Docker (no host jq). It must be available before the selected
+# lab context validates its stable-v1 catalog and workload manifest.
+PERFLAB_JQ_IMAGE="${PERFLAB_JQ_IMAGE:-ghcr.io/jqlang/jq:1.7.1}"
+jqd() {
+  MSYS_NO_PATHCONV=1 docker run --rm -i "${PERFLAB_JQ_IMAGE}" "$@" | tr -d '\r'
+  return "${PIPESTATUS[0]}"
+}
+
 # Lab-specific initialization (compose file, base/ready URLs, telemetry regexes,
 # dependency wiring, load-generator/profile selection) lives in lab-context.sh
 # and runs ONLY when a lab is selected. Helpers-only consumers skip it: they get
@@ -125,18 +133,6 @@ require_loadgen() {
       }
       ;;
   esac
-}
-
-# ---------------------------------------------------------------------------
-# jqd: jq inside Docker (no host jq). Reads stdin, writes stdout as LF. Callers
-# MUST pipe file content in via stdin -- never pass a host file path as an
-# argument, because it would not exist inside the container. MSYS_NO_PATHCONV
-# stops Git Bash from rewriting jq filter arguments into Windows paths.
-# ---------------------------------------------------------------------------
-PERFLAB_JQ_IMAGE="${PERFLAB_JQ_IMAGE:-ghcr.io/jqlang/jq:1.7.1}"
-jqd() {
-  MSYS_NO_PATHCONV=1 docker run --rm -i "${PERFLAB_JQ_IMAGE}" "$@" | tr -d '\r'
-  return "${PIPESTATUS[0]}"
 }
 
 # json_escape: escape a bash string for embedding inside a JSON string literal.
@@ -203,6 +199,14 @@ loadgen_script() {
     if [[ "${load_generator}" == "jmeter" && -f "${lab_dir}/loadgen/checkout-journey.jmx" ]]; then
       printf '%s' "${lab_dir}/loadgen/checkout-journey.jmx"; return 0
     fi
+  fi
+  if [[ "${PERF_WORKLOAD_KIND:-}" == "protocol" && "${load_generator}" == "k6" ]]; then
+    if [[ "${PERF_PROTOCOL:-}" == "browser-synthetic" ]]; then
+      printf '%s' "${lab_dir}/loadgen/browser.js"
+    else
+      printf '%s' "${lab_dir}/loadgen/protocol.js"
+    fi
+    return 0
   fi
   if [[ -n "${override}" ]]; then resolve_repo_path "${override}"; return 0; fi
   lab_script="${lab_dir}/loadgen/${load_generator}.${ext}"
@@ -285,10 +289,10 @@ scenario_value() {
   case "$field" in
     id) col=1 ;; name) col=2 ;; method) col=3 ;; path) col=4 ;; body) col=5 ;;
     target) col=6 ;; diagnostic) col=7 ;; connections) col=8 ;;
-    type) col=0 ;;
+    type|selector) col=0 ;;
     *) echo "Unknown scenario field '${field}'." >&2; return 1 ;;
   esac
-  if [[ -n "${scenario_catalog:-}" && -f "${scenario_catalog}" && "$field" != "type" ]]; then
+  if [[ -n "${scenario_catalog:-}" && -f "${scenario_catalog}" && "$field" != "type" && "$field" != "selector" ]]; then
     local from_tsv
     from_tsv="$(awk -F'\t' -v id="${id}" -v c="${col}" '
       $0 ~ /^[[:space:]]*#/ { next }
@@ -301,15 +305,28 @@ scenario_value() {
       fi
     fi
   fi
-  if [[ "$field" == "type" ]] && awk -F'\t' -v id="${id}" '$0 !~ /^[[:space:]]*#/ && $1 == id { found=1 } END { exit !found }' "${scenario_catalog}" 2>/dev/null; then
+  if [[ -n "${json_catalog:-}" && -f "${json_catalog}" ]]; then
+    local filter
+    case "${field}" in
+      id|name) filter=".${field}" ;;
+      type|selector) filter=".workload.${field}" ;;
+      target) filter='.targets[0]' ;;
+      diagnostic) filter='.diagnostics.preset' ;;
+      connections) filter='.defaults.rate' ;;
+      *) filter='' ;;
+    esac
+    if [[ -n "${filter}" ]]; then
+      local value
+      value="$(jqd -er --arg id "${id}" ".scenarios[] | select(.id == \$id) | ${filter}" < "${json_catalog}" 2>/dev/null || true)"
+      if [[ -n "${value}" && "${value}" != "null" ]]; then
+        printf '%s' "${value}"
+        return 0
+      fi
+    fi
+  fi
+  if [[ "${field}" == "type" ]] && awk -F'\t' -v id="${id}" '$0 !~ /^[[:space:]]*#/ && $1 == id { found=1 } END { exit !found }' "${scenario_catalog}" 2>/dev/null; then
     printf 'request'
     return 0
-  fi
-  if [[ -n "${json_catalog:-}" && -f "${json_catalog}" ]]; then
-    local tsv_arg=()
-    [[ -n "${scenario_catalog:-}" && -f "${scenario_catalog}" ]] && tsv_arg=("${scenario_catalog}")
-    go run "${harness_core_dir}/catalog/cmd" lookup "${json_catalog}" "${id}" "${field}" "${tsv_arg[@]}"
-    return
   fi
   echo "Unknown scenario '${id}'." >&2
   return 1
@@ -317,7 +334,7 @@ scenario_value() {
 
 scenario_ids_all() {
   if [[ -n "${json_catalog:-}" && -f "${json_catalog}" ]]; then
-    go run "${harness_core_dir}/catalog/cmd" list "${json_catalog}"
+    jqd -er '.scenarios[].id' < "${json_catalog}"
     return
   fi
   awk -F'\t' '
@@ -336,7 +353,7 @@ require_scenario() {
     return 0
   fi
   if [[ -n "${json_catalog:-}" && -f "${json_catalog}" ]]; then
-    if go run "${harness_core_dir}/catalog/cmd" lookup "${json_catalog}" "${id}" id >/dev/null; then
+    if jqd -e --arg id "${id}" 'any(.scenarios[]; .id == $id)' < "${json_catalog}" >/dev/null; then
       return 0
     fi
   fi

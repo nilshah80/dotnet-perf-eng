@@ -15,7 +15,11 @@ public sealed partial record EcommerceRunContext(
         string.Equals(RunMode, "diagnose", StringComparison.OrdinalIgnoreCase);
 
     public bool RequiresManagedPartition =>
-        string.Equals(WorkloadKind, "journey", StringComparison.OrdinalIgnoreCase);
+        string.Equals(WorkloadKind, "journey", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(
+            Environment.GetEnvironmentVariable("PERF_REQUIRES_MANAGED_PARTITION"),
+            "1",
+            StringComparison.OrdinalIgnoreCase);
 
     public static EcommerceRunContext FromEnvironment()
     {

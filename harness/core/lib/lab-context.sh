@@ -154,6 +154,17 @@ app_metric_prefix="${PERFLAB_APP_METRIC_PREFIX:-perflab}"
 prometheus_url="${PERFLAB_PROMETHEUS_URL:-http://127.0.0.1:9090}"
 tempo_url="${PERFLAB_TEMPO_URL:-http://127.0.0.1:3200}"
 loki_url="${PERFLAB_LOKI_URL:-http://127.0.0.1:3100}"
+observability_result_max=10000000
+log_limit="${PERFLAB_LOG_LIMIT:-25000}"
+trace_limit="${PERFLAB_TRACE_LIMIT:-1000}"
+for limit_entry in "PERFLAB_LOG_LIMIT:${log_limit}" "PERFLAB_TRACE_LIMIT:${trace_limit}"; do
+  limit_name="${limit_entry%%:*}"; limit_value="${limit_entry#*:}"
+  if [[ ! "${limit_value}" =~ ^[1-9][0-9]*$ ]] || (( limit_value > observability_result_max )); then
+    echo "${limit_name} must be an integer between 1 and ${observability_result_max}; received '${limit_value}'." >&2
+    exit 1
+  fi
+done
+export PERFLAB_LOG_LIMIT="${log_limit}" PERFLAB_TRACE_LIMIT="${trace_limit}"
 diagnostics_url="${PERFLAB_DIAGNOSTICS_URL:-http://127.0.0.1:18323}"
 if [[ "${target_mode}" == "local" ]]; then
   pyroscope_url="${PERFLAB_PYROSCOPE_URL:-http://127.0.0.1:4040}"
@@ -215,7 +226,9 @@ elif [[ -f "${lab_dir}/workload-manifest.json" ]]; then
   workload_manifest="${lab_dir}/workload-manifest.json"
 fi
 if [[ -n "${workload_manifest}" && -f "${workload_manifest}" ]]; then
-  go run "${harness_root}/core/performance/cmd" workload "${workload_manifest}" >/dev/null || {
+  # shellcheck disable=SC1091
+  source "${harness_root}/core/lib/performance.sh"
+  performance_validate_workload_manifest "${workload_manifest}" || {
     echo "workload manifest ${workload_manifest} rejected before target lease or traffic" >&2
     exit 1
   }
@@ -242,20 +255,24 @@ wrk_image="${PERFLAB_WRK_IMAGE:-}"
 # constant-VU test the harness has always run; the others drive k6 executors so
 # the harness answers capacity/limits/endurance questions instead of a single
 # point -- ramp/stress/spike/soak are closed-model VU shapes, capacity/arrival
-# are open-model arrival-rate. Executors are k6-only (wrk does "steady" only).
+# are open-model arrival-rate. k6 implements every profile, JMeter implements
+# its declared subset, and wrk is intentionally limited to simple closed load.
 # Tuning knobs (all optional, k6 adapter reads them): PERFLAB_MAX_VUS,
 # PERFLAB_SPIKE_VUS, PERFLAB_TARGET_RPS, PERFLAB_START_RPS,
 # PERFLAB_SOAK_DURATION_SECONDS.
 load_profile="${PERFLAB_PROFILE:-steady}"
 case " smoke load steady ramp stress breakpoint capacity knee spike open closed soak arrival " in
   *" ${load_profile} "*) : ;;
-  *) echo "PERFLAB_PROFILE must be one of: steady ramp stress spike soak capacity arrival; received '${load_profile}'." >&2; exit 1 ;;
+  *) echo "PERFLAB_PROFILE must be one of: smoke load steady ramp stress breakpoint capacity knee spike open closed soak arrival; received '${load_profile}'." >&2; exit 1 ;;
 esac
 case "${load_generator}" in
   wrk)
     case "${load_profile}" in steady|smoke|load) : ;; *) echo "PERFLAB_PROFILE='${load_profile}' requires k6; wrk supports steady, smoke, and load only." >&2; exit 1 ;; esac
     ;;
   jmeter)
-    case "${load_profile}" in steady|smoke|load|closed) : ;; *) echo "PERFLAB_PROFILE='${load_profile}' requires k6; JMeter supports steady, smoke, load, and closed only." >&2; exit 1 ;; esac
+    case "${load_profile}" in
+      steady|smoke|load|closed|open|arrival|capacity|knee) : ;;
+      *) echo "PERFLAB_PROFILE='${load_profile}' is not implemented by JMeter." >&2; exit 1 ;;
+    esac
     ;;
 esac

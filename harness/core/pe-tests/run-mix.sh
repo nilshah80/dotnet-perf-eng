@@ -40,6 +40,24 @@ export PERF_MIX="$(cat "${mix_file}")"
 export PERF_MIX_SEED="${PERF_MIX_SEED:-${PERF_RUN_ID:-native-mix}}"
 if jqd -e 'any(.[]; (.selector // "") != "")' < "${mix_file}" >/dev/null 2>&1; then
   export PERF_MIX_KIND="journey"
+  export PERF_REQUIRES_MANAGED_PARTITION=1
+fi
+if jqd -e 'any(.[]; (.method // "GET" | ascii_upcase) as $m | ($m != "GET" and $m != "HEAD" and $m != "OPTIONS"))' < "${mix_file}" >/dev/null 2>&1; then
+  export PERF_REQUIRES_MANAGED_PARTITION=1
+fi
+if [[ "${PERF_REQUIRES_MANAGED_PARTITION:-0}" == "1" ]]; then
+  if [[ "${target_mode}" == "local" ]]; then
+    [[ "${PERF_WRITE_ACK:-}" == "managed-reference" ]] || {
+      echo "write-capable mix requires PERF_WRITE_ACK=managed-reference" >&2; exit 1;
+    }
+    [[ "${PERF_WRITE_BUDGET:-}" =~ ^[1-9][0-9]*$ ]] || {
+      echo "write-capable mix requires a positive PERF_WRITE_BUDGET" >&2; exit 1;
+    }
+  else
+    [[ "${PERF_WRITE_ACK:-}" == "i-understand-data-mutation" ]] || {
+      echo "remote write-capable mix requires PERF_WRITE_ACK=i-understand-data-mutation" >&2; exit 1;
+    }
+  fi
 fi
 export PERFLAB_CONNECTIONS="${connections}"
 echo "Workload mix '${mix_name}': ${connections} connections, ${duration}s, profile ${PERFLAB_PROFILE:-steady}"

@@ -36,7 +36,7 @@ services:
       ENABLE_LOGS_OTELCOL: "true"
       ENABLE_LOGS_LOKI: "true"
       TEMPO_EXTRA_ARGS: --query-frontend.mcp-server.enabled=true
-      PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=6h --storage.tsdb.retention.size=512MB
+      PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=12h --storage.tsdb.retention.size=2GB
       # Land on the eCommerce overview board (was previously stock Grafana -- the
       # ecommerce lab shipped no provisioned dashboards at all).
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/grafana/conf/provisioning/dashboards/custom/00-overview.json
@@ -111,6 +111,8 @@ services:
       PERF_SCENARIO: ${PERF_SCENARIO:-E00}
       PERF_RUN_ID: ${PERF_RUN_ID:-local-manual}
       PERF_RUN_MODE: ${PERF_RUN_MODE:-measure}
+      PERF_WORKLOAD_KIND: ${PERF_WORKLOAD_KIND:-request}
+      PERF_REQUIRES_MANAGED_PARTITION: ${PERF_REQUIRES_MANAGED_PARTITION:-0}
       SEED_SCALE: ${SEED_SCALE:-smoke}
       PERFLAB_CONTINUOUS_PROFILING: ${PERFLAB_CONTINUOUS_PROFILING:-0}
       PERFLAB_PROFILING_TYPES: ${PERFLAB_PROFILING_TYPES:-cpu}

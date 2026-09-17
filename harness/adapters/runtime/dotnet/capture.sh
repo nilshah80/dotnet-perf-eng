@@ -34,7 +34,7 @@ fi
 # where dotnet-monitor's in-process stack channel is unavailable.
 kind="${requested_kind}"
 fallback_reason=""
-if [[ -z "${campaign_preset}" && "${kind}" == "stacks" && "${PERFLAB_ENABLE_DOTNET_MONITOR_STACKS:-true}" != "true" ]]; then
+if [[ -z "${campaign_preset}" && "${kind}" == "stacks" && "${PERFLAB_ENABLE_DOTNET_MONITOR_STACKS:-false}" != "true" ]]; then
   kind="trace"
   fallback_reason="dotnet-monitor /stacks is disabled by default because its in-process profiler channel is unreliable in this Docker Desktop sidecar topology"
   echo "Requested stacks for ${target}; capturing a CPU trace fallback instead."

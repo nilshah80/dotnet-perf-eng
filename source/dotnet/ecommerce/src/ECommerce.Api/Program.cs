@@ -513,7 +513,10 @@ api.MapPost("/perf/runs/{runId}/seed", (string runId, HttpRequest http, RunParti
     }
 });
 
-api.MapPost("/perf/runs/{runId}/reset", (string runId, RunPartitionStore partitions) =>
+api.MapPost("/perf/runs/{runId}/reset", async (
+    string runId, RunPartitionStore partitions,
+    IDbContextFactory<EcommerceDbContext> contextFactory,
+    CancellationToken cancellationToken) =>
 {
     if (string.IsNullOrWhiteSpace(runId))
     {
@@ -525,6 +528,14 @@ api.MapPost("/perf/runs/{runId}/reset", (string runId, RunPartitionStore partiti
         return Results.Problem(
             statusCode: StatusCodes.Status409Conflict,
             title: "managed-reference partition is not seeded for this run");
+    }
+
+    var ids = part.Orders.Keys.ToArray();
+    if (ids.Length > 0)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(cancellationToken);
+        await db.Orders.Where(order => ids.Contains(order.Id)).ExecuteDeleteAsync(cancellationToken);
+        part.Orders.Clear();
     }
 
     return Results.Ok(new { runId = part.RunId, reset = part.Reset, ready = part.Ready, budget = part.Budget });

@@ -76,4 +76,18 @@ after="$(shasum -a 256 "${test_root}/measured-package/benchmark/compatibility.js
 [[ "${before}" == "${after}" ]] || { echo "diagnostic replay mutated the measured compatibility envelope" >&2; exit 1; }
 [[ -s "${test_root}/measured-package/benchmark/diagnostic-compatibility.json" ]] || { echo "diagnostic replay did not publish its own envelope" >&2; exit 1; }
 
+# k6 Rate summaries count true values in `passes` and false values in `fails`.
+# Browser request failure normalization must therefore count `passes`; using
+# `fails` would invert a healthy browser run into an error rate above 100%.
+grep -q 'browser_http_req_failed.passes' "${adapter_dir}/run.sh"
+if grep -q 'browser_http_req_failed.fails' "${adapter_dir}/run.sh"; then
+  echo "browser failure normalization uses k6 false samples" >&2
+  exit 1
+fi
+
+# Request workloads must exclude setup/teardown traffic when a project-owned
+# primary-request counter and latency trend are available.
+grep -q 'perflab_primary_requests.count' "${adapter_dir}/run.sh"
+grep -q 'perflab_primary_request_latency' "${adapter_dir}/run.sh"
+
 echo "k6 load adapter compatibility tests passed"

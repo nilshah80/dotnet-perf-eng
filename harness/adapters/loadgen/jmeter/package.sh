@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build the native JMeter adapter image. Host Java/Go are not required; Docker
-# performs the compile and JMeter install. Prints the local image digest.
+# Build the native script-only JMeter adapter image. Host Java is not required;
+# Docker installs JMeter and the runner dependencies. Prints the image digest.
 set -euo pipefail
 here="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 image_name="${DOTNET_PERF_ENG_JMETER_IMAGE_NAME:-dotnet-perf-eng-load-jmeter:local}"

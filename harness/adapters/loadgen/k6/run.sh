@@ -109,10 +109,20 @@ case "${phase}" in
       echo "PERFLAB_WARMUP_SECONDS must be between 1 and 600; received '${warmup_seconds}'." >&2
       exit 1
     fi
-    k6 run --vus 16 --duration "${warmup_seconds}s" \
-      --summary-export "${artifact_dir}/benchmark/k6-warmup.json" \
-      --quiet --no-color "${js}" \
-      > "${artifact_dir}/benchmark/k6-warmup.txt"
+    if [[ "${PERF_PROTOCOL:-}" == "browser-synthetic" ]]; then
+      source "${HARNESS_ROOT}/adapters/loadgen/k6/profiles.sh"
+      cfg="${artifact_dir}/benchmark/k6-browser-warmup.json"
+      k6_write_profile_config steady 1 "${warmup_seconds}" "${cfg}"
+      k6 run --config "${cfg}" \
+        --summary-export "${artifact_dir}/benchmark/k6-warmup.json" \
+        --quiet --no-color "${js}" \
+        > "${artifact_dir}/benchmark/k6-warmup.txt"
+    else
+      k6 run --vus 16 --duration "${warmup_seconds}s" \
+        --summary-export "${artifact_dir}/benchmark/k6-warmup.json" \
+        --quiet --no-color "${js}" \
+        > "${artifact_dir}/benchmark/k6-warmup.txt"
+    fi
     ;;
   measure | diagnostic)
     conns="${PERFLAB_CONNECTIONS:?PERFLAB_CONNECTIONS not set}"
@@ -132,7 +142,7 @@ case "${phase}" in
     K6_RW_OUT=()
     [[ "${phase}" == "measure" ]] && k6_enable_prom_rw
 
-    if [[ "${phase}" == "measure" && "${profile}" != "steady" ]]; then
+    if [[ "${phase}" == "measure" && ( "${profile}" != "steady" || "${PERF_PROTOCOL:-}" == "browser-synthetic" ) ]]; then
       # shellcheck disable=SC1091
       source "${HARNESS_ROOT}/adapters/loadgen/k6/profiles.sh"
       cfg="${artifact_dir}/benchmark/k6-profile.json"
@@ -159,16 +169,29 @@ case "${phase}" in
       echo "k6 summary export not found or empty: ${sfile}" >&2
       exit 1
     fi
-    # Journey summaries use only measured child requests. Control/setup traffic
-    # remains visible in the raw k6 export but cannot inflate SLO throughput or
-    # latency. Single-request workloads continue to use k6's HTTP metrics.
-    jqd '(.metrics // {}) as $m |
+    # Journey summaries use measured child requests. Protocol and browser
+    # workloads use one completed k6 iteration as their operation unit and the
+    # protocol-specific latency trend (falling back to iteration duration).
+    # Single-request workloads prefer project-owned primary-request metrics so
+    # setup/teardown traffic never contaminates measured counts or latency.
+    jqd --arg workloadKind "${PERF_WORKLOAD_KIND:-request}" --arg protocol "${PERF_PROTOCOL:-}" '(.metrics // {}) as $m |
       ($m.journey_starts.count // 0) as $starts |
-      (if $starts > 0 then ($m.journey_wire_requests.count // 0) else ($m.http_reqs.count // 0) end) as $requests |
-      (if $starts > 0 then ($m.journey_wire_requests.rate // 0) else ($m.http_reqs.rate // 0) end) as $rate |
-      (if $starts > 0 then $m.journey_wire_latency else $m.http_req_duration end) as $latency |
-      (if $starts > 0 then ($m.journey_status_errors.count // 0) else ($m.perflab_http_non_2xx_3xx.count // 0) end) as $status_errors |
-      (if $starts > 0 then ($m.journey_transport_errors.count // 0) else ($m.perflab_http_transport_errors.count // 0) end) as $transport_errors |
+      ($workloadKind == "protocol") as $is_protocol |
+      (if $starts > 0 then ($m.journey_wire_requests.count // 0)
+       elif $is_protocol then ($m.iterations.count // 0)
+       else ($m.perflab_primary_requests.count // $m.http_reqs.count // 0) end) as $requests |
+      (if $starts > 0 then ($m.journey_wire_requests.rate // 0)
+       elif $is_protocol then ($m.iterations.rate // 0)
+       else ($m.perflab_primary_requests.rate // $m.http_reqs.rate // 0) end) as $rate |
+      (if $starts > 0 then $m.journey_wire_latency
+       elif $is_protocol then ($m.grpc_req_duration // $m.ws_session_duration // $m.browser_http_req_duration // $m.iteration_duration)
+       else ($m.perflab_primary_request_latency // $m.http_req_duration) end) as $latency |
+      (if $starts > 0 then ($m.journey_status_errors.count // 0)
+       elif $is_protocol then ($m.protocol_failures.count // $m.browser_http_req_failed.passes // 0)
+       else ($m.perflab_http_non_2xx_3xx.count // 0) end) as $status_errors |
+      (if $starts > 0 then ($m.journey_transport_errors.count // 0)
+       elif $is_protocol then 0
+       else ($m.perflab_http_transport_errors.count // 0) end) as $transport_errors |
       [
         {name:"http.requests_per_second",value:$rate,unit:"request/s",source:"benchmark/k6-summary.json"},
         {name:"http.latency.p50",value:($latency["p(50)"]),unit:"ms",source:"benchmark/k6-summary.json"},

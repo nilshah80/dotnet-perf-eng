@@ -1,6 +1,6 @@
 {
   "contractRevision": "v1",
-  "manifestSha256": "74528d9dd29c6caf2c8a7a689119552e2e4808a007c92370fab105f9aacd08c3",
+  "manifestSha256": "033fa27700df50600740586fee5d4b9647297b235c7eb32021d1c0b57c04cdb3",
   "hashAlgorithm": "sha256",
   "entries": [
     {
@@ -8,8 +8,8 @@
       "sha256": "a571b92c4304203128efdab1b9e3f0690e25acb4e08d9c6df8aeb3981e6a6112"
     },
     {
-      "logicalName": "comparison/legacy-request-v1.schema.json",
-      "sha256": "b6a92fc850cc660de098b2625b986de32fad76b5c77cc289b5184f1272feab17"
+      "logicalName": "comparison/workload-comparison.schema.json",
+      "sha256": "0df2f13b4d5ec916e5bd146248e385487906c6bb4bd4f1549b53545eeeb7fb79"
     },
     {
       "logicalName": "fixtures/catalog/heterogeneous-mix-invalid.json",
@@ -28,12 +28,8 @@
       "sha256": "6e8544bec7e87720b4f2a0895c9a3fa0fb69c8c55d61cd5e90658f9bf3b897a2"
     },
     {
-      "logicalName": "fixtures/comparison/legacy-request-v1-eligible.json",
-      "sha256": "b8176baa2c68f7f72e9e0fb08a44fe76bc494879e8e3c503dfd4bb35fd2dd629"
-    },
-    {
-      "logicalName": "fixtures/comparison/legacy-request-v1-ineligible-journey.json",
-      "sha256": "b9c03505e53b053a96dfe4dd5ebb9db7e26deed34e233b8de03c306478a7a2ea"
+      "logicalName": "fixtures/comparison/stable-workload-compatible.json",
+      "sha256": "1194708ae9d3dea2d9dfc4ee149b815cd74990339c6a815fd74c2d70d90f6042"
     },
     {
       "logicalName": "fixtures/datafault/incomplete-cleanup-fails-gate.json",
@@ -72,10 +68,6 @@
       "sha256": "01f3082563a8fd6b40319c7f85a319f357cc76a26fbbfda91d465b926840bc33"
     },
     {
-      "logicalName": "fixtures/legacy-request-iteration-accounting.json",
-      "sha256": "ab0989e97c87353c74aaa2bc88d38a7a2478bcb5739893e985a35d0d8ea2718d"
-    },
-    {
       "logicalName": "fixtures/profile/steady-closed.json",
       "sha256": "4dc96f735ed98b7941cadc46dbef210478fd47c5d4b04e9a772dddd62fe6e164"
     },
@@ -86,6 +78,10 @@
     {
       "logicalName": "fixtures/protocol/browser-synthetic-separate.json",
       "sha256": "3d4307f2cbcfb29695e56ac2eeffb794cf876e9f192be0386f69b0cc10be75fa"
+    },
+    {
+      "logicalName": "fixtures/request-iteration-accounting.json",
+      "sha256": "a371cae73a8072942fe040977a4c5099e4e76d53f7c9e46b787ff5a3ffda0b4a"
     },
     {
       "logicalName": "fixtures/revision/unknown-revision.json",
@@ -141,12 +137,12 @@
     },
     {
       "logicalName": "meta/contract-manifest.json",
-      "sha256": "74528d9dd29c6caf2c8a7a689119552e2e4808a007c92370fab105f9aacd08c3"
+      "sha256": "033fa27700df50600740586fee5d4b9647297b235c7eb32021d1c0b57c04cdb3"
     },
     {
       "logicalName": "semantics/contract.md",
-      "sha256": "8e28b3deffe4a699ffb73707b3db43a0e84ba5a6194526eb19c6d3d49764327c"
+      "sha256": "590914988d6deaac587d9c10db1fc8f57818e446dd203dccfe14a5c913e02dc4"
     }
   ],
-  "aggregateSha256": "b51743f3ff2df6cadfbfe5cd21e14899af1e8479095df91b1499efa3c217db8b"
+  "aggregateSha256": "ede69f141ed06e09640d56794146f3eb3348df1779a87e5e06870c500c97fb7f"
 }

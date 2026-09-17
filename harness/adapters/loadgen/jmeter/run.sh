@@ -33,8 +33,8 @@ case "${phase}" in
   *) echo "Unknown phase '${phase}' (use warmup|measure|diagnostic)." >&2; exit 2 ;;
 esac
 case "${load_profile:-steady}" in
-  steady|smoke|closed|load) : ;;
-  *) echo "profile '${load_profile}' requires k6; JMeter supports steady, smoke, load, and closed only." >&2; exit 1 ;;
+  steady|smoke|closed|load|open|arrival|capacity|knee) : ;;
+  *) echo "profile '${load_profile}' is not implemented by the native JMeter adapter." >&2; exit 1 ;;
 esac
 
 inspect_json="$(docker image inspect --format '{{json .}}' "${jmeter_image}" 2>/dev/null || true)"
@@ -198,6 +198,7 @@ plugin_env=(
   --env PERF_RUN_ID --env PERF_SCENARIO --env PERF_RUN_MODE --env PERF_HEADERS
   --env PERF_WORKLOAD_KIND --env PERF_WRITE_ACK --env PERF_WRITE_BUDGET
   --env PERFLAB_CONNECTIONS --env PERFLAB_DURATION_SECONDS --env PERFLAB_PROFILE
+  --env PERFLAB_TARGET_RPS --env PERFLAB_START_RPS
   --env PERFLAB_GENERATOR_NETWORK_PATH
 )
 
@@ -271,6 +272,7 @@ config_json="$(jqd -n \
   --arg prop_run "${PERFLAB_JMETER_PROP_RUN_ID}" \
   --arg prop_scenario "${PERFLAB_JMETER_PROP_SCENARIO}" \
   --arg run_id "${PERF_RUN_ID:-}" \
+  --arg target_rps "${PERFLAB_TARGET_RPS:-$((PERFLAB_CONNECTIONS * 10))}" \
   '{
     connections:($connections|tonumber),
     durationSeconds:($duration|tonumber),
@@ -291,7 +293,9 @@ config_json="$(jqd -n \
       ($prop_threads): $connections,
       ($prop_duration): $duration,
       ($prop_run): "{{run_id}}",
-      ($prop_scenario): $scenario
+      ($prop_scenario): $scenario,
+      "perf.profile": $profile,
+      "perf.target_rps": $target_rps
     }
   }')"
 canonical_json="$(printf '%s' "${config_json}" | jqd -c 'walk(if type=="object" then to_entries|sort_by(.key)|from_entries else . end)')"

@@ -6,8 +6,8 @@
       "path": "contracts/v1/catalog/scenario-catalog.schema.json"
     },
     {
-      "logicalName": "comparison/legacy-request-v1.schema.json",
-      "path": "contracts/v1/comparison/legacy-request-v1.schema.json"
+      "logicalName": "comparison/workload-comparison.schema.json",
+      "path": "contracts/v1/comparison/workload-comparison.schema.json"
     },
     {
       "logicalName": "fixtures/catalog/heterogeneous-mix-invalid.json",
@@ -26,12 +26,8 @@
       "path": "contracts/v1/fixtures/catalog/unknown-field-strict.json"
     },
     {
-      "logicalName": "fixtures/comparison/legacy-request-v1-eligible.json",
-      "path": "contracts/v1/fixtures/comparison/legacy-request-v1-eligible.json"
-    },
-    {
-      "logicalName": "fixtures/comparison/legacy-request-v1-ineligible-journey.json",
-      "path": "contracts/v1/fixtures/comparison/legacy-request-v1-ineligible-journey.json"
+      "logicalName": "fixtures/comparison/stable-workload-compatible.json",
+      "path": "contracts/v1/fixtures/comparison/stable-workload-compatible.json"
     },
     {
       "logicalName": "fixtures/datafault/incomplete-cleanup-fails-gate.json",
@@ -70,8 +66,8 @@
       "path": "contracts/v1/fixtures/journey/write-ack-required.json"
     },
     {
-      "logicalName": "fixtures/legacy-request-iteration-accounting.json",
-      "path": "contracts/v1/fixtures/legacy-request-iteration-accounting.json"
+      "logicalName": "fixtures/request-iteration-accounting.json",
+      "path": "contracts/v1/fixtures/request-iteration-accounting.json"
     },
     {
       "logicalName": "fixtures/profile/steady-closed.json",

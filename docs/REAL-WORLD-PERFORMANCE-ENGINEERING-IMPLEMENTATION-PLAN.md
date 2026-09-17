@@ -46,8 +46,9 @@ Both repositories must satisfy all of the following:
 - No adapter uses a container image built or released only by the other
   repository.
 - No shell script sources files from the other repository.
-- No shipped sample, default discovery path, user-facing recovery message, or
-  generated configuration resolves into a sibling checkout.
+- PerfLab's three shipped .NET lab descriptors resolve only the canonical lab
+  assets in an explicitly configured or adjacent `dotnet-perf-eng` checkout.
+  No other sample, discovery path, or generated configuration does so.
 - No build downloads the other repository's schemas, fixtures, generated code,
   packages, or release assets.
 - Each repository checks in and validates its own copy of the agreed schemas,
@@ -58,10 +59,10 @@ Both repositories must satisfy all of the following:
   evidence normalization, diagnostics, reports, and release process.
 - Parity is verified by matching contract behavior and normalized fixture
   results, never by calling one implementation from the other.
-- PerfLab's shipped `samples/labs/*` descriptors and default lab discovery must
-  stop resolving workload, scenario, mix, SLO, Compose, source, and load assets
-  from a sibling `dotnet-perf-eng` checkout. PerfLab will own self-contained
-  sample labs and target assets.
+- `dotnet-perf-eng` exclusively owns the actual .NET source, Compose, catalog,
+  mix, SLO, and generator assets for ScenarioLab, Ecommerce, and Protocol
+  Reliability. PerfLab owns only thin descriptors for those labs and must not
+  contain copied or independently implemented lab application source.
 - The current `dotnet-perf-eng` dependency on the `perflab-load-jmeter` image
   must be removed. `dotnet-perf-eng` will own and pin its own JMeter runner
   image; PerfLab will continue to own and pin its own.
@@ -105,10 +106,10 @@ The initial manifest fixes the locations of its non-schema rules. Logical entry
 `semantics/contract.md` maps to `schemas/semantics/v1/contract.md` in PerfLab
 and to `contracts/v1/semantics/contract.md` in `dotnet-perf-eng`. Its fixture
 entry
-`fixtures/legacy-request-iteration-accounting.json` maps to
-`schemas/fixtures/v1/legacy-request-iteration-accounting.json` in PerfLab
+`fixtures/request-iteration-accounting.json` maps to
+`schemas/fixtures/v1/request-iteration-accounting.json` in PerfLab
 and to
-`contracts/v1/fixtures/legacy-request-iteration-accounting.json` in the
+`contracts/v1/fixtures/request-iteration-accounting.json` in the
 native repository. Every later semantic rule follows the same explicit
 manifest, path-map, and conformance-fixture pattern; an unmaterialized plan
 sentence cannot be treated as a released contract rule.
@@ -230,7 +231,9 @@ package, and execution must never fetch or invoke the other repository.
 - Neither orchestrator merges profiling-on and profiling-off runs into one baseline
   cohort.
 - Neither orchestrator silently approximates an unsupported workload or test type.
-- Neither repository uses the other at runtime or build time.
+- The orchestration products never execute or build each other. PerfLab may
+  consume the canonical project-owned lab assets above when one of those labs
+  is explicitly selected; this is target ownership, not an engine dependency.
 
 ## 5. Current state and material gaps
 
@@ -238,9 +241,9 @@ package, and execution must never fetch or invoke the other repository.
 
 | Area | Current state | Required state |
 | --- | --- | --- |
-| Shipped labs | Every `samples/labs/*/lab.json` resolves assets from sibling `dotnet-perf-eng` | Self-contained PerfLab-owned samples and targets |
-| Discovery | `internal/lab/discover.go` searches and advertises sibling `dotnet-perf-eng/labs` | Repository-local defaults plus explicit user project paths only |
-| Smoke/parity | Shipped commands and tests execute or skip on a sibling checkout | Local attestation export and checked-in fixtures; coordinator compares isolated jobs |
+| Shipped labs | Duplicate PerfLab targets can measure different operations | Thin descriptors resolve the three canonical `dotnet-perf-eng` labs |
+| Discovery | Canonical lab root resolution is implicit and incomplete | Explicit `DOTNET_PERF_ENG_ROOT` with adjacent-checkout development fallback |
+| Smoke/parity | Synthetic fixtures can hide target drift | Compile every descriptor against the canonical catalogs and workload assets |
 | Lab scenario | `internal/lab/types.go` stores one method, path, and body | Versioned request, journey, and mix selector |
 | Catalog | `internal/lab/discover.go` accepts an eight-column TSV | Keep TSV; add Scenario Catalog v1 JSON |
 | Generic domain | `internal/core/model/domain.go` has journey types | Use them in lab execution instead of rejecting them |
@@ -493,9 +496,9 @@ HTTP RPS for a journey is a measured result, never the offered journey rate.
 
 ### 9.2 Evidence v1
 
-Add a byte-identical new load-result schema to each contract bundle rather than
-silently changing v1alpha1 field meaning. Preserve v1alpha1 projection for
-existing consumers.
+Add a byte-identical load-result schema to each contract bundle. The complete
+stable `v1` document is the comparison input for request, journey, mix, and
+protocol workloads.
 
 Required sections:
 
@@ -868,22 +871,22 @@ and material background-load checks. Required fingerprint fields and acceptable
 drift belong to the environment policy. Shared environments support leases or
 explicit noisy-environment classification rather than pretending isolation.
 
-### 12.1 PerfLab-owned reference target
+### 12.1 Canonical project-owned .NET lab targets
 
-PerfLab adds an independently implemented .NET 10 reference target under
-`samples/reference-target/dotnet/`; it is not copied, built, or loaded from
-`dotnet-perf-eng`. It contains two buildable applications:
+`dotnet-perf-eng` is the sole source of truth for all actual .NET lab code:
 
-- `PerfLab.Reference.Api`, published with that process/assembly name and
-  `service.name=perflab-reference-api`.
-- `PerfLab.Reference.Worker`, published with that process/assembly name and
-  `service.name=perflab-reference-worker`.
+- `source/dotnet/scenariolab` provides `PerfLab.Api` and `PerfLab.Worker`.
+- `source/dotnet/ecommerce` provides `ECommerce.Api`.
+- `source/dotnet/protocol-reliability` provides `ProtocolReliability.Api` for
+  the two application instances used by that lab.
 
-The directory contains a solution, both project files, Dockerfiles, database
-migrations, deterministic dataset fixtures, an OpenAPI document, and integration
-tests. The checked-in
-`samples/reference-target/dotnet/reference-target.openapi.json` is authoritative
-for request and response shapes. At minimum it defines these route groups:
+Their matching folders under `dotnet-perf-eng/labs` own Compose, catalogs,
+workload manifests, generator scripts, mixes, SLOs, and deterministic data.
+PerfLab contains no copy or independent implementation of these applications.
+Its thin descriptors resolve the canonical checkout through
+`DOTNET_PERF_ENG_ROOT`, with adjacent-checkout discovery only as a local
+development convenience. The canonical source and catalogs define these route
+groups:
 
 - `GET /health/ready`.
 - `POST /api/auth/login`; `GET|POST /api/products`;
@@ -917,18 +920,12 @@ credentials, expected counts, state transitions, retry behavior, and cleanup
 postconditions are exact golden integration-test inputs rather than references
 to another repository.
 
-Repository-local Compose files under `samples/labs/scenariolab/` and
-`samples/labs/ecommerce/` build these applications and their declared
-PostgreSQL, Redis, and RabbitMQ dependencies. They do not use an image, source
-tree, route definition, fixture, or Compose fragment from the native repository.
-
-Both PerfLab lab descriptors use `workloadRoot: "."`, local scenario/mix/SLO/load
-assets, and explicit role mappings. Their `diagnosticTargets` values are exactly
-`PerfLab.Reference.Api` and `PerfLab.Reference.Worker`; their `serviceNames`
-values use the exact names above. Preflight resolves each requested role to one
-live process and one telemetry service before traffic. The ecommerce journey
-sends traffic only to the required API role and declares the worker as a
-participating service for terminal-state, telemetry, and correctness evidence.
+The PerfLab descriptors use the canonical checkout as `workloadRoot` and bind
+its exact scenario, mix, SLO, load, Compose, source, diagnostic-target, and
+telemetry-service identities. Preflight resolves each requested role to one
+live process and one telemetry service before traffic. Both products therefore
+execute the same operation against the same build and differ only in their
+orchestration and evidence implementations.
 
 `samples/labs/remote-example/` owns only its generator assets, catalog, and SLO
 policy. It has no implicit application or diagnostic process. The user supplies
@@ -1223,43 +1220,15 @@ Baseline approval records dirty-tree state, build identity, environment noise,
 and operator justification. A baseline is immutable; replacement creates an
 auditable new approval instead of rewriting history.
 
-### 16.1 Legacy baseline transition
+### 16.1 Stable baseline compatibility
 
-An approved v1alpha1 baseline may be used during migration only when a
-deterministic compatibility projection can represent both sides without losing
-decision-relevant meaning. The allowed case is deliberately narrow:
-
-- The baseline and candidate are legacy `request` workloads with one primary
-  operation and one request iteration contract.
-- Neither side uses a journey, mix, protocol workload, distributed execution,
-  or a v1-only correctness or delivery rule.
-- Offered load is closed concurrency or open `requests/s`.
-- Projection `legacy-request-v1` compares only the fields already representable
-  in the approved legacy descriptor: system and workload identities, protocol
-  version, exact generator reference, load model/target/configuration, workload
-  content, dataset identity, environment envelope, application build,
-  measurement-overhead policy, measurement duration, evidence completeness,
-  metric names/units, and correctness.
-- The approved baseline and projected candidate contain every field named by
-  that projection, and each field matches where the policy requires equality.
-  A missing field cannot be supplied by an operator assumption or a later
-  v1 default.
-- Neither side uses continuous profiling, diagnostic child campaigns, faults,
-  scaling, distributed execution, or another v1-only dimension. Enabling
-  one makes this narrow projection ineligible rather than requiring Slice 7 or
-  Slice 8 fields to be backfilled.
-
-The comparison engine projects the v1 candidate to a versioned v1alpha1
-comparison view. It records the projection version, source candidate digest,
-projected digest, omitted fields, eligibility checks, and baseline approval ID.
-The projection is a derived comparison artifact and never mutates or replaces
-the approved baseline or the candidate evidence. A v1alpha1 baseline and a
-v1 journey, mix, or otherwise unrepresentable candidate are incompatible;
-the user must approve a new v1 baseline. Failure of any eligibility check
-is inconclusive, never an automatic pass or a silent field drop.
-The byte-identical projection schema, semantics document, and eligible/ineligible
-fixtures ship in `v1`; Slice 1 has no dependency on later profile, data, or
-diagnostic schemas.
+Every baseline and candidate uses the complete stable `v1` evidence model.
+Request, journey, homogeneous mix, and protocol workloads are comparable when
+their workload identity, generator, load model, target, dataset, environment,
+configuration, content, overhead policy, phase duration, and evidence
+completeness satisfy the declared compatibility policy. Missing or different
+required dimensions make the comparison inconclusive. No lossy projection,
+implicit default, or operator assumption may manufacture comparability.
 
 ## 17. CLI and compatibility surface
 
@@ -1528,15 +1497,15 @@ automation input is removed or repurposed during v1 delivery.
 - `internal/capability`: compile-time capability negotiation.
 - `internal/target`: endpoint, lifecycle, ownership, and lease resolution.
 - `internal/session`: continuous load session and rolling snapshot abstraction.
-- `samples/reference-target/dotnet`: independently implemented .NET 10 API and
-  worker defined in Section 12.1.
+- `samples/labs/{scenariolab,ecommerce,protocol-reliability}`: thin descriptors
+  for the canonical project-owned labs defined in Section 12.1.
 
 ### 18.2 PerfLab existing code to change
 
 - `internal/lab/types.go`: replace endpoint-only scenario dependency with the
   versioned scenario/workload reference while preserving the legacy view.
 - `internal/lab/discover.go`: load JSON catalog first, adapt TSV when used, and
-  remove sibling-checkout discovery and its user-facing error guidance.
+  resolve the canonical lab root explicitly and deterministically.
 - `internal/lab/compile.go`: compile request/journey/mix, target ownership,
   capabilities, profiling policy, and v1 evidence expectations.
 - `internal/lab/profiles.go`: become a compatibility frontend to the canonical
@@ -1568,24 +1537,23 @@ automation input is removed or repurposed during v1 delivery.
 - `internal/comparison`, `internal/peanalyze`, `internal/reporting`: v1
   compatibility, statistics, and reports.
 - `internal/cli`: catalog, profile, target, diagnostic, and migration commands.
-- `api/control` and `sdk`: expose new models without breaking v1alpha1 clients.
+- `api/control` and `sdk`: expose new models without breaking v1 clients.
 - `internal/parity`, `test/conformance`, and `test/acceptance`: independent
   contract and end-to-end coverage.
-- `samples/labs/ecommerce` and `samples/labs/scenariolab`: replace every
-  sibling-relative descriptor with repository-owned scenarios, mixes, SLOs,
-  load assets, and Compose definitions that build
-  `samples/reference-target/dotnet`. The ecommerce sample also gains the
-  six-operation stateful journey and deterministic run-partition provider in
-  Slice 2.
+- `samples/labs/ecommerce`, `samples/labs/scenariolab`, and
+  `samples/labs/protocol-reliability`: retain descriptor files only. Resolve
+  every actual source, Compose, scenario, catalog, mix, SLO, and load asset from
+  its canonical `dotnet-perf-eng` lab. The ecommerce lab includes the
+  six-operation stateful journey and deterministic run-partition provider.
 - `samples/labs/remote-example`: retain `deploymentMode: external` and add only
   repository-owned generator assets, catalog, and SLO policy. Do not add a
   Compose file, mixes file, application, or implicit diagnostic target; URLs and
   optional service/process mappings remain user inputs.
 - `scripts/smoke-local.sh`, `scripts/smoke-local.ps1`, runnable samples under
   `samples/k6`, `samples/dependencies`, `samples/observability`, and
-  `samples/runtime`, plus active README/docs guidance: remove sibling-root
-  defaults. Use the self-contained PerfLab target or an explicit user-supplied
-  external-project path that is never auto-discovered.
+  `samples/runtime`, plus active README/docs guidance: use explicit external
+  project paths. The three canonical .NET lab descriptors are the only allowed
+  adjacent-checkout fallback.
 - `samples/observability/grafana-experiment.json`: remove the static
   `perf_phase` Pyroscope selector and use the exact run, service, and persisted
   capture window.
@@ -1712,8 +1680,8 @@ before non-steady journey profiles; Slice 5 is required before production soak.
   isolation once in the joint plan and normative contract semantics.
 - Add every `v1` schema, the normative semantics document, and canonical
   positive/negative fixture listed by the initial manifest. The freeze includes
-  catalog, workload, JMeter wire, iteration-accounting, `legacy-request-v1`
-  projection, capability identifiers, and their fixtures.
+  catalog, workload, JMeter wire, iteration-accounting, capability identifiers,
+  and their fixtures.
 - Add the authoritative logical-name manifest, repository-local path maps,
   deterministic lock generator, history/index, parity lock, aggregate digest
   algorithm, `contractRevision` validation, and conformance runner. After this
@@ -1737,19 +1705,18 @@ before non-steady journey profiles; Slice 5 is required before production soak.
   specified in Section 17. Generate compatibility inventories and fail CI for
   a runtime/inventory mismatch or undocumented input.
 - Define capability identifiers and unsupported-combination errors.
-- Remove PerfLab's sibling discovery root, sibling guidance, and all
-  sibling-relative paths in every shipped sample. Add repository-owned sample
-  workload, Compose, scenario, mix, SLO, and load assets; implement the exact
-  reference API/worker target and identity mappings from Section 12.1.
+- Remove every actual .NET lab source and duplicated canonical workload asset
+  from PerfLab. Keep descriptor-only bindings for ScenarioLab, Ecommerce, and
+  Protocol Reliability, and enforce the exact canonical source and identity
+  mappings from Section 12.1.
 - Move `samples/dotnet-perf-eng/*.json` to product-neutral conformance fixtures
   and replace sibling-reading/skipping parity tests with local fixture tests.
-- Prove every shipped sample validates and compiles in a checkout whose sibling
-  repository is absent; managed sample smoke tests also start from that isolated
-  checkout.
+- Prove generic and remote samples validate in isolation. Prove each shipped
+  .NET lab descriptor validates and compiles only against the configured
+  canonical checkout and fails clearly when that checkout is unavailable.
 - Add an allowlist-based independence scan in both repositories. It rejects
-  sibling-relative paths and peer-owned runtime/build/package artifact guidance
-  outside this joint plan, coordinated parity-workflow definitions, and
-  documented compatibility input names.
+  copied .NET lab source in PerfLab and peer-owned engine/runtime/package
+  dependencies while allowing only the three descriptor-to-target bindings.
 - Remove `dotnet-perf-eng`'s use of the PerfLab JMeter image and all runtime,
   error, comment, lab-configuration, packaging, and documentation references
   to PerfLab-owned JMeter artifacts. Introduce its independently built and
@@ -1777,7 +1744,7 @@ keys remain accepted only through the recorded v1 compatibility adapter.
 - Compile request scenarios through v1 without changing measured output.
 - Add target compatibility fields `lifecycle.ownership` and `writeSafety.class`
   as separate values; do not share one enum.
-- Implement and test the narrow, immutable v1alpha1-baseline comparison
+- Implement and test the narrow, immutable v1-baseline comparison
   projection defined in Section 16.1 against its frozen `v1` schema.
 
 Exit: every existing sample and v1 scenario passes unchanged; migrated output
@@ -1896,11 +1863,9 @@ separate API/worker campaigns preserve clean measurement evidence.
 Exit: aggregate results preserve counts and histograms, identify generator
 saturation per shard, and never average percentiles.
 
-### 19.10 Slice 10: reports, gates, migration, and release
+### 19.10 Slice 10: reports, gates, and release
 
 - Update reports, trends, analysis, comparison, and gate messages.
-- Complete the legacy-request projection and migration documentation begun in
-  Slice 1.
 - Add capability matrix command and support-level reporting.
 - Complete security, performance-overhead, platform, and interruption tests.
 - Publish upgrade and rollback procedures.
@@ -2060,10 +2025,9 @@ Required end-to-end cases:
     `analyze` mode/provider flag.
 49. Adding a registered command, subcommand, flag, positional input, or native
     environment input without regenerating the inventory fails CI.
-50. An eligible legacy request candidate compares through the recorded
-    `legacy-request-v1` projection without later-slice fields or baseline
-    mutation; a journey, enabled v1-only feature, or lossy case is
-    inconclusive and requires a new baseline.
+50. Compatible stable `v1` request, journey, mix, and protocol candidates are
+    evaluated without lossy projection; missing or different required
+    dimensions are inconclusive and require a new baseline.
 51. A higher unknown contract revision and a reused revision with a different
     digest both fail before target lease, mutation, deployment, or traffic.
 52. Native runtime, JMX, configuration, and documentation scans find no
