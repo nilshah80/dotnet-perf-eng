@@ -1,7 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root="${1:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}"
+# Usage: verify-lock.sh [root] [--attest <output.json>]
+#
+# --attest writes a parity attestation AFTER verification succeeds, from the
+# very digests this script just checked. It is deliberately not a separate
+# script: an exporter that recomputed the hashes could drift from the verifier
+# and attest a tree that never passed. Emitting here makes "attested" mean
+# "verified", which is what the release coordinator compares across repositories.
+root=""
+attest_out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --attest) attest_out="${2:?--attest requires an output path}"; shift 2 ;;
+    *) [[ -z "${root}" ]] || { echo "unexpected argument: $1" >&2; exit 2; }; root="$1"; shift ;;
+  esac
+done
+root="${root:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}"
 export PERFLAB_LAB_OPTIONAL=1
 # shellcheck disable=SC1091
 source "${root}/harness/core/lib/common.sh"
@@ -95,4 +110,25 @@ jqd -e --arg plan "${plan_sha}" --arg manifest "${manifest_sha}" \
     .manifestSha256 == $manifest and .aggregateSha256 == $aggregate and
     .contractIndexSha256 == $index and .dotnetPerfEngInventorySha256 == $inventory
   ' < "${parity}" >/dev/null
+if [[ -n "${attest_out}" ]]; then
+  # perflabInventorySha256 is PerfLab's own inventory digest. This repository
+  # does not own that file, so the value is carried from the parity lock that
+  # was just verified rather than invented here; the coordinator compares it
+  # against PerfLab's independently produced attestation.
+  perflab_inventory_sha="$(jqd -er '.perflabInventorySha256' < "${parity}")"
+  mkdir -p "$(dirname "${attest_out}")"
+  printf '{\n' > "${attest_out}"
+  printf '  "repository": "dotnet-perf-eng",\n' >> "${attest_out}"
+  printf '  "contractRevision": "%s",\n' "${revision}" >> "${attest_out}"
+  printf '  "planSha256": "%s",\n' "${plan_sha}" >> "${attest_out}"
+  printf '  "manifestSha256": "%s",\n' "${manifest_sha}" >> "${attest_out}"
+  printf '  "aggregateSha256": "%s",\n' "${aggregate_sha}" >> "${attest_out}"
+  printf '  "contractIndexSha256": "%s",\n' "${index_sha}" >> "${attest_out}"
+  printf '  "perflabInventorySha256": "%s",\n' "${perflab_inventory_sha}" >> "${attest_out}"
+  printf '  "dotnetPerfEngInventorySha256": "%s",\n' "${inventory_sha}" >> "${attest_out}"
+  printf '  "inventoryField": "dotnetPerfEngInventorySha256",\n' >> "${attest_out}"
+  printf '  "inventorySha256": "%s"\n' "${inventory_sha}" >> "${attest_out}"
+  printf '}\n' >> "${attest_out}"
+  printf 'native attestation written to %s\n' "${attest_out}"
+fi
 printf 'native stable-v1 lock ok aggregate=%s\n' "${aggregate_sha}"

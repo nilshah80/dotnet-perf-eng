@@ -1661,7 +1661,7 @@ section 23 gate. A slice may still land behind `experimental`; it cannot be
 marked `supported` until both repositories carry the same contract digest and
 pass that slice's advertised acceptance cases.
 
-### 19.0 Slice 0: contract and fixture freeze — complete except C-1
+### 19.0 Slice 0: contract and fixture freeze — complete
 
 Landed: `v1` manifest, schemas, fixtures, locks, Markdown/LF pin, independence
 scan, descriptor-only PerfLab labs, native JMeter image ownership. Remaining:
@@ -2030,12 +2030,11 @@ release.
 | D-P0-8 | Profile types are absent from comparison compatibility. CPU-only versus `all-diagnostic` compares as equal. Former ID: D-P1-2. | `compare-runs.sh:91-100` | Fingerprint resolved types, sampling limits, profiler version, keep-tiering, and the D-P0-5 sampler policy. |
 | D-P0-9 | No telemetry-loss accounting. Logs exporter `queue_size: 64` can drop with nothing recorded. Former ID: D-P1-5. | `labs/*/infra/observability/otelcol-extra.yaml` | Capture collector, SDK exporter, and profile-upload health as required evidence. |
 | D-P0-10 | Diagnosis confidence is not completeness-capped. Former ID: D-P2-8. | `internal/peanalyze/analyzers.go:203-255`; `domain.go:455` | Cap confidence by completeness, sample counts, dropped events, and symbolization. |
-| C-1 | Cross-repository coordinator cannot succeed as written. | `.github/workflows/coordinate-performance-contract.yml:33-35` | Shell-based native attestation exporter; update the workflow; fix the PerfLab README hosted-CI sentence. Do not restore Go to `dotnet-perf-eng`. Plans and local locks verifying is not coordinator success. |
 | C-5 | Target lifecycle is mostly local/remote or external/compose. | `experiment.go:888-913`; `lab-context.sh:20` | Existing local process and existing container; identity and readiness; exclusive diagnostic leases; never stop an unowned target. Kubernetes stays Gate C. |
 | C-6 | Stateful data safety is incomplete. Idempotent reset/cleanup, ownership, interruption recovery, and dataset fingerprints are required for stateful workloads. Extra SQL and message-queue providers are Gate C portfolio choices. | `harness/core/datafault/`; `internal/datafault/` | Land the essential subset on Gate A. Do not require two provider families for the first release. |
 | C-14 | Numerical parity needs repeated controlled experiments. One S10/E06 run is not a defect. | retained ScenarioLab/Ecommerce runs | Five to ten alternating trials; compare median and dispersion. |
 | C-15 | Acceptance cases are not mapped to Gate A proof. | section 20 | Map advertised Gate A cases to an exact command. Missing Gate A mapping fails release. Do not require a mapping for unadvertised Gate B/C cases. |
-| D-P0-11 | Bottleneck classification is throughput-blind and has no retention dimension, so it names the wrong resource with high confidence. Reproduced on S04 (known answer: static-subscriber retention): verdict `threadpool-starved [high]` from a queue peak of 10 across 4 threads at 19.6k rps -- a ~0.5 ms backlog -- while `otherLatencySharePct` was 96.1 and the in-process GC dumps showed +1334.8% heap growth. `grep -c 'heap\|retain\|leak\|gcdump' bottleneck.sh` was 0. | `harness/core/analyze/bottleneck.sh`; run `suite-20260917T135702Z/scenarios/S04` | Gate queue saturation on backlog SECONDS (depth/throughput), not absolute depth; surface managed-heap retention from the before/after gcdump diff as a reported dimension that never wins the verdict; state explicitly when a queue is transient. |
+| D-P0-11 | Bottleneck classification is throughput-blind and has no retention dimension, so it names the wrong resource with high confidence. Reproduced on S04 (known answer: static-subscriber retention): verdict `threadpool-starved [high]` from a queue peak of 10 across 4 threads at 19.6k rps -- a ~0.5 ms backlog -- while `otherLatencySharePct` was 96.1 and the in-process GC dumps showed +1334.8% heap growth. a search of `bottleneck.sh` for heap/retain/leak/gcdump was 0. | `harness/core/analyze/bottleneck.sh`; run `suite-20260917T135702Z/scenarios/S04` | Gate queue saturation on backlog SECONDS (depth/throughput), not absolute depth; surface managed-heap retention from the before/after gcdump diff as a reported dimension that never wins the verdict; state explicitly when a queue is transient. |
 | D-P0-12 | Logs are empty by design on a healthy path, and an empty window passed as a complete capture. Three of four scenarios returned 0 records while completing; only S21 logged, and every one of its 1668 records was an error. `Microsoft.AspNetCore: Warning` suppresses request logging, so a healthy run emits nothing an engineer can correlate. Per-request logging is NOT a blanket fix: S04 sustains 19.6k rps, where it would emit ~1.2M lines per 30s window, perturbing the measurement and instantly truncating the log budget. | `capture-evidence.sh` log state; `source/dotnet/*/appsettings.json` | Degrade the package when a required signal is reachable-but-empty; expose request logging as an explicit opt-in knob rather than a default; record which of the two applies. |
 
 ### 23.3 Gate B — advertised production or enterprise capability
@@ -2082,7 +2081,6 @@ steps are skipped when that capability is not claimed.
 
 | Step | Work | Closes | Gate |
 | --- | --- | --- | --- |
-| 1 | Repair native attestation exporter and hosted coordinator | C-1 | A |
 | 2 | Distinguish absence from health; telemetry-loss; confidence cap | D-P0-4, D-P0-9, D-P0-10 | A |
 | 3 | Target identity proof for multi-replica attach | D-P0-1 | A |
 | 4 | Record native sampler; fingerprint profile types and sampler in comparison | D-P0-5, D-P0-8 | A |
@@ -2123,4 +2121,8 @@ wording (C-2) and unchanged case 30; single-request compatibility; multi-step
 journeys; weighted mixes; core LGTM capture; increased log and trace limits;
 evidence normalization; native JMeter image ownership; basic local
 single-node orchestration; Slices 1-3. Slice 0 contract freeze is functionally
-complete except C-1.
+complete. The release coordinator now runs: the native side exports its
+attestation with `scripts/contract/verify-lock.sh --attest`, which emits only
+after its lock, manifest and contract-file digests pass, so two independent
+implementations must agree before a release. `compare-test.sh` and
+`attest-test.sh` pin both halves and run in each repository's contract check.

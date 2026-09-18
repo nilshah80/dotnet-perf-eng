@@ -22,6 +22,7 @@ if digest != parity['dotnetPerfEngInventorySha256']:
     raise SystemExit(f"inventory digest mismatch {digest} != {parity['dotnetPerfEngInventorySha256']}")
 print('inventory ok', digest)
 PY
+"$root/scripts/contract/attest-test.sh"
 "$root/scripts/contract/foundation-test.sh"
 "$root/harness/adapters/loadgen/jmeter/runner-test.sh"
 echo "native contract local checks passed"
