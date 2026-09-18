@@ -112,6 +112,40 @@ if [[ "${target_mode}" == "remote" ]]; then
       echo "PERFLAB_CONTINUOUS_PROFILING=1 on a remote target requires PERFLAB_PROFILING_VERIFICATION_URL for a read-only profiler configuration endpoint." >&2
       exit 1
     fi
+    # D-P0-2. Requiring the URL and never reading it meant any syntactically
+    # valid string satisfied the check: the run then claimed the remote profiler
+    # was active without ever asking it. The harness does not own the remote
+    # process, so this endpoint is the ONLY evidence that profiling was on --
+    # it has to be fetched and its answer validated, not assumed.
+    case "${PERFLAB_PROFILING_VERIFICATION_URL}" in
+      https://*) ;;
+      http://127.0.0.1*|http://localhost*) ;;   # loopback only, for testing the contract
+      *) echo "PERFLAB_PROFILING_VERIFICATION_URL must use HTTPS (HTTP is allowed only for loopback testing); refusing to read a profiler attestation over plaintext." >&2; exit 1 ;;
+    esac
+    profiling_verification_file="${PERFLAB_PROFILING_VERIFICATION_OUT:-}"
+    profiling_verification_body="$(curl -fsS --max-time 10 --max-filesize 1048576 "${PERFLAB_PROFILING_VERIFICATION_URL}" 2>/dev/null || true)"
+    if [[ -z "${profiling_verification_body}" ]]; then
+      echo "Remote profiler verification endpoint ${PERFLAB_PROFILING_VERIFICATION_URL} returned nothing; cannot confirm the remote profiler is active." >&2
+      exit 1
+    fi
+    # The document must state that profiling is active AND cover every type this
+    # run asks for. A remote agent running cpu-only cannot substantiate an
+    # allocation finding, so a partial match is a refusal, not a warning.
+    if ! printf '%s' "${profiling_verification_body}" | jqd -e '.activationProbe == "active"' >/dev/null 2>&1; then
+      echo "Remote profiler verification did not report activationProbe=\"active\"; refusing to record profiles as evidence from an unverified agent." >&2
+      exit 1
+    fi
+    for requested_type in ${PERFLAB_PROFILING_TYPES//,/ }; do
+      if ! printf '%s' "${profiling_verification_body}" | jqd -e --arg t "${requested_type}" '(.activeTypes // []) | index($t) != null' >/dev/null 2>&1; then
+        echo "Remote profiler verification does not list profile type '${requested_type}' as active; it cannot supply that evidence." >&2
+        exit 1
+      fi
+    done
+    if [[ -n "${profiling_verification_file}" ]]; then
+      mkdir -p "$(dirname "${profiling_verification_file}")"
+      printf '%s\n' "${profiling_verification_body}" > "${profiling_verification_file}"
+    fi
+    echo "Remote profiler verification accepted for types: ${PERFLAB_PROFILING_TYPES}" >&2
   fi
 fi
 

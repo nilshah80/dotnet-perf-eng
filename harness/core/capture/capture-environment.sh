@@ -67,6 +67,14 @@ compose ps --format json 2>/dev/null | jqd -s '.' > "${out_dir}/compose-ps.json"
     fi
   fi
   printf ',"dockerContainersRunning":%s' "$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')"
+  # The RESOURCE ENVELOPE the run was given. Docker Desktop's CPU and memory
+  # allocation can be changed between runs from a settings pane, and nothing in
+  # the app metrics shows it: two runs would differ by a third with no visible
+  # cause. Recorded per boundary so a mid-run change is detectable too.
+  envelope="$(docker info --format '{{.NCPU}} {{.MemTotal}}' 2>/dev/null || true)"
+  read -r env_cpus env_mem _rest <<< "${envelope:-}" || true
+  [[ "${env_cpus:-}" =~ ^[0-9]+$ ]] && printf ',"hostCpus":%s' "${env_cpus}"
+  [[ "${env_mem:-}" =~ ^[0-9]+$ ]] && printf ',"hostMemoryBytes":%s' "${env_mem}"
   printf '}\n'
 } > "${out_dir}/host.json" 2>/dev/null || true
 

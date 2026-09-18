@@ -43,7 +43,11 @@ fi
 cs="${run_arg}/telemetry/capture-status.json"
 sig_rows=""
 if [[ -s "${cs}" ]]; then
-  while IFS=$'\t' read -r name state detail; do
+  # `detail` is routinely empty, and an empty `state` would shift it into place.
+  while IFS= read -r report_line; do
+    name="$(printf '%s' "${report_line}" | awk -F'\t' '{print $1}')"
+    state="$(printf '%s' "${report_line}" | awk -F'\t' '{print $2}')"
+    detail="$(printf '%s' "${report_line}" | awk -F'\t' '{print $3}')"
     [[ -z "${name}" ]] && continue
     cls="ok"; case "${state}" in empty|missing|failed) cls="bad" ;; partial|delayed|truncated) cls="warn" ;; not-applicable) cls="na" ;; esac
     sig_rows+="<tr><td>$(esc "${name}")</td><td class=\"${cls}\">$(esc "${state}")</td><td>$(esc "${detail}")</td></tr>"
@@ -64,7 +68,11 @@ if [[ -s "${cap}" ]]; then
 fi
 
 obs_rows=""
-while IFS=$'\t' read -r n v u src; do
+while IFS= read -r observation_line; do
+  n="$(printf '%s' "${observation_line}" | awk -F'\t' '{print $1}')"
+  v="$(printf '%s' "${observation_line}" | awk -F'\t' '{print $2}')"
+  u="$(printf '%s' "${observation_line}" | awk -F'\t' '{print $3}')"
+  src="$(printf '%s' "${observation_line}" | awk -F'\t' '{print $4}')"
   [[ -z "${n}" ]] && continue
   obs_rows+="<tr><td>$(esc "${n}")</td><td class=\"num\">$(esc "${v}")</td><td>$(esc "${u}")</td><td class=\"path\">$(esc "${src}")</td></tr>"
 done < <(jqd -r '.observations[]? | [.name, (.value|tostring), (.unit // ""), (.source // "")] | @tsv' < "${facts}" 2>/dev/null || true)

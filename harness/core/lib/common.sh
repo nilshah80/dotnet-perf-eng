@@ -113,6 +113,10 @@ if [[ -n "${lab_config}" ]]; then
   export PERFLAB_CONFIG="${lab_config}"
   # shellcheck disable=SC1091
   source "${script_lib_dir}/lab-context.sh"
+  # Ownership and lease rules depend on the resolved target, so they load
+  # after lab-context has decided local vs remote.
+  # shellcheck disable=SC1091
+  source "${script_lib_dir}/target-lifecycle.sh"
 fi
 
 require_loadgen() {
@@ -266,6 +270,32 @@ run_lab_dependency_hook() {
   bash "${hook}" "${artifact_dir}" && return 0
   echo "WARNING: lab dependency hook ${dep}/${phase} failed; its evidence is MISSING, not empty." >&2
   return 1
+}
+
+# read_fields <expected-count> -- fill TSV_FIELDS from one-field-per-line stdin.
+#
+# `IFS=$'\t' read -r a b c` is wrong for TSV whose fields may be empty: bash
+# treats tab as IFS WHITESPACE, so consecutive tabs collapse into one delimiter
+# and every field after an empty one shifts left. A GET workload has an empty
+# body, so this silently rebuilt the replay envelope out of the wrong values --
+# `body=true`, `dataset=64`, `conns=''` -- and the diagnostic replayed a
+# workload that was never measured.
+#
+# Emit one field per line instead (jq: `.[] | tostring`) and read them
+# positionally. An unexpected count is a refusal, not a best-effort parse,
+# because a short read is exactly what the collapse used to produce.
+TSV_FIELDS=()
+read_fields() {
+  local expected="${1:?read_fields <expected-count>}" line
+  TSV_FIELDS=()
+  while IFS= read -r line; do
+    TSV_FIELDS+=("${line}")
+  done
+  if [[ "${#TSV_FIELDS[@]}" -ne "${expected}" ]]; then
+    echo "Expected ${expected} fields, received ${#TSV_FIELDS[@]}; refusing to continue with a misaligned record." >&2
+    return 1
+  fi
+  return 0
 }
 
 # diag_target <app-service> -> process identity from PERFLAB_DIAG_TARGETS.

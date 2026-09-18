@@ -120,6 +120,10 @@ services:
       # measurement and instantly truncates the Loki budget. Turn it on for a
       # low-rate investigation: PERFLAB_REQUEST_LOGGING=Information.
       Logging__LogLevel__Microsoft.AspNetCore.Hosting.Diagnostics: ${PERFLAB_REQUEST_LOGGING:-Warning}
+      # HttpLogging is the category the middleware actually writes to; the
+      # Hosting.Diagnostics level above does not enable per-request records.
+      Logging__LogLevel__Microsoft.AspNetCore.HttpLogging: ${PERFLAB_REQUEST_LOGGING:-Warning}
+      PERFLAB_REQUEST_LOGGING: ${PERFLAB_REQUEST_LOGGING:-Warning}
       PERFLAB_CONTINUOUS_PROFILING: ${PERFLAB_CONTINUOUS_PROFILING:-0}
       PERFLAB_PROFILING_TYPES: ${PERFLAB_PROFILING_TYPES:-cpu}
       PERFLAB_PROFILING_KEEP_TIERING: ${PERFLAB_PROFILING_KEEP_TIERING:-0}

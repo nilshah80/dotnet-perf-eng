@@ -127,9 +127,10 @@ remote_telemetry_json=false; [[ "${remote_telemetry:-0}" == "1" ]] && remote_tel
 continuous_profiling_json=false; [[ "${continuous_profiling:-0}" == "1" ]] && continuous_profiling_json=true
 profiling_keep_tiering_json=false
 [[ "${continuous_profiling:-0}" == "1" && "${profiling_keep_tiering:-0}" == "1" ]] && profiling_keep_tiering_json=true
-printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","mode":"measure","target":"%s","remoteTelemetry":%s,"continuousProfiling":%s,"profilingKeepTiering":%s,"profilingPolicy":"%s","profilingTypes":"%s","profilingPreflight":"analysis/profiling-preflight.json","workload":{"loadGenerator":"%s","baseUrl":"%s","readyUrl":"%s","method":"%s","path":"%s","body":"%s","datasetIdentity":"%s","durationSeconds":%s,"requestedDurationSeconds":%s,"connections":%s,"profile":"%s"},"startedAt":"%s","startedEpoch":%s,"source":{"gitRevision":"%s"}%s%s}\n' \
+printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","mode":"measure","target":"%s","remoteTelemetry":%s,"continuousProfiling":%s,"profilingKeepTiering":%s,"profilingPolicy":"%s","profilingTypes":"%s","traceSampler":"%s","traceSamplerArg":"%s","profilingPreflight":"analysis/profiling-preflight.json","workload":{"loadGenerator":"%s","baseUrl":"%s","readyUrl":"%s","method":"%s","path":"%s","body":"%s","datasetIdentity":"%s","durationSeconds":%s,"requestedDurationSeconds":%s,"connections":%s,"profile":"%s"},"startedAt":"%s","startedEpoch":%s,"source":{"gitRevision":"%s"}%s%s}\n' \
   "$(json_escape "${package_run_id}")" "$(json_escape "${telemetry_run_id}")" "$(json_escape "${scenario_id}")" "$(json_escape "${target_mode}")" "${remote_telemetry_json}" "${continuous_profiling_json}" "${profiling_keep_tiering_json}" \
   "$(json_escape "${PERFLAB_PROFILING_POLICY}")" "$(json_escape "${PERFLAB_PROFILING_TYPES}")" \
+  "$(json_escape "${PERFLAB_TRACE_SAMPLER:-parentbased_traceidratio}")" "$(json_escape "${PERFLAB_TRACE_SAMPLE_RATIO:-0.25}")" \
   "$(json_escape "${load_generator}")" "$(json_escape "${base_url}")" "$(json_escape "${ready_url}")" "$(json_escape "${method}")" "$(json_escape "${path}")" "$(json_escape "${body}")" "$(json_escape "${dataset_identity}")" \
   "${effective_duration}" "${duration_seconds}" "${connections}" "$(json_escape "${load_profile}")" "$(json_escape "${started_at}")" "${started_epoch}" \
   "$(json_escape "${git_revision}")" "${suite_field}" "${fault_field}" \
@@ -185,6 +186,36 @@ if [[ "${target_mode}" == "remote" ]]; then
       exit 1
     fi
   fi
+elif [[ "${target_owned}" != "1" ]]; then
+  # C-5. A LOCAL target this run did not create: an already-running process or
+  # container the operator points us at. Previously every non-remote target went
+  # down the Compose path and then hit the ownership guard, so `existing-process`
+  # could only ever REFUSE -- the guard existed but the capability it was meant
+  # to make safe did not. Attach-only is the whole point: measure and diagnose
+  # without deploying, resetting or stopping anything.
+  echo "Attaching to an existing ${target_kind} for ${scenario_id} (${telemetry_run_id}) -- no deploy, no reset, no teardown."
+  performance_target_preflight "${target_kind}" attach measure || {
+    echo "attach-only target refused measurement" >&2
+    exit 1
+  }
+  # We did not start it, so we cannot assume it is up. Fail closed rather than
+  # measure a target that is not serving: the numbers would be a readiness
+  # failure wearing a latency result.
+  if ! curl -fsS --max-time 10 "${ready_url}" >/dev/null 2>&1; then
+    echo "ERROR: ${ready_url} is not ready and this run did not start the target, so it cannot bring it up." >&2
+    echo "  Start the process or container yourself, or use PERFLAB_TARGET_KIND=managed-compose to let the harness own it." >&2
+    exit 1
+  fi
+  # Dependency state is NOT ours to reset, and that must travel with the
+  # evidence: a comparison against a managed run happened over a dataset this
+  # run neither prepared nor fingerprinted, and reading the two as equivalent is
+  # the mistake the record exists to prevent.
+  data_state_dir="${artifact_dir}/data"
+  mkdir -p "${data_state_dir}"
+  printf '{"datasetIdentity":"%s","seedScale":"%s","dependencies":"%s","resetAt":null,"resetFailures":0,"interruptionRecovered":false,"owned":false,"reason":"attach-only target (%s): dependency state belongs to whoever created it"}\n' \
+    "$(json_escape "unowned:${target_kind}")" "$(json_escape "${SEED_SCALE:-unknown}")" \
+    "$(json_escape "${dependencies}")" "$(json_escape "${target_kind}")" > "${data_state_dir}/dataset.json"
+  export PERFLAB_CAPTURE_INCOMPLETE=1
 else
   echo "Starting local stack for ${scenario_id} (${telemetry_run_id})..."
   performance_target_preflight managed-compose managed deploy || {
@@ -192,15 +223,95 @@ else
     exit 1
   }
   # Free the shared host ports first: other labs bind the same 8080/5432/etc.
+  require_target_ownership "start and rebuild the application stack" || exit 1
   stop_conflicting_lab_stacks
   # shellcheck disable=SC2086
   compose up -d --build ${app_services}
   wait_for_api
 
-  # Dependency resets so the run is scenario-scoped.
+  # C-6. Dependency resets so the run is scenario-scoped. Three properties the
+  # previous loop did not have:
+  #
+  #  - OWNERSHIP: a reset truncates state. Against a target this run did not
+  #    create, that is somebody else's data.
+  #  - INTERRUPTION RECOVERY: a run killed between reset and measurement leaves
+  #    the dataset half-prepared, and the next run silently measures it. The
+  #    marker records intent BEFORE the reset, so the next run can see that the
+  #    previous one did not finish and redo the preparation rather than trust it.
+  #  - FINGERPRINT: what the data WAS is part of the measurement. Two runs over
+  #    different datasets are not comparable, and without a recorded fingerprint
+  #    that difference is invisible in the evidence.
+  require_target_ownership "reset owned dependency state" || exit 1
+  data_state_dir="${artifact_dir}/data"
+  mkdir -p "${data_state_dir}"
+  data_marker="${artifacts_root}/.dataset-preparation"
+  # Capture this BEFORE the marker is rewritten and removed below. Reading the
+  # marker after the reset always answered "no interruption", which is the one
+  # answer it can never usefully give -- the field existed but could not carry
+  # the fact it was created to record.
+  interruption_recovered=false
+  if [[ -f "${data_marker}" ]]; then
+    interruption_recovered=true
+    echo "NOTE: a previous run did not finish preparing the dataset ($(cat "${data_marker}" 2>/dev/null || echo unknown)); re-running every reset rather than measuring a half-prepared dataset." >&2
+  fi
+  printf '{"runId":"%s","startedAt":"%s"}\n' \
+    "$(json_escape "${telemetry_run_id}")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${data_marker}"
+  reset_failures=0
   for dep in ${dependencies}; do
-    "$(dependency_dir "${dep}")/reset.sh" "${artifact_dir}"
+    # Resets are idempotent by contract, so re-running after an interrupted run
+    # is safe; a FAILED reset is not, because the measurement would then run
+    # against state the run believes it cleared.
+    if ! "$(dependency_dir "${dep}")/reset.sh" "${artifact_dir}"; then
+      echo "WARNING: ${dep} reset failed; the measurement would start from state this run did not clear." >&2
+      reset_failures=$((reset_failures + 1))
+    fi
   done
+  if [[ "${reset_failures}" -gt 0 ]]; then
+    echo "Refusing to measure after ${reset_failures} failed dependency reset(s)." >&2
+    exit 1
+  fi
+  # A CONTENT fingerprint, not just the declared scale. The declaration says
+  # what was asked for; a reset that silently half-restored produces the same
+  # declaration as one that worked, so comparing two runs on the declaration
+  # alone cannot tell those apart. Each dependency that can describe its own
+  # state contributes, and the digest covers all of them together.
+  # Built as a FILE, not a shell string: `$( )` strips NUL bytes, so the record
+  # separator silently vanished and two different dependency/output splits could
+  # hash identically -- while every run printed an "ignored null byte" warning.
+  dataset_content_file="${data_state_dir}/.content"
+  : > "${dataset_content_file}"
+  dataset_fingerprint_failures=0
+  dataset_fingerprint_sources=0
+  for dep in ${dependencies}; do
+    dep_fingerprint="$(dependency_dir "${dep}")/fingerprint.sh"
+    [[ -x "${dep_fingerprint}" ]] || continue
+    dataset_fingerprint_sources=$((dataset_fingerprint_sources + 1))
+    printf '%s\n' "== ${dep}" >> "${dataset_content_file}"
+    # A fingerprint that FAILED is not an empty dataset. Swallowing the failure
+    # produced a digest over partial input and called it captured, so two runs
+    # whose fingerprints both failed hashed identically and compared as equal.
+    if ! bash "${dep_fingerprint}" >> "${dataset_content_file}" 2>/dev/null; then
+      dataset_fingerprint_failures=$((dataset_fingerprint_failures + 1))
+      echo "WARNING: ${dep} fingerprint failed; the dataset cannot be identified by content." >&2
+    fi
+  done
+  if [[ "${dataset_fingerprint_sources}" -gt 0 && "${dataset_fingerprint_failures}" -eq 0 ]]; then
+    dataset_content_sha="$({ command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } < "${dataset_content_file}" | awk '{print $1}')"
+    dataset_content_state="captured"
+  elif [[ "${dataset_fingerprint_failures}" -gt 0 ]]; then
+    dataset_content_sha=""
+    dataset_content_state="failed"
+  else
+    # No dependency could describe its state. That is "not measured", not
+    # "identical" -- recording a constant here would make every run look
+    # comparable to every other.
+    dataset_content_sha=""
+    dataset_content_state="not-captured"
+  fi
+  printf '{"datasetIdentity":"%s","seedScale":"%s","dependencies":"%s","resetAt":"%s","resetFailures":%s,"interruptionRecovered":%s,"contentFingerprint":{"captureState":"%s","sha256":"%s"}}\n' \
+    "$(json_escape "${dataset_identity}")" "$(json_escape "${SEED_SCALE:-default}")" \
+    "$(json_escape "${dependencies}")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${reset_failures}" \
+    "${interruption_recovered}" "${dataset_content_state}" "${dataset_content_sha}" > "${data_state_dir}/dataset.json"
   if [[ "${managed_partition_required}" == "1" ]]; then
     if [[ "${PERF_WRITE_ACK:-}" != "managed-reference" ]]; then
       echo "managed-reference journey requires explicit PERF_WRITE_ACK=managed-reference" >&2
@@ -210,10 +321,15 @@ else
       echo "managed-reference journey requires an explicit positive PERF_WRITE_BUDGET" >&2
       exit 1
     fi
-    bash "${harness_core_dir}/datafault/managed-reference.sh" "${telemetry_run_id}" "${base_url}"
-    export PERF_PARTITION_READY=1
+    # Arm the cleanup BEFORE the mutation, not after. Creating the partition and
+    # then registering the trap leaves a window where a failure part-way through
+    # setup -- or an interrupt during it -- exits with the partition created and
+    # nothing responsible for removing it. Cleanup is idempotent, so arming it
+    # early costs nothing when there is nothing yet to remove.
     partition_cleanup_required=1
     trap cleanup_partition INT TERM EXIT
+    bash "${harness_core_dir}/datafault/managed-reference.sh" "${telemetry_run_id}" "${base_url}"
+    export PERF_PARTITION_READY=1
   fi
 fi
 
@@ -222,6 +338,15 @@ loadgen_warmup "${artifact_dir}"
 
 if [[ "${target_mode}" == "local" && "${managed_partition_required}" == "1" ]]; then
   bash "${harness_core_dir}/datafault/managed-reference.sh" "${telemetry_run_id}" "${base_url}" reset
+fi
+
+# Dataset preparation is complete only now: the resets ran, any managed-reference
+# partition was created and reset, and warm-up finished. Clearing the marker
+# after the resets alone left an interruption during partition preparation or
+# warm-up invisible, so the next run measured a half-prepared dataset while the
+# marker promised to cover "between reset and measurement".
+if [[ -n "${data_marker:-}" ]]; then
+  rm -f "${data_marker}"
 fi
 
 # Reset cumulative-since-reset dependency statistics (pg_stat_statements, redis
@@ -430,6 +555,17 @@ if [[ "${target_mode}" == "local" || "${remote_telemetry:-0}" == "1" ]]; then
   # USE-method bottleneck classification (CPU / thread pool / GC / locks / DB pool /
   # dependency) from the captured evidence -- a reproducible "what is the bottleneck?"
   # answer next to the AI phase's. Best-effort and skippable (PERFLAB_BOTTLENECK=0).
+  # Environment drift across the run boundaries. A measurement is comparable to
+  # another only if the machine was the same machine, and the snapshots that can
+  # answer that are worthless unless something reads them.
+  "${harness_core_dir}/analyze/environment-drift.sh" "${artifact_dir}" >/dev/null 2>&1 || true
+
+  # Accepted-versus-completed reconciliation for broker-backed scenarios. An
+  # async endpoint returns 202 once it has enqueued, so HTTP metrics report
+  # success for work that may never happen; the broker evidence is the only
+  # place that shows it.
+  "${harness_core_dir}/analyze/async-reconciliation.sh" "${artifact_dir}" >/dev/null 2>&1 || true
+
   if [[ "${PERFLAB_BOTTLENECK:-1}" != "0" ]]; then
     "${harness_core_dir}/analyze/bottleneck.sh" "${artifact_dir}" || true
     # Human-readable entry point. Regenerated after runtime normalization

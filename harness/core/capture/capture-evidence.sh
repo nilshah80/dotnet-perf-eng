@@ -7,6 +7,11 @@
 set -euo pipefail
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+# performance.sh carries the selector validators used below. It is sourced here
+# rather than assumed present: the cardinality guard called a function this file
+# never had in scope, so every run died at the first metric role.
+# shellcheck disable=SC1091
+source "${harness_core_dir}/lib/performance.sh"
 
 artifact_dir="${1:?Usage: capture-evidence.sh <artifact-directory>}"
 manifest="${artifact_dir}/manifest.json"
@@ -20,12 +25,18 @@ env_continuous_profiling="${continuous_profiling:-0}"
 
 # Read the manifest fields we need in one jqd call (standalone-safe). The recorded
 # target/remoteTelemetry say what the run actually WAS and gate the backend captures.
-IFS=$'\t' read -r run_id telemetry_run_id scenario_id load_gen manifest_start_epoch manifest_target manifest_rt manifest_cp manifest_keep manifest_meas_start manifest_meas_end manifest_prior_status manifest_fault_applied manifest_fault_restored < <(
+read_fields 14 < <(
   jqd -r '[.runId,(.telemetryRunId//.runId),.scenarioId,(.workload.loadGenerator//"wrk"),(.startedEpoch//0),(.target//"local"),(.remoteTelemetry // false),(.continuousProfiling // false),(.profilingKeepTiering // false),(.measurementStartedEpoch // 0),(.measurementEndedEpoch // 0),(.status // ""),
     # (.faultApplied // "") would map a persisted `false` to "" (jq // treats false
     # like null), defeating the explicit fault-outcome guard; has() distinguishes an
     # absent key ("") from a real false ("false").
-    (if has("faultApplied") then (.faultApplied|tostring) else "" end),(if has("faultRestored") then (.faultRestored|tostring) else "" end)] | @tsv' < "${manifest}")
+    (if has("faultApplied") then (.faultApplied|tostring) else "" end),(if has("faultRestored") then (.faultRestored|tostring) else "" end)] | .[] | tostring' < "${manifest}") || exit 1
+run_id="${TSV_FIELDS[0]}"; telemetry_run_id="${TSV_FIELDS[1]}"; scenario_id="${TSV_FIELDS[2]}"
+load_gen="${TSV_FIELDS[3]}"; manifest_start_epoch="${TSV_FIELDS[4]}"; manifest_target="${TSV_FIELDS[5]}"
+manifest_rt="${TSV_FIELDS[6]}"; manifest_cp="${TSV_FIELDS[7]}"; manifest_keep="${TSV_FIELDS[8]}"
+manifest_meas_start="${TSV_FIELDS[9]}"; manifest_meas_end="${TSV_FIELDS[10]}"
+manifest_prior_status="${TSV_FIELDS[11]}"; manifest_fault_applied="${TSV_FIELDS[12]}"
+manifest_fault_restored="${TSV_FIELDS[13]}"
 manifest_target="${manifest_target:-local}"
 [[ "${manifest_rt}" == "true" ]] && manifest_rt=1 || manifest_rt=0
 [[ "${manifest_cp}" == "true" ]] && manifest_cp=1 || manifest_cp=0
@@ -177,7 +188,29 @@ capture_prometheus_range() {
     --data-urlencode "start=${start_epoch}" --data-urlencode "end=${end_epoch}" --data-urlencode "step=5" \
     "${prometheus_url}/api/v1/query_range" > "${artifact_dir}/telemetry/metrics/$1.json" \
     || { echo "WARNING: Prometheus range query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; metric_query_failures=$((metric_query_failures + 1)); state=failed; }
+  [[ "${state}" == "captured" ]] && state="$(grade_metric_role "$1")"
   record_query metrics prometheus "/api/v1/query_range" "$2" "telemetry/metrics/$1.json" "${state}"
+}
+
+# A backend answering 200 with an empty result set is NOT a captured metric: the
+# file exists, so a reader sees an artifact, but there is nothing in it. For a
+# role whose absence can only mean a broken scrape or selector, that must
+# degrade the package -- otherwise a renamed metric silently produces a green
+# run with no saturation evidence at all (D-P0-4). Conditional roles stay
+# best-effort: empty there is a fact about the workload, not the capture.
+grade_metric_role() { # grade_metric_role <role>
+  local role="$1" file="${artifact_dir}/telemetry/metrics/$1.json" series
+  series="$(jqd -r '(.data.result // []) | length' < "${file}" 2>/dev/null || echo 0)"
+  [[ "${series}" =~ ^[0-9]+$ ]] || series=0
+  if [[ "${series}" -gt 0 ]]; then printf 'captured'; return 0; fi
+  case " ${PERFLAB_REQUIRED_METRIC_ROLES:-} " in
+    *" ${role} "*)
+      echo "WARNING: required metric role '${role}' returned no series; the scrape, selector or instrumentation is broken -- this is not an idle process." >&2
+      capture_incomplete=1
+      printf 'empty-required'
+      ;;
+    *) printf 'empty' ;;
+  esac
 }
 
 # Application (<app_metric_prefix>_*) metrics: the app's own instrumentation,
@@ -191,11 +224,28 @@ if [[ "${target_mode}" == "remote" ]]; then
   capture_prometheus_range scenario_executions "${app_metric_prefix}_scenario_executions_total{${prom_run_id_matcher}}"
   capture_prometheus_range application_metrics "{__name__=~\"${app_metric_prefix}_.*\"${prom_run_id_selector}}"
   capture_prometheus_range service_instances "target_info{${prom_run_id_matcher}}"
+
 else
   capture_prometheus_query scenario_executions "${app_metric_prefix}_scenario_executions_total{${prom_run_id_matcher}}"
   capture_prometheus_query application_metrics "{__name__=~\"${app_metric_prefix}_.*\"${prom_run_id_selector}}"
   capture_prometheus_query service_instances "target_info{${prom_run_id_matcher}}"
 fi
+# D-P0-9: telemetry-loss accounting, for BOTH the local and remote paths. Every
+# other signal in this package is read THROUGH the collector, so a silent drop
+# there makes an incomplete capture look complete -- the failure the capture
+# states exist to prevent, one layer below where they can see it. The exporter
+# queue is configured at 64, which is small for a 128-connection scenario, so
+# drops are a live possibility rather than a theoretical one, and the local labs
+# push the same volume through the same collector as a remote tier would.
+# Window-scoped and best-effort: a collector that exposes no internal telemetry
+# is a gap in observability of the pipeline, not a failed measurement.
+capture_prometheus_range telemetry_export_failures \
+  "sum by (exporter) (rate(otelcol_exporter_send_failed_spans_total[1m])) or sum by (exporter) (rate(otelcol_exporter_send_failed_metric_points_total[1m])) or sum by (exporter) (rate(otelcol_exporter_send_failed_log_records_total[1m]))"
+capture_prometheus_range telemetry_queue_utilization \
+  "otelcol_exporter_queue_size / clamp_min(otelcol_exporter_queue_capacity, 1)"
+capture_prometheus_range telemetry_refused \
+  "sum by (receiver) (rate(otelcol_receiver_refused_spans_total[1m])) or sum by (receiver) (rate(otelcol_receiver_refused_metric_points_total[1m]))"
+
 # (No separate <prefix>_pool_* probe: neither lab exports app-level pool metrics,
 # so it only ever produced an empty result[] file. The application_metrics query
 # above already captures any <prefix>_pool_* series if a lab adds them, and the
@@ -231,6 +281,9 @@ if [[ -f "${metrics_map}" ]]; then
   source "${metrics_map}"
   for entry in "${PERFLAB_METRIC_ROLES[@]}"; do
     IFS='|' read -r m_file m_type m_promql <<< "${entry}"
+    # Reject before issuing: a selector with unbounded cardinality must not be
+    # run and then regretted -- the series it creates outlive the run.
+    performance_reject_unbounded_labels "${m_file}" "${m_promql}" || exit 1
     q="${m_promql//\$JOB/${prom_job_regex}}"
     q="${q//\$RUN_ID/${telemetry_run_id}}"
     q="${q//\$SERVICE_INSTANCE/${service_instance_regex}}"

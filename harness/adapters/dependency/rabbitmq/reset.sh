@@ -19,4 +19,10 @@ curl -fsS --max-time 15 "${rabbit_metrics_url}" 2>/dev/null \
   | grep -E '^rabbitmq_(connections|channels)' \
   > "${artifact_dir}/dependencies/rabbitmq-broker-metrics-preload.txt" || true
 
+# The per-queue message_stats baseline is NOT taken here. This runs before
+# warm-up, and warm-up publishes real traffic -- a baseline taken now makes the
+# reconciliation count warm-up work as measured work, while the HTTP side counts
+# the measure phase alone. It is taken in reset-stats.sh, after warm-up, with
+# the other cumulative counters that exist for exactly this reason.
+
 run_lab_dependency_hook rabbitmq reset "${artifact_dir}"

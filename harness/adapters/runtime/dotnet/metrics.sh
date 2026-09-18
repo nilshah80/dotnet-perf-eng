@@ -32,6 +32,15 @@
 # several dead instances alongside the live one, and any cross-instance
 # aggregation is wrong. Scoping to the correlated instance keeps each file to the
 # process this run actually measured.
+# Roles whose ABSENCE is a capture failure rather than a property of the
+# workload. Under any load a .NET process has CPU, a working set, a GC heap, a
+# thread pool and served requests -- an empty series for one of these means the
+# scrape, the selector or the instrumentation broke, not that the process was
+# idle. Everything else is conditional: database_pool_metrics is legitimately
+# empty for a scenario that never touches the database, and calling that
+# "missing evidence" would mark a correct package incomplete.
+PERFLAB_REQUIRED_METRIC_ROLES="process_cpu working_set gc_heap thread_pool_queue request_duration"
+
 PERFLAB_METRIC_ROLES=(
   'process_cpu|range|rate(dotnet_process_cpu_time_seconds_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[1m])'
   'working_set|range|dotnet_process_memory_working_set_bytes{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'

@@ -87,7 +87,12 @@ if awk -v value="${journey_failed}" 'BEGIN { exit !((value + 0) > 0) }'; then
 fi
 if [[ -s "${slos_file}" ]]; then
   echo "Absolute SLOs:"
-  while IFS=$'\t' read -r metric op thr; do
+  # Three fields: a missing operator would shift the threshold into its place
+  # and gate on a comparison nobody wrote.
+  while IFS= read -r gate_line; do
+    metric="$(printf '%s' "${gate_line}" | awk -F'\t' '{print $1}')"
+    op="$(printf '%s' "${gate_line}" | awk -F'\t' '{print $2}')"
+    thr="$(printf '%s' "${gate_line}" | awk -F'\t' '{print $3}')"
     [[ -n "${metric}" ]] || continue
     # An unknown operator is a config error, not a pass -- fail it.
     if [[ "${op}" != "max" && "${op}" != "min" ]]; then

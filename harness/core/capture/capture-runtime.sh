@@ -63,6 +63,21 @@ if [[ "${dump_requested}" == "1" && "${PERFLAB_DUMP_ACK:-}" != "i-understand-sen
   exit 1
 fi
 
+# The disk check and budget applied only to CAMPAIGNS. A direct `dump` writes a
+# full-heap process dump -- the largest artifact this harness produces -- with no
+# budget and no free-space check at all, so the one capture most able to fill a
+# disk was the one least protected.
+if [[ "${capture_mode}" != "preset" ]]; then
+  direct_budget="${PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES:-1073741824}"
+  case "${direct_budget}" in ''|*[!0-9]*) echo "PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES must be an integer." >&2; exit 1 ;; esac
+  direct_available_kib="$(df -Pk "${artifact_dir}" | awk 'NR==2 {print $4}')"
+  (( direct_available_kib * 1024 >= direct_budget )) || {
+    echo "Insufficient free disk for the ${direct_budget}-byte diagnostic artifact budget." >&2
+    exit 1
+  }
+  export PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES="${direct_budget}"
+fi
+
 if [[ "${capture_mode}" == "preset" ]]; then
   campaign_budget="${PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES:-1073741824}"
   case "${campaign_budget}" in ''|*[!0-9]*) echo "PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES must be an integer." >&2; exit 1 ;; esac
@@ -77,8 +92,32 @@ if [[ "${capture_mode}" == "preset" ]]; then
   export PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES="${campaign_budget}"
 fi
 
-IFS=$'\t' read -r scenario_id telemetry_run_id manifest_generator manifest_target manifest_base_url manifest_ready_url manifest_method manifest_path manifest_body manifest_body_recorded manifest_dataset manifest_conns < <(
-  jqd -r '[.scenarioId,(.telemetryRunId//.runId),(.workload.loadGenerator//"wrk"),(.target//"local"),(.workload.baseUrl//""),(.workload.readyUrl//""),(.workload.method//""),(.workload.path//""),(.workload.body//""),(if (.workload|has("body")) then "true" else "false" end),(.workload.datasetIdentity//""),(.workload.connections//"")] | @tsv' < "${manifest}")
+# Read one field per line, NOT `IFS=$'\t' read`. Bash treats tab as IFS
+# WHITESPACE, so consecutive tabs collapse into a single delimiter: a workload
+# with an empty body -- every GET scenario -- shifted every later field left by
+# one, and the replay envelope was built from `body=true`, `dataset=64`,
+# `conns=''`. The diagnostic then replayed a different workload than the one
+# measured, which is precisely what the recorded envelope exists to prevent.
+manifest_fields=()
+while IFS= read -r manifest_field; do
+  manifest_fields+=("${manifest_field}")
+done < <(jqd -r '[.scenarioId,(.telemetryRunId//.runId),(.workload.loadGenerator//"wrk"),(.target//"local"),(.workload.baseUrl//""),(.workload.readyUrl//""),(.workload.method//""),(.workload.path//""),(.workload.body//""),(if (.workload|has("body")) then "true" else "false" end),(.workload.datasetIdentity//""),(.workload.connections//"")] | .[] | tostring' < "${manifest}")
+if [[ "${#manifest_fields[@]}" -ne 12 ]]; then
+  echo "Manifest workload envelope has ${#manifest_fields[@]} fields, expected 12; refusing to replay a workload this run cannot reconstruct." >&2
+  exit 1
+fi
+scenario_id="${manifest_fields[0]}"
+telemetry_run_id="${manifest_fields[1]}"
+manifest_generator="${manifest_fields[2]}"
+manifest_target="${manifest_fields[3]}"
+manifest_base_url="${manifest_fields[4]}"
+manifest_ready_url="${manifest_fields[5]}"
+manifest_method="${manifest_fields[6]}"
+manifest_path="${manifest_fields[7]}"
+manifest_body="${manifest_fields[8]}"
+manifest_body_recorded="${manifest_fields[9]}"
+manifest_dataset="${manifest_fields[10]}"
+manifest_conns="${manifest_fields[11]}"
 # Bind the readiness check to the endpoint that was MEASURED, so a re-run does not
 # probe the current lab default (e.g. localhost) while loading the remote target.
 [[ -n "${manifest_ready_url}" ]] && ready_url="${manifest_ready_url}"
@@ -117,8 +156,10 @@ if [[ "${capture_mode}" == "preset" && "${requested_preset}" != "dump" ]]; then
   fi
   facts_file="${artifact_dir}/facts.json"
   [[ -s "${facts_file}" ]] || { echo "A diagnostic campaign requires the source measurement facts.json." >&2; exit 1; }
-  IFS=$'\t' read -r source_compat_generator source_compat_fingerprint source_compat_content source_compat_config < <(
-    jqd -r '[.compatibility.generator//"",.compatibility.generatorFingerprint//"",.compatibility.workloadContentHash//"",.compatibility.configurationHash//""] | @tsv' < "${facts_file}")
+  read_fields 4 < <(
+    jqd -r '[.compatibility.generator//"",.compatibility.generatorFingerprint//"",.compatibility.workloadContentHash//"",.compatibility.configurationHash//""] | .[] | tostring' < "${facts_file}") || exit 1
+  source_compat_generator="${TSV_FIELDS[0]}"; source_compat_fingerprint="${TSV_FIELDS[1]}"
+  source_compat_content="${TSV_FIELDS[2]}"; source_compat_config="${TSV_FIELDS[3]}"
   if [[ "${source_compat_generator}" != "${manifest_generator}" || -z "${source_compat_fingerprint}" || ! "${source_compat_content}" =~ ^[a-f0-9]{64}$ || ! "${source_compat_config}" =~ ^[a-f0-9]{64}$ ]]; then
     echo "The source measurement lacks a valid ${manifest_generator} generator/workload/configuration compatibility envelope. Create a fresh measurement." >&2
     exit 1
@@ -207,12 +248,27 @@ if [[ "${target_mode}" == "remote" ]]; then
       exit 1
     fi
   fi
+elif [[ "${PERFLAB_TARGET_KIND:-managed-compose}" != "managed-compose" ]]; then
+  # C-5. Attach-only: the target was not created by this run, so recreating it
+  # would restart somebody else's process. The capture still happens -- it just
+  # observes the process as found, and records that it did, because a diagnose
+  # run that did NOT start from a clean process is a different measurement and
+  # the reader has to know which one they have.
+  echo "Attaching to an existing ${PERFLAB_TARGET_KIND} target for ${scenario_id} (not recreated; leaks and pools from prior traffic are still present)."
+  wait_for_api
 else
   echo "Recreating app in diagnose mode for ${scenario_id}..."
+  require_target_ownership "recreate the application for a diagnostic capture" || exit 1
   # shellcheck disable=SC2086
   compose up -d --force-recreate ${app_services}
   wait_for_api
 fi
+
+# A diagnostic perturbs the process, so only one may run against a given target
+# at a time. Keyed on the target identity rather than the run id: two different
+# runs pointed at the same process must still collide.
+acquire_diagnostic_lease "${PERFLAB_LAB:-lab}/${target}/${diagnostics_url}" || exit 1
+trap 'release_diagnostic_lease' EXIT INT TERM
 
 capture="${runtime_adapter_dir}/capture.sh"
 if [[ ! -f "${capture}" ]]; then
@@ -249,10 +305,18 @@ if [[ "${capture_mode}" == "preset" && "${requested_preset}" != "dump" ]]; then
   replay_verification_reason="diagnostic load did not publish a compatibility envelope"
   diagnostic_compat="${artifact_dir}/runtime/campaign-load/benchmark/compatibility.json"
   if [[ -s "${diagnostic_compat}" ]]; then
-    IFS=$'\t' read -r diagnostic_generator diagnostic_fingerprint diagnostic_content diagnostic_base diagnostic_connections diagnostic_scenario diagnostic_method diagnostic_path < <(
-      jqd -r '[.generator//"",.generatorFingerprint//"",.workloadContentHash//"",(.baseUrl//""|sub("/+$";"")),(.connections//""|tostring),.scenario//"",.method//"",.path//""] | @tsv' < "${diagnostic_compat}")
-    IFS=$'\t' read -r source_generator source_fingerprint source_content source_base source_connections source_scenario source_method source_path < <(
-      jqd -r '[.compatibility.generator//"",.compatibility.generatorFingerprint//"",.compatibility.workloadContentHash//"",(.compatibility.baseUrl//""|sub("/+$";"")),(.compatibility.connections//""|tostring),.compatibility.scenario//"",.compatibility.method//"",.compatibility.path//""] | @tsv' < "${artifact_dir}/facts.json")
+    read_fields 8 < <(
+      jqd -r '[.generator//"",.generatorFingerprint//"",.workloadContentHash//"",(.baseUrl//""|sub("/+$";"")),(.connections//""|tostring),.scenario//"",.method//"",.path//""] | .[] | tostring' < "${diagnostic_compat}") || exit 1
+    diagnostic_generator="${TSV_FIELDS[0]}"; diagnostic_fingerprint="${TSV_FIELDS[1]}"
+    diagnostic_content="${TSV_FIELDS[2]}"; diagnostic_base="${TSV_FIELDS[3]}"
+    diagnostic_connections="${TSV_FIELDS[4]}"; diagnostic_scenario="${TSV_FIELDS[5]}"
+    diagnostic_method="${TSV_FIELDS[6]}"; diagnostic_path="${TSV_FIELDS[7]}"
+    read_fields 8 < <(
+      jqd -r '[.compatibility.generator//"",.compatibility.generatorFingerprint//"",.compatibility.workloadContentHash//"",(.compatibility.baseUrl//""|sub("/+$";"")),(.compatibility.connections//""|tostring),.compatibility.scenario//"",.compatibility.method//"",.compatibility.path//""] | .[] | tostring' < "${artifact_dir}/facts.json") || exit 1
+    source_generator="${TSV_FIELDS[0]}"; source_fingerprint="${TSV_FIELDS[1]}"
+    source_content="${TSV_FIELDS[2]}"; source_base="${TSV_FIELDS[3]}"
+    source_connections="${TSV_FIELDS[4]}"; source_scenario="${TSV_FIELDS[5]}"
+    source_method="${TSV_FIELDS[6]}"; source_path="${TSV_FIELDS[7]}"
     if [[ "${diagnostic_generator}" == "${source_generator}" && "${diagnostic_fingerprint}" == "${source_fingerprint}" && \
           "${diagnostic_content}" == "${source_content}" && "${diagnostic_base}" == "${source_base}" && \
           "${diagnostic_connections}" == "${source_connections}" && "${diagnostic_scenario}" == "${source_scenario}" && \

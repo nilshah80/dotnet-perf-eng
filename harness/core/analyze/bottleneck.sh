@@ -90,6 +90,33 @@ dbpool_worst() { # -> "usedPeak\tmaxCfg\tpendingPeak" of the most-saturated pool
     | "\(.used)\t\(.maxc)\t\(.pend)"' < "${f}" 2>/dev/null | head -1
 }
 
+# Upstream (HttpClient) connection pool. The exact analogue of dbpool_worst for
+# the other pooled resource a request can block on: http_client_request_time_in_queue
+# is literally "how long this request waited for a connection", so it needs no
+# inference from depth the way the thread-pool queue does.
+#
+# Ranked by mean wait, which also selects the right pool: the app's own telemetry
+# exporter is an HttpClient too, and a run must not be diagnosed on the OTLP
+# client's idle connections instead of the dependency the workload calls.
+upstream_worst() { # -> "meanWaitSeconds\tactiveRequestsPeak\topenConnectionsPeak\tpool"
+  local f="${mdir}/http_client_metrics.json"; [[ -s "${f}" ]] || return 0
+  jqd -r '
+    [ .data.result[]?
+      | { pool: (.metric.server_address // .metric.http_client_connection_pool_name // "default"),
+          nm:   (.metric.__name__ // ""),
+          st:   (.metric.http_connection_state // ""),
+          peak: ([ (.values // (if .value then [.value] else [] end))[] | .[1]|tonumber ] | if length==0 then 0 else max end) } ]
+    | group_by(.pool)
+    | map({ pool: .[0].pool,
+            qsum: ([ .[] | select(.nm=="http_client_request_time_in_queue_seconds_sum") | .peak ] | add // 0),
+            qcnt: ([ .[] | select(.nm=="http_client_request_time_in_queue_seconds_count") | .peak ] | add // 0),
+            act:  ([ .[] | select(.nm=="http_client_active_requests") | .peak ] | max // 0),
+            conn: ([ .[] | select(.nm=="http_client_open_connections") | .peak ] | add // 0) })
+    | map(. + {wait: (if .qcnt>0 then .qsum/.qcnt else 0 end)})
+    | (sort_by(.wait) | last) // {wait:0,act:0,conn:0,pool:"none"}
+    | "\(.wait)\t\(.act)\t\(.conn)\t\(.pool)"' < "${f}" 2>/dev/null | head -1
+}
+
 cpu_busy_peak="$(mstat_sum process_cpu max)"
 cpu_count="$(mstat cpu_count last)"; [[ -z "${cpu_count}" ]] && cpu_count="$(mstat cpu_count max)"
 tpq_peak="$(mstat thread_pool_queue max)"; tpq_avg="$(mstat thread_pool_queue avg)"
@@ -98,7 +125,19 @@ gc_pause_peak="$(mstat gc_pause max)"
 alloc_rate_peak="$(mstat gc_allocation_rate max)"
 lock_rate_peak="$(mstat lock_contention max)"
 db_used_peak=""; db_max=""; db_pending_peak=""
-IFS=$'\t' read -r db_used_peak db_max db_pending_peak < <(dbpool_worst)
+# `read` returns non-zero at EOF, so an absent or empty database_pool_metrics.json
+# (no database in this lab, or a failed Prometheus query) would abort the whole
+# classifier under `set -e` -- exit 1, no message, no verdict at all. A signal
+# that was not captured must degrade that ONE dimension to "not captured", not
+# destroy the diagnosis of every other resource.
+if read_fields 3 < <(dbpool_worst | tr '\t' '\n'); then
+  db_used_peak="${TSV_FIELDS[0]}"; db_max="${TSV_FIELDS[1]}"; db_pending_peak="${TSV_FIELDS[2]}"
+fi
+up_wait=""; up_active=""; up_conns=""; up_pool=""
+if read_fields 4 < <(upstream_worst | tr '\t' '\n'); then
+  up_wait="${TSV_FIELDS[0]}"; up_active="${TSV_FIELDS[1]}"
+  up_conns="${TSV_FIELDS[2]}"; up_pool="${TSV_FIELDS[3]}"
+fi
 
 # Managed-heap RETENTION. A leak is not a latency bottleneck, so it must never
 # compete for the primary verdict -- but a package whose heap grew by orders of
@@ -123,6 +162,8 @@ json="$(awk \
   -v tpqpeak="$(d "${tpq_peak}")" -v tpqavg="$(d "${tpq_avg}")" -v threadpeak="$(d "${thread_peak}")" \
   -v gcpause="$(d "${gc_pause_peak}")" -v allocrate="$(d "${alloc_rate_peak}")" -v lockrate="$(d "${lock_rate_peak}")" \
   -v dbpending="$(d "${db_pending_peak}")" -v dbused="$(d "${db_used_peak}")" -v dbmax="$(d "${db_max}")" \
+  -v upwait="$(d "${up_wait}")" -v upactive="$(d "${up_active}")" -v upconns="$(d "${up_conns}")" -v uppool="${up_pool:-}" \
+  -v UP_WAIT_SAT="${PERFLAB_USE_UPSTREAM_WAIT_SAT:-0.05}" \
   -v CPU_SAT="${PERFLAB_USE_CPU_SAT:-0.85}" -v TPQ_SAT="${PERFLAB_USE_TPQ_SAT:-2}" \
   -v TPQ_WAIT_SAT="${PERFLAB_USE_TPQ_WAIT_SAT:-0.05}" -v RETAIN_SAT="${PERFLAB_USE_RETAIN_SAT:-0.25}" \
   -v retaingrowth="$(d "${retain_growth}")" \
@@ -157,6 +198,12 @@ json="$(awk \
      dep_dom  = (db_share>=0 && db_share>=DEP_SHARE);
      # Retention is captured but deliberately NOT a candidate (see notes below).
      retain_sat = (has(retaingrowth) && retaingrowth+0>=RETAIN_SAT);
+     # Upstream connection pool. Unlike the thread-pool queue this needs no
+     # depth/throughput inference: the runtime reports the wait directly, so the
+     # gate is the wait itself. Same 50 ms threshold, for the same reason -- a
+     # few milliseconds of connection acquisition is normal pooling.
+     up_sat = (has(upwait) && upwait+0>=UP_WAIT_SAT);
+     up_share = (has(upwait) && has(p50) && p50+0>0) ? (upwait+0)/((p50+0)/1000) : -1;
 
      # ----- rank candidates. Saturation signals outweigh mere utilisation/shares;
      # among shares, the largest slice of the request wins. Score in [0,~2]. -----
@@ -166,6 +213,11 @@ json="$(awk \
      # starvation, threads parked not busy) when CPU is NOT saturated. When CPU is also
      # saturated the queue is a SYMPTOM of CPU starvation, so cpu-bound must win -- do not
      # add a competing threadpool-starved candidate whose queue score would overpower it.
+     # A thread-pool queue behind a saturated upstream pool is a SYMPTOM: the
+     # threads are waiting on connection acquisition, not starved by blocking
+     # work of their own. Scored above threadpool-starved so the measured wait
+     # wins over the queue that the wait produced.
+     if (up_sat){ cand[++n]="upstream-pool-saturated"; sc[n]=1.45 + (upwait+0) }
      if (tpq_sat && !cpu_sat){ cand[++n]="threadpool-starved"; sc[n]=1.3 + (tpqpeak+0)/100 }
      if (lock_sat){ cand[++n]="lock-bound"; sc[n]=1.2 + lock_per_req/10 }
      if (cpu_sat){ cand[++n]="cpu-bound"; sc[n]=1.0 + cpu_util }
@@ -211,31 +263,45 @@ json="$(awk \
      if (gc_sat) { nsatres++; satresjson=satresjson (nsatres>1?",":"") "\"gc\"";         satreslist=satreslist (nsatres>1?", ":"") "gc" }
      if (lock_sat){ nsatres++; satresjson=satresjson (nsatres>1?",":"") "\"locks\"";     satreslist=satreslist (nsatres>1?", ":"") "locks" }
      if (dbp_sat){ nsatres++; satresjson=satresjson (nsatres>1?",":"") "\"dbPool\"";     satreslist=satreslist (nsatres>1?", ":"") "dbPool" }
+     if (up_sat) { nsatres++; satresjson=satresjson (nsatres>1?",":"") "\"upstreamPool\""; satreslist=satreslist (nsatres>1?", ":"") "upstreamPool" }
 
      # any resource signal captured at all?
-     any = (cpu_util>=0) || has(tpqpeak) || has(gcpause) || (lock_per_req>=0) || has(dbpending) || (db_share>=0);
+     any = (cpu_util>=0) || has(tpqpeak) || has(gcpause) || (lock_per_req>=0) || has(dbpending) || (db_share>=0) || has(upwait);
      if (!any) verdict="insufficient-data";
 
      # ----- confidence -----
      if (verdict=="insufficient-data") conf="low";
-     else if (dbp_sat || tpq_sat || (cpu_util>=0.9) || (gc_sat && gcpause+0>=0.2) || lock_sat) conf="high";
+     else if (dbp_sat || tpq_sat || up_sat || (cpu_util>=0.9) || (gc_sat && gcpause+0>=0.2) || lock_sat) conf="high";
      else if (bi>0 && sc[bi]>=1.0) conf="high";
      else if (bi>0) conf="medium";
      else conf="low";
      if (status!="captured") conf="low";  # partial evidence never rates high
+     # Dropped iterations mean the GENERATOR, not the server, set the pace: the
+     # offered load was never delivered, so every server-side number describes a
+     # workload that did not happen. A note saying so was not enough -- the
+     # verdict beside it still read "high", and a reader acts on the verdict.
+     # This matches the completeness cap in PerfLab, so the two products do not
+     # disagree about how much to trust the same evidence.
+     if (has(dropped) && dropped+0>0) conf="low";
 
      # ----- notes -----
      nn=0;
      if (has(errate) && errate+0>0.01) notes[++nn]=sprintf("error_rate=%.3f -- the system is failing requests; the bottleneck reasoning is about an OVERLOADED system (see the gate).", errate+0);
      if (has(dropped) && dropped+0>0) notes[++nn]=sprintf("%d dropped iteration(s) -- offered load exceeded served throughput; capacity is already past the knee.", dropped+0);
      if (tpq_sat && cpu_sat) notes[++nn]="thread-pool queue AND CPU are both saturated -- the queue is most likely CPU starvation, not sync-over-async blocking.";
-     if (tpq_sat && !cpu_sat) notes[++nn]="thread-pool queue is high while CPU is NOT saturated -- classic sync-over-async / blocking-call starvation (threads parked, not busy).";
+     # Only when nothing else explains the queue. A saturated upstream pool
+     # already accounts for parked threads, and emitting both notes tells the
+     # reader to look for blocking calls AND for the pool limit that is the real
+     # cause -- two contradictory instructions from one report.
+     if (tpq_sat && !cpu_sat && !up_sat) notes[++nn]="thread-pool queue is high while CPU is NOT saturated -- classic sync-over-async / blocking-call starvation (threads parked, not busy).";
      if (verdict=="dependency-bound-db" && dbp_sat) notes[++nn]="most request time is DB AND the pool is saturated -- the DB dependency is the bottleneck via pool exhaustion.";
      if (verdict=="no-clear-bottleneck" && any) notes[++nn]="no resource crossed a saturation gate -- the system has headroom at this load (push RPS with a capacity profile to find the knee).";
      # Retention is reported, never ranked: a leak is a stability defect, not a
      # latency bottleneck, so it must not win the verdict -- but "nothing
      # saturated" must not be the last word when the heap grew by orders of
      # magnitude. Sourced from the in-process before/after gcdump diff.
+     if (up_sat) notes[++nn]=sprintf("~%.0f ms of a typical request is spent waiting for an upstream HTTP connection (%.0f in flight, %.0f open) -- the connection pool is the constraint, not the code behind it. Raise MaxConnectionsPerServer / SocketsHttpHandler limits, or reduce concurrency.", (upwait+0)*1000, (has(upactive)?upactive+0:0), (has(upconns)?upconns+0:0));
+     if (up_sat && tpq_sat) notes[++nn]="the thread-pool queue is behind a saturated upstream connection pool -- it is a symptom of connection waiting, not independent starvation.";
      if (retain_sat) notes[++nn]=sprintf("managed heap grew %.1f%% between the in-process before/after GC dumps -- RETENTION, not a latency bottleneck; read analysis/runtime/diff-gcdump-before-after.txt for the growing types.", (retaingrowth+0)*100);
      if (tpq_sat==0 && has(tpqpeak) && tpqpeak+0>=TPQ_SAT && tpq_wait>=0) notes[++nn]=sprintf("thread-pool queue peaked at %d but drains in ~%.1f ms at %.0f rps -- transient depth, not starvation.", tpqpeak+0, tpq_wait*1000, rps+0);
      if (nsatres>=2) notes[++nn]=sprintf("%d resources saturated at once (%s); primary bottleneck(s): %s. Address them together, not just the top-scored one; see resources.* for each.", nsatres, satreslist, primlist);
@@ -250,6 +316,7 @@ json="$(awk \
        else if (cand[bi]=="lock-bound") reason=sprintf("~%.1f Monitor lock contention(s) per request (%.0f/s peak).", lock_per_req, (has(lockrate)?lockrate+0:0));
        else if (cand[bi]=="gc-bound") reason=sprintf("the GC paused ~%.0f%% of wall-clock (peak); ~%.0f%% of a request is GC pause.", (gcpause+0)*100, (gc_share>=0?gc_share*100:0));
        else if (cand[bi]=="db-pool-saturated") reason=sprintf("%.0f request(s) peak waiting for a pooled DB connection (used %.0f/%.0f).", dbpending+0, (has(dbused)?dbused+0:0), (has(dbmax)?dbmax+0:0));
+       else if (cand[bi]=="upstream-pool-saturated") reason=sprintf("a typical request waits ~%.0f ms for an upstream HTTP connection to %s (%.0f in flight against %.0f open connection(s)).", (upwait+0)*1000, (uppool==""?"the dependency":uppool), (has(upactive)?upactive+0:0), (has(upconns)?upconns+0:0));
        else if (cand[bi]=="dependency-bound-db") reason=sprintf("~%.0f%% of a typical request is spent in the database (pool not saturated -- it is DB execution time, not pool waiting).", db_share*100);
        else reason="";
        if (concurrent) reason=sprintf("Concurrent bottlenecks (%s). Primary -> ", primlist) reason;
@@ -265,6 +332,7 @@ json="$(awk \
      printf "\"resources\":{";
      printf "\"cpu\":{\"coresBusyPeak\":%s,\"cpuCount\":%s,\"utilizationPct\":%s,\"msPerRequest\":%s,\"latencySharePct\":%s,\"saturated\":%s},", jnum(cpubusy), (has(cpucount)?sprintf("%d",cpucount+0):"null"), jpct(cpu_util), jnum(effcpu), jpct(cpu_share), (cpu_sat?"true":"false");
      printf "\"threadPool\":{\"queuePeak\":%s,\"queueAvg\":%s,\"threadCountPeak\":%s,\"queueWaitSeconds\":%s,\"saturated\":%s},", jnum(tpqpeak), jnum(tpqavg), jnum(threadpeak), (tpq_wait>=0?sprintf("%.6f",tpq_wait):"null"), (tpq_sat?"true":"false");
+     printf "\"upstreamPool\":{\"meanWaitSeconds\":%s,\"activeRequestsPeak\":%s,\"openConnectionsPeak\":%s,\"pool\":%s,\"latencySharePct\":%s,\"saturated\":%s},", jnum(upwait), jnum(upactive), jnum(upconns), (uppool==""?"null":"\"" uppool "\""), jpct(up_share), (up_sat?"true":"false");
      printf "\"retention\":{\"heapGrowthPct\":%s,\"source\":\"%s\",\"flagged\":%s},", (has(retaingrowth)?sprintf("%.1f",(retaingrowth+0)*100):"null"), (has(retaingrowth)?"analysis/runtime/diff-gcdump-before-after.txt":"not-captured"), (retain_sat?"true":"false");
      printf "\"gc\":{\"pauseFractionPeak\":%s,\"pauseMsPerRequest\":%s,\"allocBytesPerRequest\":%s,\"allocRatePeak\":%s,\"latencySharePct\":%s,\"saturated\":%s},", jnum(gcpause), jnum(effgc), jnum(effalloc), jnum(allocrate), jpct(gc_share), (gc_sat?"true":"false");
      printf "\"locks\":{\"contentionsPerSecPeak\":%s,\"contentionsPerRequest\":%s,\"saturated\":%s},", jnum(lockrate), (lock_per_req>=0?sprintf("%.3f",lock_per_req):"null"), (lock_sat?"true":"false");

@@ -15,10 +15,12 @@ candidate="${2:?compare-runs.sh <baseline> <candidate> [--threshold R]}"
 shift 2
 threshold="0.10"
 allow_gen_mismatch="false"
+allow_dataset_mismatch="false"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --threshold) threshold="${2:?--threshold needs a value}"; shift 2 ;;
     --allow-generator-mismatch) allow_gen_mismatch="true"; shift ;;
+    --allow-dataset-mismatch) allow_dataset_mismatch="true"; shift ;;
     *) echo "Unknown option '$1'." >&2; exit 1 ;;
   esac
 done
@@ -54,8 +56,15 @@ read_meta() { jqd -r '[(.scenarioId // .scenarios[0].scenarioId // ""),(.loadGen
 # above), which under `set -e` would abort the script -- the very aborted-read
 # pattern this file otherwise guards against. This warning is cosmetic; never let
 # it kill the comparison.
-IFS=$'\t' read -r a_scen a_gen a_prof < <(read_meta "${a_file}") || true
-IFS=$'\t' read -r b_scen b_gen b_prof < <(read_meta "${b_file}") || true
+# A package with no recorded profile has an empty third field, and
+# `IFS=$'\t' read` collapses it into the second -- so a profile-less baseline
+# compared as though its GENERATOR were the profile.
+if read_fields 3 < <(read_meta "${a_file}" | tr '\t' '\n'); then
+  a_scen="${TSV_FIELDS[0]}"; a_gen="${TSV_FIELDS[1]}"; a_prof="${TSV_FIELDS[2]}"
+fi
+if read_fields 3 < <(read_meta "${b_file}" | tr '\t' '\n'); then
+  b_scen="${TSV_FIELDS[0]}"; b_gen="${TSV_FIELDS[1]}"; b_prof="${TSV_FIELDS[2]}"
+fi
 # A load-generator mismatch is not just noise: wrk and k6 latency numbers are not
 # comparable at all, so refuse it outright (override with --allow-generator-mismatch).
 # Scenario/profile differences are warned about but allowed -- a user may compare
@@ -66,8 +75,15 @@ if [[ -n "${a_gen}" && -n "${b_gen}" && "${a_gen}" != "${b_gen}" && "${allow_gen
 fi
 
 read_compat() { jqd -r '[.compatibility.generatorFingerprint // "", .compatibility.workloadContentHash // "", .compatibility.configurationHash // "", .compatibility.generator // "", (.loadGenerator // .scenarios[0].loadGenerator // "")]|@tsv' < "$1" 2>/dev/null || printf '\t\t\t\t'; }
-IFS=$'\t' read -r a_fp a_content a_config a_cgen a_lgen < <(read_compat "${a_file}") || true
-IFS=$'\t' read -r b_fp b_content b_config b_cgen b_lgen < <(read_compat "${b_file}") || true
+# Five fields, several of which are legitimately empty on an older package.
+if read_fields 5 < <(read_compat "${a_file}" | tr '\t' '\n'); then
+  a_fp="${TSV_FIELDS[0]}"; a_content="${TSV_FIELDS[1]}"; a_config="${TSV_FIELDS[2]}"
+  a_cgen="${TSV_FIELDS[3]}"; a_lgen="${TSV_FIELDS[4]}"
+fi
+if read_fields 5 < <(read_compat "${b_file}" | tr '\t' '\n'); then
+  b_fp="${TSV_FIELDS[0]}"; b_content="${TSV_FIELDS[1]}"; b_config="${TSV_FIELDS[2]}"
+  b_cgen="${TSV_FIELDS[3]}"; b_lgen="${TSV_FIELDS[4]}"
+fi
 require_envelope=false
 if [[ "${a_gen}" =~ ^(jmeter|k6)$ || "${b_gen}" =~ ^(jmeter|k6)$ || "${a_cgen}" =~ ^(jmeter|k6)$ || "${b_cgen}" =~ ^(jmeter|k6)$ || "${a_lgen}" =~ ^(jmeter|k6)$ || "${b_lgen}" =~ ^(jmeter|k6)$ ]]; then
   require_envelope=true
@@ -98,6 +114,57 @@ if [[ "${a_keep}" != "${b_keep}" ]]; then
   echo "ERROR: baseline profilingKeepTiering=${a_keep} != candidate profilingKeepTiering=${b_keep}; keep-tiering changes DOTNET_TieredCompilation while the profiler is loaded. Re-run both with the same PERFLAB_PROFILING_KEEP_TIERING setting." >&2
   exit 1
 fi
+# D-P0-5 / D-P0-8. Profiling on/off and keep-tiering are already refused above,
+# but two runs can still differ in ways that change the numbers while both look
+# comparable: an all-diagnostic run carries five more profilers than a cpu-only
+# one, and a 25%-sampled trace window sees a different tail than a 100% one.
+# Comparing across either is comparing two different experiments.
+read_profiling_types() { jqd -r '(.profilingTypes // .compatibility.profilingTypes // "") | tostring' < "$1" 2>/dev/null || echo ""; }
+read_trace_sampler() { jqd -r '[(.traceSampler // ""),(.traceSamplerArg // "")] | join(":")' < "$1" 2>/dev/null || echo ""; }
+a_types="$(read_profiling_types "${a_file}")"; b_types="$(read_profiling_types "${b_file}")"
+if [[ -n "${a_types}" && -n "${b_types}" && "${a_types}" != "${b_types}" ]]; then
+  echo "ERROR: baseline profilingTypes='${a_types}' != candidate profilingTypes='${b_types}'; each additional profiler perturbs the process. Re-run both with the same PERFLAB_PROFILING_POLICY." >&2
+  exit 1
+fi
+# Dataset identity. A fingerprint nothing reads is a fact nobody uses: two runs
+# over the same declared seed scale but genuinely different data compared as
+# equal, which is the comparison the fingerprint exists to prevent. Read from
+# data/dataset.json beside the facts file, because the digest describes the run
+# rather than the observations.
+read_dataset_fingerprint() {
+  local dataset="$(dirname "$1")/data/dataset.json"
+  [[ -s "${dataset}" ]] || { printf ''; return 0; }
+  jqd -r '[(.contentFingerprint.captureState // ""), (.contentFingerprint.sha256 // "")] | join(":")' < "${dataset}" 2>/dev/null || printf ''
+}
+a_dataset="$(read_dataset_fingerprint "${a_file}")"
+b_dataset="$(read_dataset_fingerprint "${b_file}")"
+a_dataset_state="${a_dataset%%:*}"; a_dataset_sha="${a_dataset#*:}"
+b_dataset_state="${b_dataset%%:*}"; b_dataset_sha="${b_dataset#*:}"
+if [[ "${a_dataset_state}" == "captured" && "${b_dataset_state}" == "captured" \
+      && "${a_dataset_sha}" != "${b_dataset_sha}" ]]; then
+  echo "ERROR: the two runs measured different datasets (baseline ${a_dataset_sha:0:12}..., candidate ${b_dataset_sha:0:12}...); their numbers describe different data. Re-seed both to the same scale, or pass --allow-dataset-mismatch to override." >&2
+  [[ "${allow_dataset_mismatch:-false}" == "true" ]] || exit 1
+fi
+# A fingerprint that FAILED is not a legacy package. The run tried to identify
+# its dataset and could not, so the two runs cannot be shown to have measured the
+# same data -- and a warning that scrolls past is the same as no check. This is a
+# refusal, overridable by the same flag as a real mismatch, because the operator
+# is making the same judgement: proceed without knowing the data matched.
+#
+# A package predating the fingerprint is a different case: it has no state at
+# all, was captured before the field existed, and refusing it would make every
+# older baseline unusable. Those stay allowed.
+if [[ "${a_dataset_state}" == "failed" || "${b_dataset_state}" == "failed" ]]; then
+  echo "ERROR: a dataset fingerprint failed to capture (baseline='${a_dataset_state:-none}', candidate='${b_dataset_state:-none}'); the two runs cannot be shown to have measured the same data. Re-run so the dataset can be identified, or pass --allow-dataset-mismatch to compare anyway." >&2
+  [[ "${allow_dataset_mismatch:-false}" == "true" ]] || exit 1
+fi
+
+a_sampler="$(read_trace_sampler "${a_file}")"; b_sampler="$(read_trace_sampler "${b_file}")"
+if [[ "${a_sampler}" != ":" && "${b_sampler}" != ":" && "${a_sampler}" != "${b_sampler}" ]]; then
+  echo "ERROR: baseline trace sampler='${a_sampler}' != candidate='${b_sampler}'; a different sampling policy sees a different tail. Re-run both with the same PERFLAB_TRACE_SAMPLE_RATIO." >&2
+  exit 1
+fi
+
 mism=""
 [[ -n "${a_scen}" && -n "${b_scen}" && "${a_scen}" != "${b_scen}" ]] && mism+=" scenario(${a_scen} vs ${b_scen})"
 [[ -n "${a_prof}" && -n "${b_prof}" && "${a_prof}" != "${b_prof}" ]] && mism+=" profile(${a_prof} vs ${b_prof})"

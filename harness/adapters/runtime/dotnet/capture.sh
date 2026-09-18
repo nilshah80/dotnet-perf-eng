@@ -55,13 +55,156 @@ fi
 
 processes_file="${artifact_dir}/runtime/processes-diagnostic.json"
 curl -fsS "${diagnostics_url}/processes" > "${processes_file}"
-runtime_uid="$(jqd -r --arg a "${assembly_name}" \
+# D-P0-1. Selecting with `head -1` silently attached to the FIRST process whose
+# assembly matched, which is wrong the moment two replicas share an assembly:
+# protocol-reliability maps api-a and api-b to ProtocolReliability.Api, so a
+# capture requested for api-b produced api-a's trace under api-b's name. No
+# error, no warning, and every number downstream attributed to the wrong
+# process. Ambiguity must fail closed, and the identity that was actually
+# attached must be recorded so a reader can check it rather than trust it.
+runtime_uids=()
+while IFS= read -r matched_uid; do
+  [[ -n "${matched_uid}" ]] && runtime_uids+=("${matched_uid}")
+done < <(jqd -r --arg a "${assembly_name}" \
   '.[] | select(((.managedEntryPointAssemblyName // "") | contains($a)) or ((.name // "") | contains($a))) | .uid' \
-  < "${processes_file}" | head -1)"
+  < "${processes_file}")
+if [[ "${#runtime_uids[@]}" -eq 0 ]]; then
+  echo "Could not find ${assembly_name} in dotnet-monitor /processes." >&2
+  exit 1
+fi
+if [[ "${#runtime_uids[@]}" -gt 1 ]]; then
+  echo "Ambiguous diagnostic target: ${#runtime_uids[@]} processes match assembly '${assembly_name}' for service '${target}'." >&2
+  echo "  Matching uids: ${runtime_uids[*]}" >&2
+  echo "  Attaching to any of them would attribute this capture to a process that may not be '${target}'." >&2
+  echo "  Give each replica a distinct assembly name or its own dotnet-monitor endpoint (PERFLAB_DIAGNOSTICS_URL per service)." >&2
+  exit 1
+fi
+runtime_uid="${runtime_uids[0]}"
+# The pid from the LIST, kept so the detail response can be checked against the
+# entry that was actually selected.
+list_pid="$(jqd -r --arg uid "${runtime_uid}" '[.[] | select(.uid == $uid)][0].pid // ""' < "${processes_file}" 2>/dev/null || echo "")"
 if [[ -z "${runtime_uid}" || "${runtime_uid}" == "null" ]]; then
   echo "Could not find ${assembly_name} in dotnet-monitor /processes." >&2
   exit 1
 fi
+
+# Independent identity proof. The uid alone says which process dotnet-monitor
+# picked; these say WHICH process that actually is, so a wrong attach is
+# visible in the evidence instead of inferred from a service label.
+# Independent identity proof. The uid alone says which process dotnet-monitor
+# picked; these say WHICH process that actually is, so a wrong attach is visible
+# in the evidence instead of inferred from a service label.
+#
+# This reads /process?uid=, not the /processes list. The list carries only
+# pid/uid/name -- it has no command line, architecture or assembly name -- so an
+# identity built from it recorded nulls for every field that could actually
+# identify anything, while looking like a complete record. The endpoint itself is
+# part of the identity too: "the only process matching this assembly" is a claim
+# about one monitor, and two labs pointed at two sidecars both answer it.
+target_identity_file="${artifact_dir}/runtime/target-identity.json"
+target_detail_file="${artifact_dir}/runtime/process-detail.json"
+if ! curl -fsS --get --data-urlencode "uid=${runtime_uid}" "${diagnostics_url}/process" > "${target_detail_file}"; then
+  echo "Could not read process detail for uid ${runtime_uid} from ${diagnostics_url}." >&2
+  echo "  Without it the capture would be attributed to a process nothing in the evidence identifies." >&2
+  exit 1
+fi
+if ! jqd -c --arg svc "${target}" --arg asm "${assembly_name}" \
+  --arg endpoint "${diagnostics_url}" --arg run "${PERF_RUN_ID:-}" \
+  '{requestedService: $svc, expectedAssembly: $asm, uid: .uid,
+    diagnosticsEndpoint: $endpoint, runId: $run,
+    processId: .pid, name: .name,
+    managedEntryPointAssemblyName: .managedEntryPointAssemblyName,
+    commandLine: .commandLine, operatingSystem: .operatingSystem,
+    processArchitecture: .processArchitecture,
+    selection: "single-match", matchedProcesses: 1}' \
+  < "${target_detail_file}" > "${target_identity_file}"; then
+  echo "Could not record the diagnostic target identity for '${target}'." >&2
+  exit 1
+fi
+# An identity that does not name the process proves nothing. This used to be
+# written with `|| true` from the list endpoint, so a package looked complete
+# while the one artifact saying WHICH process was attached held nulls -- the same
+# absent-as-healthy failure the capture states exist to stop.
+if ! jqd -e '(.uid // "") != "" and (.processId != null) and ((.commandLine // "") != "")' \
+     < "${target_identity_file}" >/dev/null 2>&1; then
+  echo "Recorded target identity is incomplete: $(cat "${target_identity_file}" 2>/dev/null || echo '<empty>')" >&2
+  echo "  dotnet-monitor returned no pid or command line for uid ${runtime_uid}, so the attach cannot be verified." >&2
+  exit 1
+fi
+# Confirm the detail describes the SAME process the selection picked. Two calls
+# to a live monitor are two moments: a restart between them can reuse a uid or
+# renumber a pid, and checking only that the detail is populated would accept a
+# different process silently. Three things must agree -- the uid asked for, the
+# pid from the list entry, and the assembly the service maps to.
+detail_uid="$(jqd -r '.uid // ""' < "${target_identity_file}")"
+if [[ "${detail_uid}" != "${runtime_uid}" ]]; then
+  echo "Target identity mismatch: asked ${diagnostics_url}/process for uid '${runtime_uid}', got '${detail_uid}'." >&2
+  echo "  The monitor answered about a different process than the one selected." >&2
+  exit 1
+fi
+detail_pid="$(jqd -r '.processId // ""' < "${target_identity_file}")"
+if [[ -n "${list_pid}" && "${list_pid}" != "null" && "${detail_pid}" != "${list_pid}" ]]; then
+  echo "Target identity mismatch: uid ${runtime_uid} was pid ${list_pid} in /processes and pid ${detail_pid} in /process." >&2
+  echo "  The process was replaced between the two calls; attributing this capture to '${target}' would be a guess." >&2
+  exit 1
+fi
+detail_assembly="$(jqd -r '.managedEntryPointAssemblyName // ""' < "${target_identity_file}")"
+if [[ "${detail_assembly}" != *"${assembly_name}"* ]]; then
+  echo "Target identity mismatch: uid ${runtime_uid} reports assembly '${detail_assembly}', expected '${assembly_name}' for service '${target}'." >&2
+  echo "  Refusing to attribute this capture to '${target}'." >&2
+  exit 1
+fi
+
+# Container and image identity, plus a command hash. The assembly name is shared
+# by every replica of a service, so it cannot tell two of them apart; the image
+# digest and container ID can, and the command hash makes an argument change
+# visible between two runs that otherwise look identical. Best-effort: an
+# attach-only or non-container target has no compose entry, and that is recorded
+# as not-applicable rather than failing a capture that is otherwise sound.
+container_identity="{}"
+if container_row="$(compose ps --format json "${target}" 2>/dev/null | jqd -sc '(.[0] // .) | select(type == "object")' 2>/dev/null)" \
+   && [[ -n "${container_row}" && "${container_row}" != "null" ]]; then
+  container_id="$(printf '%s' "${container_row}" | jqd -r '.ID // ""' 2>/dev/null || echo "")"
+  image_ref="$(printf '%s' "${container_row}" | jqd -r '.Image // ""' 2>/dev/null || echo "")"
+  image_digest=""
+  if [[ -n "${container_id}" ]]; then
+    image_digest="$(docker inspect --format '{{.Image}}' "${container_id}" 2>/dev/null || echo "")"
+  fi
+  # A container we FOUND but cannot digest is a failure, not a partial success.
+  # The image digest is the only field that distinguishes two replicas running
+  # different builds of the same service; letting an inspect failure degrade to
+  # an empty string produced an identity that looked recorded and identified
+  # nothing -- precisely the absent-as-healthy shape these states exist to stop.
+  if [[ -z "${container_id}" || -z "${image_digest}" ]]; then
+    echo "Container identity for '${target}' is incomplete (container='${container_id:-}' digest='${image_digest:-}')." >&2
+    echo "  The target runs in a container this run can see, so its image digest is required: without it two replicas on different builds are indistinguishable in the evidence." >&2
+    exit 1
+  fi
+  container_identity="$(jqd -nc --arg cid "${container_id}" --arg image "${image_ref}" --arg digest "${image_digest}" \
+    '{containerId: $cid, image: $image, imageDigest: $digest, source: "compose-ps"}')" || {
+    echo "Could not record container identity for '${target}'." >&2
+    exit 1
+  }
+else
+  container_identity='{"source":"not-applicable","reason":"target is not a compose-managed container in this run"}'
+fi
+command_line_sha=""
+detail_command="$(jqd -r '.commandLine // ""' < "${target_identity_file}")"
+if [[ -n "${detail_command}" ]]; then
+  command_line_sha="$(printf '%s' "${detail_command}" | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } | awk '{print $1}')"
+fi
+# Merging the enrichment used to be best-effort: a failure here left the base
+# identity in place and the run continued, so the container and command hash
+# could be absent from a package that reported no problem.
+identity_tmp="${target_identity_file}.tmp"
+if ! jqd -c --argjson container "${container_identity}" --arg cmdsha "${command_line_sha}" \
+   '. + {container: $container, commandLineSha256: $cmdsha}' \
+   < "${target_identity_file}" > "${identity_tmp}"; then
+  rm -f "${identity_tmp}"
+  echo "Could not attach container identity and command hash to the target identity for '${target}'." >&2
+  exit 1
+fi
+mv "${identity_tmp}" "${target_identity_file}"
 
 campaign_load_dir="${artifact_dir}/runtime/campaign-load"
 run_load() {
@@ -97,7 +240,21 @@ trap cleanup_load EXIT INT TERM
 
 pull() {  # pull <dest-file> <curl-arg>...
   local dest="$1"; shift
-  if curl -fsS "$@" > "${dest}.tmp"; then
+  # Bound the DOWNLOAD, not just the free space beforehand. A process dump is
+  # produced by the target and its size is not known until it arrives, so a
+  # pre-flight disk check is a guess: curl --max-filesize refuses mid-transfer,
+  # which is the only point at which the real size is known.
+  local budget="${PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES:-1073741824}"
+  if curl -fsS --max-filesize "${budget}" "$@" > "${dest}.tmp"; then
+    # And enforce after the fact too: --max-filesize relies on a Content-Length
+    # the server may not send, so a chunked response can exceed it silently.
+    local actual
+    actual="$(wc -c < "${dest}.tmp" | tr -d ' ')"
+    if (( actual > budget )); then
+      rm -f "${dest}.tmp"
+      echo "Diagnostic artifact ${dest##*/} reached ${actual} bytes, exceeding the ${budget}-byte budget; it was discarded rather than left in the package." >&2
+      exit 1
+    fi
     mv "${dest}.tmp" "${dest}"
   else
     rm -f "${dest}.tmp"
@@ -243,6 +400,26 @@ if [[ -n "${campaign_preset}" ]]; then
   if (( runtime_bytes > budget_bytes )); then
     campaign_failures=$((campaign_failures + 1))
     echo "Runtime campaign produced ${runtime_bytes} bytes, exceeding its ${budget_bytes}-byte budget." >&2
+    # Counting the overage and keeping the files is not a budget: the disk is
+    # already full and the oversized artifacts are already in the package that
+    # somebody will attach to a ticket. Remove the largest binary captures until
+    # the package is within budget, and record exactly what was dropped so the
+    # evidence says what is missing rather than quietly lacking it.
+    dropped_json=""; dropped_count=0
+    while IFS= read -r oversized_file; do
+      (( runtime_bytes > budget_bytes )) || break
+      oversized_bytes="$(wc -c < "${oversized_file}" | tr -d ' ')"
+      rm -f "${oversized_file}"
+      runtime_bytes=$((runtime_bytes - oversized_bytes))
+      dropped_count=$((dropped_count + 1))
+      dropped_json="${dropped_json}${dropped_json:+,}$(printf '{"artifact":"%s","bytes":%s}' \
+        "$(json_escape "${oversized_file#"${artifact_dir}/"}")" "${oversized_bytes}")"
+      echo "  removed ${oversized_file#"${artifact_dir}/"} (${oversized_bytes} bytes) to stay within the budget" >&2
+    done < <(find "${artifact_dir}/runtime" -type f \( -name '*.nettrace' -o -name '*.gcdump' -o -name '*.dmp' \) -print0 \
+             | xargs -0 ls -S 2>/dev/null)
+    printf '{"budgetBytes":%s,"bytesAfterEnforcement":%s,"removed":%s,"artifacts":[%s]}\n' \
+      "${budget_bytes}" "${runtime_bytes}" "${dropped_count}" "${dropped_json}" \
+      > "${artifact_dir}/runtime/artifact-budget.json"
   fi
 
   captures_json="["; separator=""
@@ -328,7 +505,9 @@ capture_counters() { # capture_counters <out-dir> <seconds>
 }
 read_counters_state() {
   if [[ -s "${counters_status_file}" ]]; then
-    IFS=$'\t' read -r counters_state counters_records counters_reason < "${counters_status_file}" || true
+    if read_fields 3 < <(tr '\t' '\n' < "${counters_status_file}"); then
+      counters_state="${TSV_FIELDS[0]}"; counters_records="${TSV_FIELDS[1]}"; counters_reason="${TSV_FIELDS[2]}"
+    fi
     rm -f "${counters_status_file}"
   fi
 }

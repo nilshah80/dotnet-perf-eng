@@ -22,6 +22,50 @@ core**.
 > Architecture, contracts, and the per-runtime adapter matrix live in
 > [`BLUEPRINT.md`](BLUEPRINT.md).
 
+> Release readiness, the gate model, and the open work live in
+> [`docs/REAL-WORLD-PERFORMANCE-ENGINEERING-IMPLEMENTATION-PLAN.md`](docs/REAL-WORLD-PERFORMANCE-ENGINEERING-IMPLEMENTATION-PLAN.md).
+
+## Release readiness
+
+Work is tracked against three gates: **A** is the first supported release, **B**
+covers a capability only once it is advertised, **C** is platform expansion.
+
+**Gate A is complete.** All 39 Gate A acceptance cases map to a command. The
+final D-P0-7 proof captures a live .NET process and observes allocation events
+through PerfLab's production EventPipe capture and analyzer path.
+
+C-14 is closed as a non-blocking scope decision and must not be rerun to qualify
+Gate A. Its former latency comparison used separate executions, so application,
+runtime, host, deployment, and harness variance were inseparable from reporting
+logic. The 10 completed trials established throughput parity (0.1% median
+difference) but could not establish latency equivalence (18.5% difference with
+roughly 47% within-side dispersion). If cross-product derivation parity is ever
+needed, feed both implementations the same immutable k6 summary; independent
+workload trials are intentionally excluded from the release gate.
+
+The final structural parity check covers two scenarios from every supported
+lab: ScenarioLab `S00`/`S01`, Ecommerce `E00`/`E06`, and Protocol Reliability
+`P00`/`P04`. All six pass the 24-family evidence contract with no missing
+normalized native facts and no unmapped native artifacts. The contract remains
+`numericalPolicy: "report-only"`; this verifies evidence and normalization
+coverage without reintroducing C-14's invalid independent-run numerical gate.
+
+The rule that makes those numbers meaningful is that an item with **no** command
+counts as not met, not as an omission: "we have not written the check yet" and
+"the check passes" must never look alike from the outside. Section 23.2.1 of the
+plan maps each defect to its command and 23.2.2 maps the acceptance cases. The
+commands that do exist run in the contract check:
+
+```bash
+./scripts/contract/check.sh
+```
+
+Writing those proofs surfaced three defects that reading the code had not:
+`bottleneck.sh` aborted the whole classifier when the DB-pool metric file was
+absent; collector-health accounting only ran for remote targets, never for the
+local path that every lab run uses; and the ported queue rule reported silence
+for a deep queue on a server that had stopped serving.
+
 ## Architecture
 
 The load generator drives the app; telemetry, dependency state, and runtime
@@ -127,6 +171,35 @@ A lab declares `PERFLAB_TARGET` (default `local`). It decides whether the harnes
 | Telemetry (Prometheus/Tempo/Loki/Pyroscope) | captured, **run-id-scoped** | off by default; opt-in `PERFLAB_REMOTE_TELEMETRY=1` reads it **window-scoped** |
 | Runtime diagnostics (dotnet-monitor nettrace/gcdump/stacks) | available | off by default; opt-in `PERFLAB_REMOTE_DIAGNOSTICS=1` **+ ack** |
 | `manifest.json` | `"target":"local"` | `"target":"remote"` (+ `"remoteTelemetry"`) |
+
+### Target ownership — `PERFLAB_TARGET_KIND`
+
+`local` vs `remote` answers *where* the app is. `PERFLAB_TARGET_KIND` answers a
+different and more dangerous question: *did this run create it?* A diagnostic
+recreates the app (`compose up -d --force-recreate`) so the process starts
+clean. That is correct for a stack the harness brought up, and destructive for
+anything else — pointed at a shared host it restarts an API somebody else is
+using, and the first sign is their traffic failing.
+
+Ownership is therefore explicit and conservative. "I am not sure" resolves to
+"do not touch it".
+
+| `PERFLAB_TARGET_KIND` | Meaning | Lifecycle operations |
+|---|---|---|
+| `managed-compose` (default) | this run owns the compose project | recreate, reset, clean up |
+| `existing-process` | attach to a process this run did not start | **refused** |
+| `existing-container` | attach to a container this run did not start | **refused** |
+| `existing-environment` | a deployment this run does not own | **refused** |
+
+A `remote` target is forced to `existing-environment` whatever the kind says, so
+a stray environment variable cannot authorise recreating another environment.
+
+A diagnostic also takes an **exclusive lease** on the target it is capturing,
+keyed on the target rather than the run. Two concurrent captures would give one
+process two EventPipe sessions, and each trace would then record the other's
+overhead as application cost — so the second one is refused rather than
+producing two quietly wrong measurements. A lease whose holder is gone is
+reclaimed automatically, so a `kill -9` does not wedge the target.
 
 **Remote** turns the harness into a black-box load/capacity tool against a URL:
 it health-checks `PERFLAB_READY_URL`, warms up, measures against `PERFLAB_BASE_URL`,
@@ -612,6 +685,50 @@ PERFLAB_LAB=scenariolab ./harness/core/capture/normalize-runtime.sh artifacts/ru
 PERFLAB_LAB=scenariolab ./harness/core/analyze/diff-gcdump.sh artifacts/runs/<run>/scenarios/S04             # which type grew
 ```
 
+### How `bottleneck.sh` decides
+
+The classifier reports the resource with the strongest evidence; two of its
+rules exist because the obvious version of each was confidently wrong.
+
+**Queue depth is not queue wait.** A thread-pool queue is only saturated when
+the backlog represents real *waiting time* — `depth / throughput` seconds, gated
+at 50 ms — not when the depth alone crosses a number. Twenty queued items at
+2000 rps drains in 10 ms and is burst arrival; the same twenty at 50 rps is
+400 ms of genuine starvation. Judging on depth alone diagnosed S04 (an
+allocation problem) as `threadpool-starved [high]` from a ~0.5 ms backlog, which
+would have sent an engineer looking for blocking calls that were not there. When
+CPU is *also* saturated the queue is a symptom rather than the disease, so
+`cpu-bound` wins and the report says why. A transient queue is called out
+explicitly instead of being silently dropped, so an alarming depth is explained
+rather than hidden.
+
+**An unmodelled resource gets blamed on whatever is modelled.** The classifier
+reads the upstream (`HttpClient`) connection pool as its own dimension, because
+without it a scenario blocked on outbound connections was reported as thread-pool
+starvation -- the queue being the only queue it knew about. `http_client_request_time_in_queue`
+reports the wait for a connection *directly*, so unlike the thread-pool queue it
+needs no depth/throughput inference; the gate is the wait itself (50 ms). It is
+ranked per `server_address`, so the app's own OTLP exporter -- an `HttpClient`
+too -- cannot stand in for the dependency the workload calls. When it saturates,
+the thread-pool queue is reported as a *symptom* rather than offered as a rival
+diagnosis, because telling a reader to hunt for blocking calls *and* to raise a
+pool limit is two contradictory instructions from one report.
+
+**Retention is reported but never wins.** Managed-heap growth comes from the
+in-process before/after `gcdump` pair (`analysis/runtime/diff-gcdump-before-after.txt`,
+the only honest source — a within-window metric slope cannot see a leak that
+already saturated during warm-up). A leak is not a latency bottleneck, so it
+never competes for the primary verdict; but a package whose heap grew by orders
+of magnitude while nothing saturated would otherwise read as "no problem found",
+so it is always surfaced as its own dimension with the artifact that produced
+it. With no `gcdump` pair, retention reports `not-captured` — which must not be
+read as "no growth".
+
+Confidence is capped by evidence completeness: an uncaptured CPU series or
+dropped generator iterations cap every verdict at `low`, because "not CPU-bound"
+is part of every other conclusion and dropped iterations mean the generator, not
+the server, set the pace.
+
 ## Runtime diagnostics
 
 Measurement and runtime capture are **separate runs** — diagnostic tools perturb
@@ -858,6 +975,56 @@ artifacts/runs/<run-id>/                 # a suite run
         ├── trend-report.json            # leak/trend: least-squares slope + growth, GROWING flags
         └── runtime/                     # normalized: cpu.speedscope.json, *-gcdump/dump-report.txt
 ```
+
+### Capture states — absence is not health
+
+A backend that answers `200` with an empty result set still writes a file, so a
+reader sees an artifact and assumes the signal was captured. For a signal whose
+absence can only mean a broken scrape or a renamed selector, that is the worst
+outcome available: a green run carrying no saturation evidence at all. Every
+query in `telemetry/queries.ndjson` therefore carries one of:
+
+| State | Means | What to repair |
+|---|---|---|
+| `captured` | the query returned data | — |
+| `failed` | the query errored | the backend or the URL |
+| `empty-required` | reachable, returned **nothing**, and the role is required | the scrape, the selector, or the instrumentation |
+| `empty` | reachable, returned nothing, role is conditional | nothing — it is a fact about the workload |
+| `truncated` | hit the result limit | raise `PERFLAB_LOG_LIMIT` / `PERFLAB_TRACE_LIMIT` |
+| `missing` | the backend was unreachable | the backend |
+
+Required roles belong to the **runtime adapter**, not to an operator setting:
+under any load a .NET process has CPU, a working set, a GC heap, a thread pool,
+and served requests, so an empty series for one of those is a broken capture.
+Everything else is conditional — `database_pool_metrics` is legitimately empty
+for a scenario that never opens a connection, and calling that "missing
+evidence" would mark a correct package incomplete. An `empty-required` role
+degrades the package to `partial`.
+
+**Logs** are the case where the same emptiness means opposite things, so the
+decision is explicit and recorded in `telemetry/logs/policy.json`:
+
+- `Microsoft.AspNetCore: Warning` (the default) suppresses request logging, so a
+  healthy path emits nothing and an empty window is **not** a gap.
+- With `PERFLAB_REQUEST_LOGGING=Information`, an empty window **is** a gap and
+  degrades the package. The knob registers ASP.NET Core's HTTP logging
+  middleware (method, path, status, duration -- never bodies or headers) and is
+  the only thing that turns it on: raising the `Microsoft.AspNetCore` category
+  level does **not** produce per-request records on this framework version.
+  With the knob off, the middleware is not registered at all, so a measurement
+  run carries no request-logging overhead.
+- `PERFLAB_LOGS_REQUIRED=0|1` overrides the level-derived default either way.
+
+Per-request logging is not a blanket fix: S04 sustains ~19.6k rps, where it
+emits roughly 1.2M lines per 30s window — enough to perturb the measurement and
+instantly truncate the log budget. Turn it on for a low-rate investigation, not
+for every run.
+
+Collector health is captured on **both** the local and remote paths
+(`telemetry_export_failures`, `telemetry_queue_utilization`,
+`telemetry_refused`): every other signal in the package is read *through* the
+collector, so a silent drop there makes an incomplete capture look complete one
+layer below where the capture states can see it.
 
 `facts.json` is an **index** — observations with units and raw-source paths, not
 conclusions. The suite index carries, per scenario, both a pipeline `status`

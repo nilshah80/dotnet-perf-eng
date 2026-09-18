@@ -48,12 +48,53 @@ performance_target_preflight() {
         return 1
       }
       ;;
+    existing-process|existing-container)
+      # C-5 attach-only. Measuring a target is not the same act as owning it:
+      # observing a running process changes nothing, while deploying, resetting
+      # or stopping one this run did not create destroys somebody else's state.
+      # Collapsing the two made `existing-process` refuse everything, so the
+      # kind could be declared and never used.
+      case "${action}" in
+        measure|attach|diagnose) return 0 ;;
+        *)
+          echo "attach-only target ${kind} refuses ${action}: this run did not create it" >&2
+          return 1
+          ;;
+      esac
+      ;;
     local-process|existing-environment|existing-kubernetes)
       echo "unmanaged target ${kind} refuses ${action}" >&2
       return 1
       ;;
     *) echo "unknown target kind ${kind}" >&2; return 1 ;;
   esac
+}
+
+# Per-request labels. A selector that groups by one of these creates a new
+# series for every request, which degrades the backend for every OTHER query
+# too -- the cost is not paid by the offending panel alone. The run id is
+# deliberately NOT here: it is bounded at one value per run and is how evidence
+# is scoped.
+PERFLAB_UNBOUNDED_LABELS="${PERFLAB_UNBOUNDED_LABELS:-trace_id span_id request_id correlation_id session_id user_id order_id http_target http_url url_full client_address}"
+
+# performance_reject_unbounded_labels <role> <selector>
+# Refuses a metric or profile selector whose cardinality is unbounded. Called
+# before the query is issued: a selector that would blow up the backend must be
+# rejected rather than executed and then regretted.
+performance_reject_unbounded_labels() {
+  local role="$1" selector="$2" label
+  for label in ${PERFLAB_UNBOUNDED_LABELS}; do
+    # Matches `by (label)`, `by(label,...)`, `without (label)` and a selector
+    # predicate `label=` / `label=~`. A label appearing only inside a metric
+    # NAME is not a grouping and is left alone.
+    if printf '%s' "${selector}" | grep -qE "(by|without)[[:space:]]*\\([^)]*\\b${label}\\b|\\b${label}[[:space:]]*(=~?|!=)"; then
+      echo "Metric role '${role}' selects or groups by '${label}', which has one value per request." >&2
+      echo "  Unbounded label cardinality degrades the backend for every query, not just this one." >&2
+      echo "  Scope by run id (bounded at one value per run) instead." >&2
+      return 1
+    fi
+  done
+  return 0
 }
 
 performance_compare_preflight() {
