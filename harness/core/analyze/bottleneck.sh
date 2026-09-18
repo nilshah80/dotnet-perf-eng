@@ -100,6 +100,18 @@ lock_rate_peak="$(mstat lock_contention max)"
 db_used_peak=""; db_max=""; db_pending_peak=""
 IFS=$'\t' read -r db_used_peak db_max db_pending_peak < <(dbpool_worst)
 
+# Managed-heap RETENTION. A leak is not a latency bottleneck, so it must never
+# compete for the primary verdict -- but a package whose heap grew by orders of
+# magnitude while nothing saturated would otherwise read as "no problem found".
+# The in-process before/after gcdump pair (normalize-runtime auto-diffs it) is
+# the only honest retention source: a within-window metric slope cannot see a
+# leak that already saturated during warm-up. Absent gcdump -> not captured.
+retain_growth=""
+retain_diff="${run_arg}/analysis/runtime/diff-gcdump-before-after.txt"
+if [[ -s "${retain_diff}" ]]; then
+  retain_growth="$(awk -F'[()%+]' '/total delta:/ { for (i=1;i<=NF;i++) if ($i ~ /^[0-9.]+$/ && $0 ~ /%/) v=$i } END { if (v!="") printf "%.4f", v/100 }' "${retain_diff}" 2>/dev/null || true)"
+fi
+
 # --- decision + JSON (awk; -1 == not captured) ------------------------------
 d() { [[ -n "$1" ]] && printf '%s' "$1" || printf -- '-1'; }
 json="$(awk \
@@ -112,6 +124,8 @@ json="$(awk \
   -v gcpause="$(d "${gc_pause_peak}")" -v allocrate="$(d "${alloc_rate_peak}")" -v lockrate="$(d "${lock_rate_peak}")" \
   -v dbpending="$(d "${db_pending_peak}")" -v dbused="$(d "${db_used_peak}")" -v dbmax="$(d "${db_max}")" \
   -v CPU_SAT="${PERFLAB_USE_CPU_SAT:-0.85}" -v TPQ_SAT="${PERFLAB_USE_TPQ_SAT:-2}" \
+  -v TPQ_WAIT_SAT="${PERFLAB_USE_TPQ_WAIT_SAT:-0.05}" -v RETAIN_SAT="${PERFLAB_USE_RETAIN_SAT:-0.25}" \
+  -v retaingrowth="$(d "${retain_growth}")" \
   -v GC_SAT="${PERFLAB_USE_GC_SAT:-0.10}" -v LOCK_SAT="${PERFLAB_USE_LOCK_SAT:-1.0}" -v DEP_SHARE="${PERFLAB_USE_DEP_SHARE:-0.50}" \
   'function has(x){ return (x+0) >= 0 && x != "" }
    function share(ms){ return (has(ms) && has(p50) && p50+0>0) ? (ms+0)/(p50+0) : -1 }
@@ -130,11 +144,19 @@ json="$(awk \
 
      # ----- saturation booleans (hard evidence) -----
      cpu_sat  = (cpu_util>=0 && cpu_util>=CPU_SAT);
-     tpq_sat  = (has(tpqpeak) && tpqpeak+0>=TPQ_SAT);
+     # A thread-pool queue is a bottleneck only when the backlog represents real
+     # WAITING TIME, not merely a non-zero depth. Depth alone is throughput-blind:
+     # 10 queued items at 19.6k rps drains in ~0.5 ms (noise), while 125 queued at
+     # 294 rps is ~425 ms of backlog (the actual defect). Gate on depth/throughput
+     # seconds so a fast server is never called "starved" for a transient queue.
+     tpq_wait = (has(tpqpeak) && has(rps) && rps+0>0) ? (tpqpeak+0)/(rps+0) : -1;
+     tpq_sat  = (has(tpqpeak) && tpqpeak+0>=TPQ_SAT && (tpq_wait<0 || tpq_wait>=TPQ_WAIT_SAT));
      gc_sat   = (has(gcpause) && gcpause+0>=GC_SAT);
      lock_sat = (lock_per_req>=0 && lock_per_req>=LOCK_SAT);
      dbp_sat  = (has(dbpending) && dbpending+0>0);
      dep_dom  = (db_share>=0 && db_share>=DEP_SHARE);
+     # Retention is captured but deliberately NOT a candidate (see notes below).
+     retain_sat = (has(retaingrowth) && retaingrowth+0>=RETAIN_SAT);
 
      # ----- rank candidates. Saturation signals outweigh mere utilisation/shares;
      # among shares, the largest slice of the request wins. Score in [0,~2]. -----
@@ -210,6 +232,12 @@ json="$(awk \
      if (tpq_sat && !cpu_sat) notes[++nn]="thread-pool queue is high while CPU is NOT saturated -- classic sync-over-async / blocking-call starvation (threads parked, not busy).";
      if (verdict=="dependency-bound-db" && dbp_sat) notes[++nn]="most request time is DB AND the pool is saturated -- the DB dependency is the bottleneck via pool exhaustion.";
      if (verdict=="no-clear-bottleneck" && any) notes[++nn]="no resource crossed a saturation gate -- the system has headroom at this load (push RPS with a capacity profile to find the knee).";
+     # Retention is reported, never ranked: a leak is a stability defect, not a
+     # latency bottleneck, so it must not win the verdict -- but "nothing
+     # saturated" must not be the last word when the heap grew by orders of
+     # magnitude. Sourced from the in-process before/after gcdump diff.
+     if (retain_sat) notes[++nn]=sprintf("managed heap grew %.1f%% between the in-process before/after GC dumps -- RETENTION, not a latency bottleneck; read analysis/runtime/diff-gcdump-before-after.txt for the growing types.", (retaingrowth+0)*100);
+     if (tpq_sat==0 && has(tpqpeak) && tpqpeak+0>=TPQ_SAT && tpq_wait>=0) notes[++nn]=sprintf("thread-pool queue peaked at %d but drains in ~%.1f ms at %.0f rps -- transient depth, not starvation.", tpqpeak+0, tpq_wait*1000, rps+0);
      if (nsatres>=2) notes[++nn]=sprintf("%d resources saturated at once (%s); primary bottleneck(s): %s. Address them together, not just the top-scored one; see resources.* for each.", nsatres, satreslist, primlist);
 
      # ----- reason line: describe the PRIMARY (top) resource; a composite verdict lists
@@ -236,7 +264,8 @@ json="$(awk \
      printf "\"verdict\":\"%s\",\"confidence\":\"%s\",\"concurrent\":%s,\"contributors\":[%s],\"saturatedResources\":[%s],\"reason\":\"%s\",", verdict, conf, (concurrent?"true":"false"), contribjson, satresjson, reason;
      printf "\"resources\":{";
      printf "\"cpu\":{\"coresBusyPeak\":%s,\"cpuCount\":%s,\"utilizationPct\":%s,\"msPerRequest\":%s,\"latencySharePct\":%s,\"saturated\":%s},", jnum(cpubusy), (has(cpucount)?sprintf("%d",cpucount+0):"null"), jpct(cpu_util), jnum(effcpu), jpct(cpu_share), (cpu_sat?"true":"false");
-     printf "\"threadPool\":{\"queuePeak\":%s,\"queueAvg\":%s,\"threadCountPeak\":%s,\"saturated\":%s},", jnum(tpqpeak), jnum(tpqavg), jnum(threadpeak), (tpq_sat?"true":"false");
+     printf "\"threadPool\":{\"queuePeak\":%s,\"queueAvg\":%s,\"threadCountPeak\":%s,\"queueWaitSeconds\":%s,\"saturated\":%s},", jnum(tpqpeak), jnum(tpqavg), jnum(threadpeak), (tpq_wait>=0?sprintf("%.6f",tpq_wait):"null"), (tpq_sat?"true":"false");
+     printf "\"retention\":{\"heapGrowthPct\":%s,\"source\":\"%s\",\"flagged\":%s},", (has(retaingrowth)?sprintf("%.1f",(retaingrowth+0)*100):"null"), (has(retaingrowth)?"analysis/runtime/diff-gcdump-before-after.txt":"not-captured"), (retain_sat?"true":"false");
      printf "\"gc\":{\"pauseFractionPeak\":%s,\"pauseMsPerRequest\":%s,\"allocBytesPerRequest\":%s,\"allocRatePeak\":%s,\"latencySharePct\":%s,\"saturated\":%s},", jnum(gcpause), jnum(effgc), jnum(effalloc), jnum(allocrate), jpct(gc_share), (gc_sat?"true":"false");
      printf "\"locks\":{\"contentionsPerSecPeak\":%s,\"contentionsPerRequest\":%s,\"saturated\":%s},", jnum(lockrate), (lock_per_req>=0?sprintf("%.3f",lock_per_req):"null"), (lock_sat?"true":"false");
      printf "\"dbPool\":{\"pendingPeak\":%s,\"usedPeak\":%s,\"max\":%s,\"utilizationPct\":%s,\"saturated\":%s},", jnum(dbpending), jnum(dbused), jnum(dbmax), jpct(dbpool_util), (dbp_sat?"true":"false");

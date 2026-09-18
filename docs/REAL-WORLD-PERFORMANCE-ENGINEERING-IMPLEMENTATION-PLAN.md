@@ -6,6 +6,14 @@
 
 ## 1. Decision summary
 
+The product goal is a real-world application performance engineering tool for
+.NET projects. It must collect the evidence needed to identify real issues and
+reduce MTTR from a symptom to a diagnosed mechanism. Honesty of evidence and
+ownership beats an unbounded platform checklist. Work is released through
+three gates defined in section 21 and assigned in section 23: Gate A (supported
+.NET performance-testing release), Gate B (advertised production or enterprise
+capability), and Gate C (optional platform expansion).
+
 Both repositories will support real project workloads ranging from a single API
 request to stateful, multi-service user journeys. Each remains a complete
 orchestrator. Neither repository may invoke, import, package, download, or
@@ -40,8 +48,12 @@ coordinated parity workflow accepts their exported attestations before merge.
 
 Both repositories must satisfy all of the following:
 
-- A clean checkout can build, test, package, and execute without the other
-  repository being present.
+- Product and build independence: a clean checkout can build, test, package,
+  and run generic self-tests without the other repository being present.
+- Project workload dependency: executing a project-owned .NET lab requires the
+  referenced `dotnet-perf-eng` checkout. That is target ownership, not an
+  engine dependency. Acceptance case 30 already forbids only a product
+  dependency and does not change.
 - No command executes the other product's CLI or helper binary.
 - No adapter uses a container image built or released only by the other
   repository.
@@ -63,9 +75,8 @@ Both repositories must satisfy all of the following:
   mix, SLO, and generator assets for ScenarioLab, Ecommerce, and Protocol
   Reliability. PerfLab owns only thin descriptors for those labs and must not
   contain copied or independently implemented lab application source.
-- The current `dotnet-perf-eng` dependency on the `perflab-load-jmeter` image
-  must be removed. `dotnet-perf-eng` will own and pin its own JMeter runner
-  image; PerfLab will continue to own and pin its own.
+- `dotnet-perf-eng` must not depend on a PerfLab-owned JMeter image. Each
+  repository owns and pins its own runner.
 - Existing `PERFLAB_*` environment-variable names in `dotnet-perf-eng` are
   compatibility API names only and do not authorize a product dependency.
 
@@ -204,11 +215,17 @@ package, and execution must never fetch or invoke the other repository.
 
 ## 3. Goals
 
+The tool exists to help .NET teams find real performance and reliability
+issues and cut MTTR. A supported release is complete when advertised
+capabilities produce trustworthy evidence, not when every optional diagnostic
+or platform feature exists.
+
 1. Model request, journey, and mixed workloads without duplicating journey steps
    outside the project-owned k6 script or JMeter plan.
 2. Give requests and journeys unambiguous scheduling and result semantics.
-3. Support the complete performance-engineering portfolio through composable
-   workload, load-model, profile, purpose, and evidence policies.
+3. Support the advertised performance-engineering portfolio through composable
+   workload, load-model, profile, purpose, and evidence policies. Unsupported
+   combinations fail before traffic. Optional tiers stay explicit.
 4. Run against an orchestrator-managed target or an already-running local or
    remote environment without requiring deployment.
 5. Collect correlated load, application, infrastructure, dependency, APM,
@@ -235,45 +252,18 @@ package, and execution must never fetch or invoke the other repository.
   consume the canonical project-owned lab assets above when one of those labs
   is explicitly selected; this is target ownership, not an engine dependency.
 
-## 5. Current state and material gaps
+## 5. Current state
 
-### 5.1 PerfLab gaps
+Shipped in both products and not reopened as gaps: `v1` contracts; Go removed
+from `dotnet-perf-eng`; canonical .NET lab ownership in `dotnet-perf-eng` with
+PerfLab descriptor-only bindings; single-request compatibility; multi-step
+journeys; weighted mixes; core LGTM capture; evidence normalization; native
+JMeter image ownership; basic local single-node orchestration.
 
-| Area | Current state | Required state |
-| --- | --- | --- |
-| Shipped labs | Duplicate PerfLab targets can measure different operations | Thin descriptors resolve the three canonical `dotnet-perf-eng` labs |
-| Discovery | Canonical lab root resolution is implicit and incomplete | Explicit `DOTNET_PERF_ENG_ROOT` with adjacent-checkout development fallback |
-| Smoke/parity | Synthetic fixtures can hide target drift | Compile every descriptor against the canonical catalogs and workload assets |
-| Lab scenario | `internal/lab/types.go` stores one method, path, and body | Versioned request, journey, and mix selector |
-| Catalog | `internal/lab/discover.go` accepts an eight-column TSV | Keep TSV; add Scenario Catalog v1 JSON |
-| Generic domain | `internal/core/model/domain.go` has journey types | Use them in lab execution instead of rejecting them |
-| Compiler | `internal/orchestrator/experiment.go` rejects project journeys | Compile validated workload selectors and capabilities |
-| k6 | One request or one weighted request per iteration | One request or one complete selected journey per iteration |
-| JMeter | HTTP request sample semantics only | Separate journey parent and operation child semantics |
-| wrk | Stateless request generator | Retain as request-only and reject journeys before traffic |
-| Profile definitions | Lab profile binding and generic profile controller coexist | One canonical PerfLab profile compiler and controller |
-| Arrival rate | k6 iteration rate is named RPS | Explicit request/s, journey/s, or iteration/s |
-| Soak | Observation probes may create new load executions | One continuous load session with rolling observations |
-| Diagnostics | One scenario diagnostic target | Ordered multi-target diagnostic campaign |
-| Pyroscope | CPU query path only | Configurable CPU, wall, allocation, lock, exception, live heap |
-| Target | Compose-owned local or remote URL | Explicit target kind and lifecycle ownership |
-| Evidence | Global request and iteration totals | Journey, operation, request, correctness, and delivery evidence |
-| Distributed load | No sharded execution protocol | Agent shards with deterministic aggregation |
-
-### 5.2 `dotnet-perf-eng` gaps covered by the same plan
-
-| Area | Current state | Required state |
-| --- | --- | --- |
-| Native scenario | `scenarios.tsv` describes one method/path/body | Same request/journey/mix contract and legacy adapter |
-| Native execution | `run-scenario.sh` binds one request or weighted request mix | Compile and run the declared iteration contract |
-| Native JMeter | Invokes the PerfLab-owned JMeter image; steady only | Repository-owned runner/image with request/journey semantics |
-| Native profile logic | k6 shapes in `profiles.sh` plus individual PE runners | One native profile compiler matching the joint contract |
-| Native target | `local` means managed Compose; `remote` means URL | Same target kind, lifecycle ownership, and capabilities |
-| Native evidence | Request observations and package facts | Same v1 journey/operation/delivery/correctness semantics |
-| Native durability | Per-run shell process and artifacts | Persisted stages, heartbeat, checkpoint, cancel, partial recovery |
-
-The rest of this document defines one required behavior for both repositories.
-Repository-specific file ownership appears only in the implementation map.
+Remaining work is only section 23, split across Gate A (evidence integrity and
+safe short-run .NET testing), Gate B (advertised production capabilities), and
+Gate C (optional MTTR and platform expansion). Sections 6-18 remain the
+normative behavior for shipped contracts. File ownership stays in section 18.
 
 ## 6. Canonical concepts
 
@@ -637,15 +627,14 @@ repository path maps resolve their exact physical files. `v1` adds the
 journey parent/child, scheduling, and result cases without rewriting the base
 contract.
 
-The required end state is JMeter support for the same common HTTP
-request/journey portfolio as k6: smoke, steady/load, ramp, stress,
-breakpoint/capacity, spike, soak,
-open-arrival, closed-concurrency, volume/data-scale, mix, resilience, recovery,
-repeatability, and regression. Its open-model implementation must pin and test a
-specific strategy. If JMeter's built-in experimental Open Model Thread Group is
-used, the exact JMeter version, schedule, random seed, interruption behavior,
-and known limitations are part of the capability and compatibility envelope.
-Until those acceptance tests pass in both products, that capability remains
+k6 is the Gate A canonical engine for the full supported HTTP profile
+matrix. JMeter supports a declared, versioned subset of that matrix. Any
+unsupported JMeter profile fails before target mutation or traffic. Extra
+JMeter profiles become Gate B only when advertised. JMeter open-arrival, if
+advertised, must pin and test a specific strategy. If JMeter's built-in
+experimental Open Model Thread Group is used, the exact JMeter version,
+schedule, random seed, interruption behavior, and known limitations are part
+of the capability envelope. Until those tests pass, that capability remains
 experimental rather than being approximated with a closed Thread Group.
 
 ### 10.3 wrk
@@ -683,8 +672,8 @@ Minimum parity target:
 
 | Generator/adapter | Required common capability in both repositories |
 | --- | --- |
-| k6 | Request and journey workloads; all HTTP-applicable profiles and purposes; open/closed models; streaming snapshots; sharding |
-| JMeter | Request and journey workloads; all HTTP-applicable profiles and purposes after staged validation; open/closed models; streaming JTL/histograms; sharding |
+| k6 | Request and journey workloads; Gate A HTTP profile matrix; open/closed models; streaming snapshots; sharding only if distributed load is claimed |
+| JMeter | Request and journey workloads; declared versioned HTTP profile subset; fail unsupported profiles before traffic; extra profiles Gate B when advertised; streaming JTL/histograms; sharding only if distributed load is claimed |
 | wrk | Stateless HTTP request, smoke/steady/load/repetition only; no journey claim |
 | Browser synthetic | Low-scale functional/user-experience journey under concurrent backend load; never the primary high-scale generator |
 | Protocol adapters | Only explicitly implemented gRPC/WebSocket/messaging/database capabilities; identical support state in both products |
@@ -697,9 +686,13 @@ ports/TLS, and detects controller or result-channel saturation.
 
 ## 11. Performance-engineering portfolio
 
-All items below are required in both orchestrators. A generator may support a
-subset only because of an intrinsic generator/protocol limitation, and the same
-subset must be reported by both products.
+The table is the product portfolio, not a Gate A checklist. k6 is the Gate A
+canonical engine for the advertised HTTP profile matrix. JMeter supports a
+declared, versioned subset and rejects the rest before target mutation or
+traffic. Extra JMeter profiles are Gate B only when advertised. Soak, fault,
+distributed, and other Gate B/C purposes are required only when claimed. A
+generator may also have an intrinsic limitation; both products must report
+the same support state for that generator.
 
 | Category | Profile or purpose | Required behavior and evidence |
 | --- | --- | --- |
@@ -1663,137 +1656,57 @@ toolchain.
 
 ## 19. Delivery slices
 
-Each slice must be releasable, tested, documented, backward compatible, and
-implemented independently in both repositories before full-parity status is
-claimed.
+Slices 0-3 are complete. Remaining slice work is executed only as the matching
+section 23 gate. A slice may still land behind `experimental`; it cannot be
+marked `supported` until both repositories carry the same contract digest and
+pass that slice's advertised acceptance cases.
 
-Slices are dependency ordered and land as coordinated repository changes. A
-slice can merge independently behind `experimental`, but it cannot be marked
-`supported` or used for a cross-product baseline until both repositories carry
-the same contract-bundle digest and pass that slice's acceptance cases. Slice 0
-through Slice 3 are prerequisites for journey measurements; Slice 4 is required
-before non-steady journey profiles; Slice 5 is required before production soak.
+### 19.0 Slice 0: contract and fixture freeze — complete except C-1
 
-### 19.0 Slice 0: contract and fixture freeze
+Landed: `v1` manifest, schemas, fixtures, locks, Markdown/LF pin, independence
+scan, descriptor-only PerfLab labs, native JMeter image ownership. Remaining:
+native shell attestation exporter and hosted-coordinator success (C-1, Gate A).
 
-- Record independence, ownership, rate units, journey semantics, and diagnostic
-  isolation once in the joint plan and normative contract semantics.
-- Add every `v1` schema, the normative semantics document, and canonical
-  positive/negative fixture listed by the initial manifest. The freeze includes
-  catalog, workload, JMeter wire, iteration-accounting, capability identifiers,
-  and their fixtures.
-- Add the authoritative logical-name manifest, repository-local path maps,
-  deterministic lock generator, history/index, parity lock, aggregate digest
-  algorithm, `contractRevision` validation, and conformance runner. After this
-  slice the `v1` aggregate digest is immutable.
-- Pin Markdown and all declared text fixtures, including JTL/JMX, to UTF-8/LF;
-  declare diagnostic/archive formats binary in both `.gitattributes` files.
-- Add a repository-owned Markdown validator that rejects trailing whitespace,
-  prose beyond 90 columns, and inconsistent table column counts. Tables,
-  fenced code, and URL destinations are explicit length exceptions. For a
-  Markdown link it counts the rendered label and surrounding prose, so a long
-  label cannot hide behind a URL exception.
-- Add local CI in each repository that validates only its own plan hash,
-  manifest, paths, lock, attributes, fixtures, and conformance results against
-  `parity-lock.json`, then exports a parity attestation. It must not fetch the
-  other repository.
-- Add the coordinated parity workflow that compares the two exported
-  attestations. Add the release-only coordinator, ownership, generated patch,
-  and paired-merge controls specified in Section 17. It alone decides
-  cross-repository byte equality and repeats the check at release.
-- Refactor PerfLab command/flag registration and declare native shell inputs as
-  specified in Section 17. Generate compatibility inventories and fail CI for
-  a runtime/inventory mismatch or undocumented input.
-- Define capability identifiers and unsupported-combination errors.
-- Remove every actual .NET lab source and duplicated canonical workload asset
-  from PerfLab. Keep descriptor-only bindings for ScenarioLab, Ecommerce, and
-  Protocol Reliability, and enforce the exact canonical source and identity
-  mappings from Section 12.1.
-- Move `samples/dotnet-perf-eng/*.json` to product-neutral conformance fixtures
-  and replace sibling-reading/skipping parity tests with local fixture tests.
-- Prove generic and remote samples validate in isolation. Prove each shipped
-  .NET lab descriptor validates and compiles only against the configured
-  canonical checkout and fails clearly when that checkout is unavailable.
-- Add an allowlist-based independence scan in both repositories. It rejects
-  copied .NET lab source in PerfLab and peer-owned engine/runtime/package
-  dependencies while allowing only the three descriptor-to-target bindings.
-- Remove `dotnet-perf-eng`'s use of the PerfLab JMeter image and all runtime,
-  error, comment, lab-configuration, packaging, and documentation references
-  to PerfLab-owned JMeter artifacts. Introduce its independently built and
-  pinned runner without regressing request-only behavior; retain
-  `PERFLAB_JMETER_IMAGE` only as the compatibility name for that native image.
-- Replace native JMeter adapter/property identity defaults, implement the
-  schema-backed CLI/wire contract, and verify manifest-declared resource limits.
-  Keep the recorded v1 `perflab.*` property adapter; ship only `perf.*` defaults.
+Exit: local lock and independence checks pass. PerfLab generic samples execute
+without `dotnet-perf-eng`. Project-owned .NET labs require the referenced
+checkout and fail clearly when it is absent. Native JMeter runtime and
+guidance execute without PerfLab. Request/JTL sample semantics remain
+unchanged. Legacy `perflab.*` JMX keys remain accepted only through the
+recorded v1 compatibility adapter.
 
-Exit: `v1` manifest membership, schemas, fixtures, lock regeneration,
-revision rejection, local attestations, coordinated parity, generated-interface
-inventory, formatting, and independence checks pass. PerfLab samples execute
-without `dotnet-perf-eng`; the native JMeter runtime and guidance execute without
-PerfLab; request/JTL sample semantics remain unchanged. Legacy `perflab.*` JMX
-keys remain accepted only through the recorded v1 compatibility adapter.
+### 19.1 Slice 1: catalog and single-request compatibility — complete
 
-### 19.1 Slice 1: catalog and single-request compatibility
+JSON catalogs, TSV adapter, v1 request accounting, validate/migrate, and the
+narrow baseline comparison projection are landed. Do not reopen.
 
-- Add JSON catalog/workload manifest parsing against the frozen `v1` files.
-- Adapt TSV to request workloads.
-- Implement runtime validation of legacy request iteration accounting using the
-  exact immutable semantics and fixture paths from Section 2.1. Do not edit
-  those files.
-- Add validate and migrate commands.
-- Compile request scenarios through v1 without changing measured output.
-- Add target compatibility fields `lifecycle.ownership` and `writeSafety.class`
-  as separate values; do not share one enum.
-- Implement and test the narrow, immutable v1-baseline comparison
-  projection defined in Section 16.1 against its frozen `v1` schema.
+### 19.2 Slice 2: journey-aware evidence and k6 — complete
 
-Exit: every existing sample and v1 scenario passes unchanged; migrated output
-is behaviorally equivalent, eligible legacy baselines still gate through a
-recorded projection, and ineligible comparisons are inconclusive.
+Journey/operation/request evidence, k6 selector binding, and the managed
+reference reset contract for write journeys are landed. Remaining stateful
+hardening is C-6 on Gate A.
 
-### 19.2 Slice 2: journey-aware evidence and k6
+### 19.3 Slice 3: JMeter journey and generator capabilities — complete
 
-- Extend models/schemas/SDKs.
-- Add k6 helper and selector binding.
-- Parse journey, operation, request, check, amplification, and delivery metrics.
-- Convert one reference lab to a stateful journey.
-- Implement the `v1` managed-reference ownership, acknowledgement, write
-  budget, unique partition, seed/reset, reconciliation, and cleanup contract
-  before enabling its create/pay steps.
-- Add cardinality and secret-leak tests.
+Journey parent versus protocol child semantics, capability negotiation, and
+wrk journey rejection are landed. Extra JMeter profiles stay Gate B (C-4).
+k6 remains the canonical engine for open-arrival and complex load shapes.
 
-Exit: the six-step journey defined in Section 12.1, with extraction, checks,
-think time, retries, and a mid-step failure, produces correct independent
-counts; repeated write runs prove reset, reconciliation, and cleanup.
-
-### 19.3 Slice 3: JMeter journey and generator capabilities
-
-- Add journey-v2 validation and parsing.
-- Separate transaction parents from protocol children.
-- Support selector properties and required plan components.
-- Add `v1` non-session capability negotiation to all generators. Do not add
-  or advertise the `v1` session capability fields in this slice.
-- Add equivalent k6/JMeter conformance fixtures.
-- Define the pinned JMeter closed/open scheduling strategies and their
-  interruption, timer, random-seed, and result semantics.
-
-Exit: k6 and JMeter produce semantically equivalent evidence for the same
-journey; wrk rejects it before traffic.
-
-### 19.4 Slice 4: canonical profile engine
+### 19.4 Slice 4: canonical profile engine — Gate A k6; Gate B extra JMeter
 
 - Consolidate lab and generic profile compilation.
 - Implement smoke, load, steady, ramp, stress, breakpoint, capacity/knee,
   spike, open, closed, and repetition behavior.
 - Record last healthy/first failing levels and generator saturation.
 - Add adaptive warmup/stabilization and safety stops.
-- Implement each applicable profile through both the k6 and JMeter capability
-  paths; do not mark the profile supported when only one repository has it.
+- k6 implements the profile matrix used by Gate A. JMeter implements a
+  declared subset and rejects the rest before traffic. Do not require JMeter
+  to match every k6 profile. k6 remains canonical for open-arrival and
+  complex load shapes.
 
-Exit: every profile has deterministic compiled stages and golden execution
-tests for request and journey units.
+Exit: every advertised profile has deterministic compiled stages and golden
+execution tests for request and journey units.
 
-### 19.5 Slice 5: continuous soak and long-run durability
+### 19.5 Slice 5: continuous soak and long-run durability — Gate B certification
 
 - Retain required `Runtime.Probe` for every load adapter and current one-shot
   profile. Add `SessionRuntime`/`LoadSession` `Start`, `Snapshot`, and `Stop` to
@@ -1809,10 +1722,10 @@ tests for request and journey units.
 - Add checkpoints, heartbeats, rolling correctness, leak slopes, retention,
   artifact/disk limits, cancellation, and partial-run recovery.
 
-Exit: accelerated soak proves one generator process/session; scheduled 8-hour
-and 24-hour validation runs meet retention and stability requirements.
+Exit: accelerated soak proves one generator process/session. Four-hour
+certification is Gate B (C-12). Eight-hour and 24-hour runs are Gate C.
 
-### 19.6 Slice 6: unmanaged and managed targets
+### 19.6 Slice 6: unmanaged and managed targets — Gate A; Kubernetes Gate C
 
 - Add local-process, local-container, existing-environment, existing-Kubernetes,
   managed-Compose, optional managed-Kubernetes, and agent target descriptors.
@@ -1823,7 +1736,7 @@ and 24-hour validation runs meet retention and stability requirements.
 Exit: the same workload runs against an already-running local process and a
 configured remote environment without deploy/start/stop calls.
 
-### 19.7 Slice 7: data, fault, scale, recovery, and drain
+### 19.7 Slice 7: data, fault, scale, recovery, and drain — Gate A/B
 
 - Generalize the minimal Slice 2 reset provider into data providers,
   partitions, reset/restore, write budgets, and cleanup.
@@ -1837,7 +1750,7 @@ configured remote environment without deploy/start/stop calls.
 Exit: correctness, fault, and recovery evidence is complete and a failed cleanup
 cannot produce a passing gate.
 
-### 19.8 Slice 8: profiling, diagnostics, and LGTM observability
+### 19.8 Slice 8: profiling, diagnostics, and LGTM observability — Gate A/B
 
 - Add multi-type Pyroscope configuration, queries, capture states, and overhead
   compatibility.
@@ -1851,7 +1764,7 @@ cannot produce a passing gate.
 Exit: CPU, wall, allocation, lock, exception, and heap policies are tested;
 separate API/worker campaigns preserve clean measurement evidence.
 
-### 19.9 Slice 9: distributed load and protocols
+### 19.9 Slice 9: distributed load and protocols — Gate B if claimed
 
 - Add authenticated agent registration, clock checks, shard plans, unique data
   partitions, streaming mergeable histograms, and partial-agent policy.
@@ -1863,7 +1776,7 @@ separate API/worker campaigns preserve clean measurement evidence.
 Exit: aggregate results preserve counts and histograms, identify generator
 saturation per shard, and never average percentiles.
 
-### 19.10 Slice 10: reports, gates, and release
+### 19.10 Slice 10: reports, gates, and release — Gate A advertised capabilities
 
 - Update reports, trends, analysis, comparison, and gate messages.
 - Add capability matrix command and support-level reporting.
@@ -1876,52 +1789,17 @@ saturation per shard, and never average percentiles.
 Exit: release checklist and full acceptance matrix pass in both independent
 repositories.
 
-### 19.11 Sizing, ownership, dependencies, and parallel work
+### 19.11 Remaining effort
 
-Ranges are rough engineering weeks per repository, including implementation,
-tests, fixtures, documentation, and review but excluding scheduled wall-clock
-soak time. Slice 0 was re-estimated after decomposing the expanded reference
-target, release coordinator, complete `v1` freeze, CLI inventory refactor,
-independence scan, and native JMeter implementation. The ranges total 56-87
-engineer-weeks per repository and 112-174 across both independent
-implementations. Later slices are recalibrated after Slice 0 exits.
+Slices 0-3 are closed. Remaining engineer-weeks follow the section 23 gates,
+not the original 10-slice platform calendar. Gate A is the first supported
+.NET performance-testing release. Gate B is only the capabilities a release
+advertises. Gate C never blocks Gate A.
 
-| Slice | Size per repository | Accountable owner roles | Dependency/parallelism |
-| --- | --- | --- | --- |
-| 0 | 7-11 weeks, extra large | Contract lead, repository lead, build/release | Starts first; repository tracks run concurrently |
-| 1 | 2-3 weeks, medium | Catalog/compatibility lead, comparison lead | After contract freeze; both repositories in parallel |
-| 2 | 4-6 weeks, large | Workload/evidence lead, k6 lead, data owner | After Slice 1; paired implementation in parallel |
-| 3 | 5-8 weeks, extra large | JMeter lead, capability lead, security reviewer | After Slice 2 semantics; adapters run in parallel |
-| 4 | 6-9 weeks, extra large | Profile-engine lead, performance-methods reviewer | After Slices 2-3; per-product engines in parallel |
-| 5 | 5-8 weeks, extra large | Runtime/session lead, reliability lead | After Slice 4; soak runs add 8/24 hours wall time |
-| 6 | 4-6 weeks, large | Target/lifecycle lead, security reviewer | Design after Slice 1; can overlap Slices 3-5 |
-| 7 | 6-10 weeks, extra large | Data/fault lead, service owners, safety reviewer | After Slices 2 and 6; provider work can split by capability |
-| 8 | 6-9 weeks, extra large | Observability/profiling lead, .NET diagnostics lead | Design after Slice 2; integration after Slices 4 and 6 |
-| 9 | 8-12 weeks, extra large | Distributed-systems lead, protocol owners, security | After Slices 3, 4, and 6; adapters can split by protocol |
-| 10 | 3-5 weeks, large | Reporting/gate lead, release lead, documentation | Migration starts after Slice 1; final gate waits for all |
-
-Development may overlap as listed, but supported releases remain revision- and
-dependency-ordered. Every slice has one accountable PerfLab owner, one
-accountable `dotnet-perf-eng` owner, and independent reviewers for contract
-parity, security/safety, and performance-method validity. Cross-repository pull
-requests link the same revision and acceptance cases without sharing runtime
-artifacts.
-
-The staffing assumption is two independent teams of four to six engineers,
-with named repository leads, plus fractional contract, performance-method,
-observability, security, service/data, QA, and release reviewers. A shared
-contract steward coordinates semantics but never implements one repository on
-behalf of the other. Before Slice 0 starts, each repository records a named DRI,
-backup, reviewer, allocation, and escalation path for every owner role in a
-repository-local ownership file. Slice 0 cannot exit with placeholder roles.
-
-The planning critical path is Slice 0 -> 1 -> 2 -> 3 -> 4 -> 5, with Slice 6
-starting after Slice 1, Slices 7 and 8 joining after their stated dependencies,
-then Slice 9 -> 10. With the staffing assumption and 20-30 percent integration
-contingency, the initial calendar envelope is 10-14 months. Eight-hour and
-24-hour soak qualifications add elapsed validation time but not engineer-week
-effort. Any staffing reduction, failed JMeter decision gate, or external target
-access delay triggers re-estimation rather than compressing acceptance scope.
+Each remaining item still has one accountable PerfLab owner, one accountable
+`dotnet-perf-eng` owner, and independent reviewers for contract, safety, and
+method validity. Cross-repository pull requests share revision and acceptance
+IDs, never runtime artifacts.
 
 ### 19.12 Top risks and mitigations
 
@@ -1934,6 +1812,11 @@ access delay triggers re-estimation rather than compressing acceptance scope.
 | 5 | Long-running or mutating tests damage environments or yield misleading partial results | Ownership-aware leases, minimal early reset, budgets, heartbeats, atomic checkpoints, verified restore/cleanup, and gates that cannot pass incomplete evidence. |
 
 ## 20. Acceptance matrix
+
+The list is the full portfolio. Gate A maps and passes cases for capabilities
+it advertises. Cases that exist only for soak certification, distributed load,
+fault/reliability qualification, Kubernetes, or other Gate B/C claims do not
+block the first supported short-run release.
 
 Required end-to-end cases:
 
@@ -2044,7 +1927,26 @@ Required end-to-end cases:
 
 ## 21. Release gates and definition of done
 
-A capability is marked supported only when:
+This section defines how a capability becomes `supported`. It does not define
+backlog severity. P0, P1, and P2 are defined in section 23.1.
+
+The product is a real-world application performance engineering tool for .NET
+projects: collect the evidence that identifies real issues, and reduce MTTR.
+Not every item in this plan is required for a supported release. Work ships
+through three gates:
+
+- Gate A, supported .NET performance-testing release: evidence cannot lie;
+  ownership is safe; advertised short-run capabilities are qualified. This is
+  the first supported release. It is blocked only by section 23.2. Every
+  diagnostic on that list is P0. The listed C- items also block Gate A.
+- Gate B, advertised production or enterprise capability: required only when
+  that capability is marked `supported` (external-target auth, post-incident
+  stacks or crash capture, soak certification, fault/reliability, distributed
+  load, extra JMeter profiles).
+- Gate C, platform expansion: optional MTTR and platform work. It never blocks
+  Gate A.
+
+A capability is marked `supported` only when:
 
 - Its schema, semantic rules, and failure modes are documented.
 - PerfLab implements and tests it independently.
@@ -2058,10 +1960,10 @@ A capability is marked supported only when:
 - User documentation includes a request example and, where applicable, a
   journey example.
 
-The overall initiative is complete when every required portfolio item has an
-implemented capability path, all acceptance cases pass, v1 request workflows
-remain supported, and neither repository has any runtime or build dependency on
-the other.
+Gate A is complete when section 23 Gate A items are closed, v1 request
+workflows remain supported, and neither product has a runtime or build
+dependency on the other. Project-owned .NET labs may require their project
+checkout. Gate B and Gate C do not delay that release.
 
 ## 22. Normative external references
 
@@ -2075,6 +1977,150 @@ behavior used by the contract against the corresponding official documentation:
 - [Pyroscope .NET span-profile correlation](https://grafana.com/docs/pyroscope/latest/configure-client/trace-span-profiles/dotnet-span-profiles/)
 - [JMeter components used by journey plans](https://jmeter.apache.org/usermanual/component_reference.html)
 - [JMeter distributed testing](https://jmeter.apache.org/usermanual/remote-test.html)
+- [.NET runtime metrics](https://learn.microsoft.com/en-us/dotnet/core/diagnostics/built-in-metrics-runtime)
+- [dotnet-monitor in-process features](https://github.com/dotnet/dotnet-monitor/blob/main/documentation/configuration/in-process-features-configuration.md)
+- [dotnet-monitor collection rules](https://github.com/dotnet/dotnet-monitor/blob/main/documentation/collectionrules/collectionrules.md)
+- [Collect dumps on crash](https://learn.microsoft.com/en-us/dotnet/core/diagnostics/collect-dumps-crash)
 
 Official behavior is an input to adapter implementation, not a substitute for
 the repository-owned capability tests and evidence contract.
+
+## 23. Remaining work by release gate
+
+This section is remaining work only. It is not a requirement that every item
+ship before a complete real-world tool. Evidence integrity and ownership are
+hard requirements. Distributed execution, full JMeter parity, fault
+orchestration, kernel profiling, full dump automation, and long-soak
+certification are explicit optional capability tiers.
+
+### 23.1 Goal, gates, and P0/P1/P2
+
+Product goal: a real-world application performance engineering tool for .NET
+projects that reduces overall MTTR and helps identify real issues. A package
+must not look healthy when required evidence is missing, attached to the
+wrong process, or sampled under an unrecorded policy.
+
+Section 21 defines the three release gates and how a capability becomes
+`supported`. P0, P1, and P2 apply to `D-` items. Every `D-` item on Gate A
+is P0. `C-` items block the gate that lists them and do not use P0/P1/P2.
+
+| Priority | Meaning | Blocks Gate A? |
+| --- | --- | --- |
+| P0 | Evidence-correctness or safety: false diagnosis, empty-as-healthy, wrong-target attach, incomparable runs, unverifiable contract, unsafe mutation of an unowned target | Yes |
+| P1 | Required to mark a specific capability `supported` | No, unless that capability is claimed |
+| P2 | Advanced MTTR, hygiene, or platform expansion | No |
+
+Verified against `dotnet-perf-eng` `bd9d754` and the PerfLab working tree.
+Claims without a file, symbol, or artifact are not normative. Disproved
+claims stay in 23.6 so they cannot re-enter.
+
+### 23.2 Gate A — supported .NET performance-testing release
+
+These items prevent false diagnoses, incomparable runs, unsafe target
+mutation, or unverifiable release claims. They block the first supported
+release.
+
+| ID | Item | Evidence | Required action |
+| --- | --- | --- | --- |
+| D-P0-1 | Multi-replica attach can select the wrong process. Native `head -1` on identical assemblies; PerfLab fails closed via `single-match`. Empty-result checks do not detect this: api-b attached to api-a can still return valid, non-empty metrics. | `labs/protocol-reliability/lab.config.sh:44`; `capture.sh:58-60` | Independent target identity proof: expected role, monitor endpoint, PID/container ID, image/command hash, and recorded attachment identity. Fail on mismatch. Two-identical-assemblies regression. |
+| D-P0-2 | Remote profiler verification URL is required and exported; native never fetches it. PerfLab `readProfilingVerification` does. | `lab-context.sh:111,184` | Port fetch-and-validate: provider, version, types, quotas, activation, freshness, target identity. |
+| D-P0-4 | Empty evidence reads as captured. Only a transport failure increments the native failure counter; HTTP 200 with an empty result set is written and treated as captured. File existence is not series presence. Captured ScenarioLab and Ecommerce runs populate the queried `dotnet_*` names, including `dotnet_gc_heap_allocated_bytes_total`; do not treat those names as stale without a failing query artifact. Also pick one Loki outage rule: native last-success versus PerfLab final-probe. | `capture-evidence.sh:130-140`; `RuntimeProfilerEngine.cs:232-263`; `docs/OBSERVABILITY.md:92-96` | Require non-empty series for declared-required roles (a future rename then fails automatically); fail on EventPipe dropped-event counts; one log-outage semantic with a parity fixture. |
+| D-P0-5 | Native does not record the effective runtime sampler, and comparison does not fingerprint it. PerfLab already records Tempo sampling policy and rate in compiled observability configuration. | `labs/*/compose.yaml`; `internal/lab/compile.go:879-881`; `compare-runs.sh` | Record native `OTEL_TRACES_SAMPLER` / `_ARG` in the manifest. Fingerprint the policy in comparison. Do not treat 100% traces as a universal Gate A rule. |
+| D-P0-7 | PerfLab allocation handlers are unreachable under Informational `0x14C14FCCBD`. `AllocatingTypes` has no capture state. | `TraceCapture.cs:217-284`; `Models.cs:341-357` | Named, tested provider policies; capture-state on `AllocatingTypes`. Native Pyroscope `allocation` already covers call-site allocation when that type is enabled. |
+| D-P0-8 | Profile types are absent from comparison compatibility. CPU-only versus `all-diagnostic` compares as equal. Former ID: D-P1-2. | `compare-runs.sh:91-100` | Fingerprint resolved types, sampling limits, profiler version, keep-tiering, and the D-P0-5 sampler policy. |
+| D-P0-9 | No telemetry-loss accounting. Logs exporter `queue_size: 64` can drop with nothing recorded. Former ID: D-P1-5. | `labs/*/infra/observability/otelcol-extra.yaml` | Capture collector, SDK exporter, and profile-upload health as required evidence. |
+| D-P0-10 | Diagnosis confidence is not completeness-capped. Former ID: D-P2-8. | `internal/peanalyze/analyzers.go:203-255`; `domain.go:455` | Cap confidence by completeness, sample counts, dropped events, and symbolization. |
+| C-1 | Cross-repository coordinator cannot succeed as written. | `.github/workflows/coordinate-performance-contract.yml:33-35` | Shell-based native attestation exporter; update the workflow; fix the PerfLab README hosted-CI sentence. Do not restore Go to `dotnet-perf-eng`. Plans and local locks verifying is not coordinator success. |
+| C-5 | Target lifecycle is mostly local/remote or external/compose. | `experiment.go:888-913`; `lab-context.sh:20` | Existing local process and existing container; identity and readiness; exclusive diagnostic leases; never stop an unowned target. Kubernetes stays Gate C. |
+| C-6 | Stateful data safety is incomplete. Idempotent reset/cleanup, ownership, interruption recovery, and dataset fingerprints are required for stateful workloads. Extra SQL and message-queue providers are Gate C portfolio choices. | `harness/core/datafault/`; `internal/datafault/` | Land the essential subset on Gate A. Do not require two provider families for the first release. |
+| C-14 | Numerical parity needs repeated controlled experiments. One S10/E06 run is not a defect. | retained ScenarioLab/Ecommerce runs | Five to ten alternating trials; compare median and dispersion. |
+| C-15 | Acceptance cases are not mapped to Gate A proof. | section 20 | Map advertised Gate A cases to an exact command. Missing Gate A mapping fails release. Do not require a mapping for unadvertised Gate B/C cases. |
+| D-P0-11 | Bottleneck classification is throughput-blind and has no retention dimension, so it names the wrong resource with high confidence. Reproduced on S04 (known answer: static-subscriber retention): verdict `threadpool-starved [high]` from a queue peak of 10 across 4 threads at 19.6k rps -- a ~0.5 ms backlog -- while `otherLatencySharePct` was 96.1 and the in-process GC dumps showed +1334.8% heap growth. `grep -c 'heap\|retain\|leak\|gcdump' bottleneck.sh` was 0. | `harness/core/analyze/bottleneck.sh`; run `suite-20260917T135702Z/scenarios/S04` | Gate queue saturation on backlog SECONDS (depth/throughput), not absolute depth; surface managed-heap retention from the before/after gcdump diff as a reported dimension that never wins the verdict; state explicitly when a queue is transient. |
+| D-P0-12 | Logs are empty by design on a healthy path, and an empty window passed as a complete capture. Three of four scenarios returned 0 records while completing; only S21 logged, and every one of its 1668 records was an error. `Microsoft.AspNetCore: Warning` suppresses request logging, so a healthy run emits nothing an engineer can correlate. Per-request logging is NOT a blanket fix: S04 sustains 19.6k rps, where it would emit ~1.2M lines per 30s window, perturbing the measurement and instantly truncating the log budget. | `capture-evidence.sh` log state; `source/dotnet/*/appsettings.json` | Degrade the package when a required signal is reachable-but-empty; expose request logging as an explicit opt-in knob rather than a default; record which of the two applies. |
+
+### 23.3 Gate B — advertised production or enterprise capability
+
+These do not block Gate A unless the release claims the capability.
+
+| ID | Item | When it is required | Required action |
+| --- | --- | --- | --- |
+| D-P0-3 | `/stacks` never produces stacks. Native defaults the flag false; 3 of 4 images lack `/app/shared`; PerfLab hardcodes the fallback. Fallback is recorded. | Claiming post-incident hang/deadlock snapshots | Stage monitor shared libraries. Enable `/stacks` on diagnose-mode recreates with Pyroscope off. Do not flip the measurement default: in-process stacks inject an `ICorProfiler` that conflicts with Pyroscope. Do not use `dotnet-stack` (`dotnet/diagnostics#5444` is open). Correct the inverted comment at `capture.sh:32` and `README.md:700-704`. Artifact size and privacy limits are mandatory. |
+| D-P0-6 | No pre-armed collection rules, stopping events, or crash dumps. | Claiming post-incident crash/hang diagnosis | Collection rules and crash-dump config with size limits and a sensitive-data policy. A basic performance-testing release is not blocked. |
+| D-P1-1 | Profiling policy is a per-run global; `scenarios.tsv` has no column. | Advertising multiple selectable profile types | Catalog field with CLI precedence; recreate the app when startup config changes. |
+| D-P1-6 | No first-class backend or monitor authentication. | External-target or shared/production backends | Secret-backed headers, CA, optional mTLS, no secrets in artifacts. Isolated local Compose labs may stay unauthenticated. |
+| D-P1-7 | Remote evidence is window-only. | Remote-observed mode | Correlation contract; keep window-only as an explicit degraded mode. |
+| C-3 | Distributed execution is unimplemented. | Claiming distributed-load capability | Authenticated agents, leases, mergeable histograms, loss policy. Not required for a good base tool. |
+| C-4 | JMeter implements a subset of k6 profiles. | Advertising a JMeter profile beyond the subset | Keep the subset; fail unsupported profiles before traffic. k6 stays canonical for open-arrival and complex shapes. |
+| C-7 / C-8 | Fault and reliability orchestration is narrow. | Advertising fault or reliability qualification | Safe apply/restore confirmation, emergency cleanup, recovery correctness. Network/disk faults may stay deferred. |
+| C-9 / C-10 / C-11 | Live qualification of Protocol Reliability, profiles, and Pyroscope types. | Each advertised lab, generator, profile, or diagnostic type | Qualify every supported capability, not every possible combination. C-11 still needs D-P0-3 and D-P1-1 before a six-type plus `/stacks` campaign is claimed. |
+| C-12 | Four-hour soak is pending. | A stability or soak-certification claim | One uninterrupted session, heartbeats, slopes, cancellation. Does not block a short-run Gate A release. Eight- and 24-hour runs stay Gate C. |
+
+### 23.4 Gate C — platform expansion
+
+Enable when the target or platform supports them. They reduce MTTR for
+specific failure classes and are not required for every .NET project.
+
+| ID | Item | Note |
+| --- | --- | --- |
+| D-P1-3 | Span-to-profile correlation | `PyroscopeSpanProcessor`; CPU profiles only |
+| D-P1-4 | Native/kernel/off-CPU path | PerfCollect / `collect-linux` / `dotnet-symbol`; explicit unsupported |
+| D-P1-8 | Dynamic `perf.phase` and run baggage | Application signal source; generated queries when advertised |
+| D-P1-10 | Mid-load container stats and sockets | Contract already has `deployment-topology` and `target-network-evidence`. Gap is PerfLab collectors and optional-native weakness, not a missing family |
+| D-P2-1 | Speedscope keeps CPU samples only | Raw nettrace is retained |
+| D-P2-7 | Clock and query provenance incomplete except profiles | Replayable metrics/logs/traces queries; not a Gate A promise |
+| D-P2-3 | Dump analysis under-normalized | `dumpasync`, `syncblk`, `analyzeoom` |
+| D-P2-4 | PerfLab capability preflight | Refuse unsupported dump/gcdump before perturbing |
+| D-P1-9 / D-P1-11 / D-P2-2 / D-P2-5 / D-P2-6 | Test wiring, hygiene, keyword pin. D-P1-11 is `dotnet-counters` **wired up, not deleted**: the tool is in the diagnostics image for exactly this, and the defect was that nothing invoked it. | Land with the related fix; not a release blocker |
+| C-13 | Native Tempo unique-fill | Minor. 993 unique traces against a 1,000 maximum is not a broken result. Preserve returned count and dedup facts. Refill only if callers require an exact unique-count guarantee |
+| C-6 extra | Second data-provider family | SQL plus message-queue is a portfolio choice |
+| Deferred | Kubernetes, Windows/macOS, 8/24h soak, Datadog, hostile-environment, upgrade/rollback, network/disk faults | Stay deferred; never reported as complete |
+
+### 23.5 Combined implementation order
+
+Ordered so Gate A closes before qualification of advertised extras. Later
+steps are skipped when that capability is not claimed.
+
+| Step | Work | Closes | Gate |
+| --- | --- | --- | --- |
+| 1 | Repair native attestation exporter and hosted coordinator | C-1 | A |
+| 2 | Distinguish absence from health; telemetry-loss; confidence cap | D-P0-4, D-P0-9, D-P0-10 | A |
+| 3 | Target identity proof for multi-replica attach | D-P0-1 | A |
+| 4 | Record native sampler; fingerprint profile types and sampler in comparison | D-P0-5, D-P0-8 | A |
+| 5 | Fetch remote profiler verification | D-P0-2 | A |
+| 6 | Named allocation provider policy and capture-state in PerfLab | D-P0-7 | A |
+| 7 | Explicit existing-process/container lifecycle; never stop unowned targets | C-5 | A |
+| 8 | Essential data reset, ownership, interruption recovery, fingerprints | C-6 | A |
+| 9 | Repeated numerical parity trials | C-14 | A |
+| 10 | Gate A acceptance-case map | C-15 | A |
+| 11 | Per-scenario profiling policy when multiple types are advertised | D-P1-1 | B |
+| 12 | Diagnose-mode `/stacks` with profiler coexistence rules | D-P0-3 | B |
+| 13 | Collection rules and crash dumps if post-incident capture is claimed | D-P0-6 | B |
+| 14 | External-target auth; qualify each advertised capability | D-P1-6, C-9, C-10, C-11 | B |
+| 15 | Advertised JMeter extras, soak cert, faults, distributed load | C-4, C-12, C-7, C-8, C-3 | B |
+| 16 | Remaining Gate C diagnostics and provenance | D-P1-3, D-P1-4, D-P1-8, D-P1-10, D-P2-7, D-P2-* remainder, C-13 | C |
+
+### 23.6 Claims examined and rejected
+
+These must not re-enter without new evidence.
+
+| Rejected claim | Why it is wrong |
+| --- | --- |
+| A profiler-versus-diagnostics mutual-exclusion guard is required for EventPipe | EventPipe is diagnostic IPC. Pyroscope and a monitor EventPipe session coexist. Perturbation is D-P0-8. In-process `/stacks` is a real profiler conflict and is handled under Gate B D-P0-3, not by excluding EventPipe. |
+| Profiling service quotas are read by no code | Preflight parses quotas, splits on `=`, and records the source. `performance.sh:108-121`. |
+| `/exceptions`, `/livemetrics`, `/logs`, `/metrics`, `/parameters`, `/operations` are gaps | Covered by Loki, Prometheus/OTel, and Pyroscope `exception`. `/exceptions` is conditional on Gate B when exception profiling was off. |
+| The `database` trace profile is a gap | Covered by Tempo DB spans, `db_client_*` metrics, and `pg_stat_statements`. |
+| `dotnet-stack` is the fix for `/stacks` | `#5444` is open; no `--diagnostic-port`. Use diagnose-mode startup-hook staging. |
+| Empty evidence checks would have detected D-P0-1 | Wrong-process attach can return non-empty metrics. Identity proof is required. |
+| JMeter must match every k6 profile for parity | Intrinsic generator limits may differ when advertised identically. Fail unsupported JMeter profiles before traffic. |
+| .NET 10 Prometheus metric names are currently stale | Captured ScenarioLab and Ecommerce runs return populated series for the queried `dotnet_*` names, including `dotnet_gc_heap_allocated_bytes_total`. Completeness is D-P0-4; naming is not a present defect. |
+| Gate A requires distributed execution, crash dumps, kernel profiles, or a four-hour soak | Those are Gate B/C capability claims. |
+
+### 23.7 Already complete
+
+Do not reopen: stable `v1` contracts; Go removed from `dotnet-perf-eng`;
+canonical .NET lab ownership; product versus project-checkout independence
+wording (C-2) and unchanged case 30; single-request compatibility; multi-step
+journeys; weighted mixes; core LGTM capture; increased log and trace limits;
+evidence normalization; native JMeter image ownership; basic local
+single-node orchestration; Slices 1-3. Slice 0 contract freeze is functionally
+complete except C-1.

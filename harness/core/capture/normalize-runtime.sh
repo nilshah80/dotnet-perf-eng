@@ -43,5 +43,13 @@ if [[ -s "${artifact_dir}/analysis/runtime/before-gcdump-report.txt" \
    && -s "${artifact_dir}/analysis/runtime/after-gcdump-report.txt" ]]; then
   echo ""
   "${harness_core_dir}/analyze/diff-gcdump.sh" "${artifact_dir}" || true
+  # bottleneck.sh reads the retention dimension from that diff, but it already
+  # ran during the measure phase -- before this diagnostic capture existed.
+  # Refresh it now so a leak that only the in-process before/after dumps can see
+  # reaches the verdict instead of being stranded in a file nothing reads.
+  if [[ -s "${artifact_dir}/analysis/runtime/diff-gcdump-before-after.txt" ]]; then
+    "${harness_core_dir}/analyze/bottleneck.sh" "${artifact_dir}" >/dev/null 2>&1 || true
+    "${harness_core_dir}/analyze/report.sh" "${artifact_dir}" >/dev/null 2>&1 || true
+  fi
 fi
 (( normalization_rc == 0 )) || exit "${normalization_rc}"

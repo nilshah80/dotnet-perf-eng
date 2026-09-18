@@ -163,6 +163,12 @@ services:
       PERF_RUN_ID: ${PERF_RUN_ID:-local-manual}
       PERF_RUN_MODE: ${PERF_RUN_MODE:-measure}
       SEED_SCALE: ${SEED_SCALE:-smoke}
+      # Per-request logging (D-P0-4 companion). OFF by default: at scenariolab
+      # throughput (S04 sustains ~19.6k rps) ASP.NET request logging emits two
+      # lines per request -- ~1.2M lines per 30s window -- which perturbs the
+      # measurement and instantly truncates the Loki budget. Turn it on for a
+      # low-rate investigation: PERFLAB_REQUEST_LOGGING=Information.
+      Logging__LogLevel__Microsoft.AspNetCore.Hosting.Diagnostics: ${PERFLAB_REQUEST_LOGGING:-Warning}
       PERFLAB_CONTINUOUS_PROFILING: ${PERFLAB_CONTINUOUS_PROFILING:-0}
       PERFLAB_PROFILING_TYPES: ${PERFLAB_PROFILING_TYPES:-cpu}
       PERFLAB_PROFILING_KEEP_TIERING: ${PERFLAB_PROFILING_KEEP_TIERING:-0}

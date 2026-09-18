@@ -127,16 +127,57 @@ mkdir -p "${artifact_dir}/telemetry/metrics" "${artifact_dir}/telemetry/traces/d
 
 # Instant vs range: gauges/rates must be read over the run window, because an
 # instant query after load stops reports an idle process and hides the peak.
+# Query provenance (D-P2-7). A backend response does not echo the query that
+# produced it, so without this an evidence file cannot be re-run or audited:
+# the reader cannot tell a genuinely empty series from a selector that never
+# matched. Every rendered query is recorded with its endpoint, window and the
+# artifact it produced. Appended as NDJSON so a failure mid-capture still
+# leaves the queries issued so far.
+# Whether an empty log window counts as a GAP depends on whether this run
+# asked the application to log at all. Both the resolved setting and the
+# decision are recorded so the reader never has to guess which case an
+# empty window represents.
+request_logging_level="${PERFLAB_REQUEST_LOGGING:-Warning}"
+case "$(printf '%s' "${request_logging_level}" | tr '[:upper:]' '[:lower:]')" in
+  trace|debug|information) logs_required_default=1 ;;
+  *)                       logs_required_default=0 ;;
+esac
+logs_required="${PERFLAB_LOGS_REQUIRED:-${logs_required_default}}"
+case "${logs_required}" in 0|1) ;; *) echo "PERFLAB_LOGS_REQUIRED must be 0 or 1; received '${logs_required}'." >&2; exit 1 ;; esac
+
+queries_file="${artifact_dir}/telemetry/queries.ndjson"
+window_start_utc="$(date -u -r "${start_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@${start_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")"
+window_end_utc="$(date -u -r "${end_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@${end_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")"
+record_trace_slice() { # record_trace_slice <start> <end> <limit> <artifact> <state>
+  # Every parameter the request actually carried, so the record can be replayed
+  # verbatim. Omitting one (most_recent changes WHICH traces come back, not just
+  # how many) would make the provenance look exact while describing a different
+  # query than the one that produced the artifact.
+  mkdir -p "${artifact_dir}/telemetry"
+  printf '{"signal":"traces","backend":"tempo","endpoint":"/api/search","query":"%s","artifact":"%s","captureState":"%s","startEpoch":%s,"endEpoch":%s,"limit":%s,"mostRecent":true}\n' \
+    "$(json_escape "${trace_query}")" "$(json_escape "$4")" "$(json_escape "$5")" "$1" "$2" "$3" >> "${queries_file}"
+}
+record_query() { # record_query <signal> <backend> <endpoint> <query> <artifact> <state>
+  mkdir -p "${artifact_dir}/telemetry"
+  printf '{"signal":"%s","backend":"%s","endpoint":"%s","query":"%s","artifact":"%s","captureState":"%s","startEpoch":%s,"endEpoch":%s,"startUtc":"%s","endUtc":"%s"}\n' \
+    "$(json_escape "$1")" "$(json_escape "$2")" "$(json_escape "$3")" "$(json_escape "$4")" \
+    "$(json_escape "$5")" "$(json_escape "$6")" "${start_epoch}" "${end_epoch}" \
+    "$(json_escape "${window_start_utc:-}")" "$(json_escape "${window_end_utc:-}")" >> "${queries_file}"
+}
 capture_prometheus_query() {
+  local state=captured
   curl -fsS --max-time 20 --get --data-urlencode "query=$2" \
     "${prometheus_url}/api/v1/query" > "${artifact_dir}/telemetry/metrics/$1.json" \
-    || { echo "WARNING: Prometheus instant query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; metric_query_failures=$((metric_query_failures + 1)); }
+    || { echo "WARNING: Prometheus instant query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; metric_query_failures=$((metric_query_failures + 1)); state=failed; }
+  record_query metrics prometheus "/api/v1/query" "$2" "telemetry/metrics/$1.json" "${state}"
 }
 capture_prometheus_range() {
+  local state=captured
   curl -fsS --max-time 30 --get --data-urlencode "query=$2" \
     --data-urlencode "start=${start_epoch}" --data-urlencode "end=${end_epoch}" --data-urlencode "step=5" \
     "${prometheus_url}/api/v1/query_range" > "${artifact_dir}/telemetry/metrics/$1.json" \
-    || { echo "WARNING: Prometheus range query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; metric_query_failures=$((metric_query_failures + 1)); }
+    || { echo "WARNING: Prometheus range query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; metric_query_failures=$((metric_query_failures + 1)); state=failed; }
+  record_query metrics prometheus "/api/v1/query_range" "$2" "telemetry/metrics/$1.json" "${state}"
 }
 
 # Application (<app_metric_prefix>_*) metrics: the app's own instrumentation,
@@ -218,7 +259,7 @@ trace_population_seen=0
 trace_saturated=0
 trace_next_cursor=""
 capture_tempo_slice() { # <start-seconds> <end-seconds>
-  local slice_start="$1" slice_end="$2" remaining page_limit page_file count middle attempt
+  local slice_start="$1" slice_end="$2" remaining page_limit page_file count middle attempt slice_ok=0
   (( trace_population_seen >= trace_limit )) && { trace_saturated=1; trace_next_cursor="${slice_start}000000000"; return 0; }
   remaining=$((trace_limit - trace_population_seen)); page_limit=1000
   (( remaining < page_limit )) && page_limit="${remaining}"
@@ -230,10 +271,17 @@ capture_tempo_slice() { # <start-seconds> <end-seconds>
         --data-urlencode "start=${slice_start}" --data-urlencode "end=${slice_end}" --data-urlencode "limit=${page_limit}" \
         --data-urlencode "most_recent=true" \
         "${tempo_url}/api/search" > "${page_file}.tmp" 2>/dev/null; then
-      tempo_reachable=1; mv "${page_file}.tmp" "${page_file}"; break
+      tempo_reachable=1; mv "${page_file}.tmp" "${page_file}"; slice_ok=1; break
     fi
     rm -f "${page_file}.tmp"; (( attempt < 6 )) && sleep 5
   done
+  # Record THIS request, not just the overall query. Trace search is issued as a
+  # recursive series of time slices with their own start/end/limit, so a single
+  # broad entry afterwards describes a request that was never made and cannot be
+  # replayed. One record per slice keeps the provenance executable.
+  record_trace_slice "${slice_start}" "${slice_end}" "${page_limit}" \
+    "telemetry/traces/search-pages/$(basename "${page_file}")" \
+    "$([[ "${slice_ok:-0}" == "1" ]] && echo captured || echo failed)"
   [[ -s "${page_file}" ]] || return 1
   count="$(jqd -r '(.traces // []) | length' < "${page_file}" 2>/dev/null || echo 0)"
   if (( count >= page_limit && slice_end - slice_start > 1 )); then
@@ -279,6 +327,9 @@ if [[ "${tempo_reachable}" -eq 1 ]]; then
 else
   telemetry_trace_state="missing"
 fi
+# The per-slice records above are the replayable requests; this one is the
+# merged RESULT, marked as such so it is not mistaken for a single query.
+record_query traces tempo "(merged result of the /api/search slices above)" "${trace_query}" "telemetry/traces/search.json" "${telemetry_trace_state}"
 
 if grep -q '"traceID"' "${trace_search_file}" 2>/dev/null; then
   trace_detail_failures=0
@@ -361,8 +412,11 @@ else
   printf '{"status":"success","data":{"resultType":"streams","result":[]}}\n' > "${log_file}"
 fi
 # A silently empty capture is worse than a loud failure: it makes an incomplete
-# package look diagnosable. Empty-but-reachable stays best-effort; unreachable on
-# every retry (transport/HTTP failure) makes the logs MISSING -> mark partial.
+# package look diagnosable. Unreachable on every retry (transport/HTTP failure)
+# makes the logs MISSING. A reachable-but-EMPTY window is also not evidence: a
+# diagnosis cannot distinguish "the application said nothing" from "the log
+# pipeline dropped everything", so it degrades the package to partial rather
+# than passing as a complete capture (D-P0-4: absence must not read as health).
 if [[ "${log_reachable}" -eq 0 ]]; then
   echo "WARNING: Loki unreachable at ${loki_url} after retries; logs are MISSING." >&2
   capture_incomplete=1
@@ -370,14 +424,31 @@ if [[ "${log_reachable}" -eq 0 ]]; then
 else
   telemetry_log_records="$(jqd -r '[.data.result[]?.values[]?] | length' < "${log_file}" 2>/dev/null || echo 0)"
   if [[ "${telemetry_log_records}" -eq 0 ]]; then
-    echo "WARNING: log capture produced no entries at ${log_file}; treat these logs as MISSING, not as evidence of a quiet run." >&2
-    telemetry_log_state="delayed"
+    # An empty window means different things depending on whether the run ASKED
+    # the application to log. With request logging off (the default -- at this
+    # lab's throughput it would emit ~1.2M lines per window) a healthy path emits
+    # nothing, and calling every clean run "partial" would drain that state of
+    # meaning. With logging on, empty IS a gap. So requiredness is explicit, and
+    # the resolved setting travels with the evidence so a reader can tell which
+    # case they are looking at instead of inferring it.
+    if [[ "${logs_required}" == "1" ]]; then
+      echo "WARNING: log capture produced no entries at ${log_file} although request logging is enabled (${request_logging_level}); the logs are MISSING." >&2
+      capture_incomplete=1
+      telemetry_log_state="missing"
+    else
+      echo "NOTE: no log entries in the window; request logging is '${request_logging_level}', so a healthy path emits none. Set PERFLAB_REQUEST_LOGGING=Information (and PERFLAB_LOGS_REQUIRED=1) to make this a gap." >&2
+      telemetry_log_state="empty"
+    fi
   elif [[ "${log_more}" -eq 1 || "${telemetry_log_records}" -ge "${log_limit}" ]]; then
     telemetry_log_state="truncated"
   else
     telemetry_log_state="captured"
   fi
 fi
+record_query logs loki "/loki/api/v1/query_range" "${log_query}" "telemetry/logs/query-range.json" "${telemetry_log_state}"
+printf '{"requestLoggingLevel":"%s","logsRequired":%s,"records":%s,"captureState":"%s"}\n' \
+  "$(json_escape "${request_logging_level}")" "$([[ "${logs_required}" == "1" ]] && echo true || echo false)" \
+  "${telemetry_log_records:-0}" "$(json_escape "${telemetry_log_state}")" > "${artifact_dir}/telemetry/logs/policy.json"
 
 telemetry_metric_files="$(find "${artifact_dir}/telemetry/metrics" -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' ')"
 telemetry_metrics_state="captured"
@@ -417,6 +488,10 @@ if [[ "${target_mode}" == "local" ]]; then
   compose exec -T "${primary_app_service}" sh -c 'cat /proc/net/tcp /proc/net/tcp6' \
     > "${artifact_dir}/dependencies/${primary_app_service}-net-tcp.txt" 2>/dev/null || true
   compose ps --format json | jqd -s '.' > "${artifact_dir}/dependencies/docker-compose-ps.json" 2>/dev/null || true
+
+  # Final boundary: what the run left behind (leaked containers, a restarted
+  # dependency, residual host load).
+  "${harness_core_dir}/capture/capture-environment.sh" "${artifact_dir}" post-run >/dev/null 2>&1 || true
 
   # Optional runtime-adapter evidence captured at measurement time.
   if [[ -f "${runtime_adapter_dir}/evidence-extra.sh" ]]; then

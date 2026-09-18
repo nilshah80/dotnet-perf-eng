@@ -324,6 +324,9 @@ restore_fault_dep() {
   compose start "${PERFLAB_FAULT_DEP}" >/dev/null 2>&1 || true
 }
 
+# Baseline BEFORE any load: distinguishes "the app slowed down" from "the
+# host was already loaded when we started".
+"${harness_core_dir}/capture/capture-environment.sh" "${artifact_dir}" pre-run >/dev/null 2>&1 || true
 echo "Measuring for ${effective_duration}s at ${connections} connections with ${load_generator}..."
 if [[ "${load_profile}" == "soak" ]]; then
   mkdir -p "${artifact_dir}/benchmark/session"
@@ -345,6 +348,9 @@ if [[ "${target_mode}" == "local" ]]; then
   sample_midload & midload_pid=$!
   inject_fault & fault_pid=$!
 fi
+# Boundary environment snapshots (phase envelope). Best-effort: the
+# environment contextualises a verdict, it never IS the verdict.
+"${harness_core_dir}/capture/capture-environment.sh" "${artifact_dir}" measurement-start >/dev/null 2>&1 || true
 measure_started_epoch="$(date -u +%s)"
 load_pid=""
 if [[ "${load_profile}" == "soak" ]]; then
@@ -371,6 +377,7 @@ else
   loadgen_measure "${artifact_dir}" measure
 fi
 measure_ended_epoch="$(date -u +%s)"
+"${harness_core_dir}/capture/capture-environment.sh" "${artifact_dir}" measurement-end >/dev/null 2>&1 || true
 if [[ "${load_profile}" == "soak" ]]; then
   printf '{"event":"snapshot","atEpoch":%s,"final":true}\n' "${measure_ended_epoch}" \
     > "${artifact_dir}/benchmark/session/snapshot.json"
@@ -425,6 +432,10 @@ if [[ "${target_mode}" == "local" || "${remote_telemetry:-0}" == "1" ]]; then
   # answer next to the AI phase's. Best-effort and skippable (PERFLAB_BOTTLENECK=0).
   if [[ "${PERFLAB_BOTTLENECK:-1}" != "0" ]]; then
     "${harness_core_dir}/analyze/bottleneck.sh" "${artifact_dir}" || true
+    # Human-readable entry point. Regenerated after runtime normalization
+    # too, so a retention finding that only the gcdump pair can see reaches
+    # the page instead of only the JSON.
+    "${harness_core_dir}/analyze/report.sh" "${artifact_dir}" >/dev/null 2>&1 || true
   fi
 else
   echo "Remote (black-box): skipping Prometheus-backed analyzers; recording not-applicable server analysis." >&2

@@ -27,6 +27,22 @@ pyroscope_service_required() {
   return 1
 }
 
+# Requiredness is per SERVICE, but not every profile TYPE is expected to carry
+# samples. Under load a required service must produce cpu and wall profiles --
+# their absence is a real capture failure. allocation, lock, exception and
+# live-heap are conditional on the workload actually allocating, contending,
+# throwing or retaining: a scenario that throws no exceptions has no exception
+# samples, and calling that "missing evidence" marks a correct, complete package
+# incomplete. Empty stays visible per type; it just no longer degrades the run.
+# Same rule as the log policy: distinguish "nothing happened" from "we asked and
+# got nothing back".
+pyroscope_type_required() {
+  case "$1" in
+    cpu|wall) return 0 ;;
+    *)        return 1 ;;
+  esac
+}
+
 pyroscope_select_profile_type() {
   PYROSCOPE_PROFILE_CATEGORY="$1"
   case "$1" in
@@ -269,7 +285,7 @@ pyroscope_capture_profiles() {
     if [[ "${pyroscope_last_state}" == "truncated" && "${overall}" == "captured" ]]; then
       overall="truncated"
     fi
-    if pyroscope_service_required "${service}"; then
+    if pyroscope_service_required "${service}" && pyroscope_type_required "${profile_type}"; then
       case "${pyroscope_last_state}" in
         delayed)
           [[ "${overall}" == "captured" || "${overall}" == "truncated" ]] && overall="delayed"
@@ -281,12 +297,16 @@ pyroscope_capture_profiles() {
           overall="failed"
           ;;
       esac
+    elif pyroscope_service_required "${service}" && [[ "${pyroscope_last_state}" == "failed" ]]; then
+      # A conditional TYPE with no samples is fine; a conditional type whose
+      # QUERY failed is still a backend problem and must surface.
+      overall="failed"
     fi
-    if pyroscope_service_required "${service}"; then
+    if pyroscope_service_required "${service}" && pyroscope_type_required "${profile_type}"; then
       case "${pyroscope_last_state}" in
         captured|truncated) : ;;
         *)
-          echo "WARNING: required Pyroscope profile for ${service} is ${pyroscope_last_state}; this evidence package is INCOMPLETE." >&2
+          echo "WARNING: required Pyroscope profile ${profile_type} for ${service} is ${pyroscope_last_state}; this evidence package is INCOMPLETE." >&2
           required_failed=1
           ;;
       esac
