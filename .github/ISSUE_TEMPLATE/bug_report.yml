@@ -1,0 +1,68 @@
+name: Bug report
+description: Something in the harness or a lab behaves incorrectly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **The reference app contains deliberately planted performance defects.**
+        Slow queries, unbounded allocation and lock contention in `source/` or
+        `labs/` are usually intentional — please check they are not documented as
+        planted before filing.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what occurred instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: The exact harness command, the lab, and the scenario.
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: lab
+    attributes:
+      label: Lab
+      options:
+        - scenariolab (postgres + redis + rabbitmq + worker)
+        - ecommerce (API over postgres only)
+        - protocol-reliability
+        - remote-example
+        - Not lab-specific
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Harness core (run orchestration)
+        - Adapter (runtime / load / telemetry)
+        - Evidence capture or normalization
+        - AI diagnosis phase
+        - Compose / container definitions
+        - Contract or parity
+        - Reference application
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: single-operator
+    attributes:
+      label: Single-operator check
+      options:
+        - label: Only one harness invocation was running. (Concurrent runs share ports and corrupt each other's results.)
+          required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Docker version, .NET SDK version, load generator and version, commit.
+      render: shell
+    validations:
+      required: true

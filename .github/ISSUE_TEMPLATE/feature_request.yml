@@ -1,0 +1,36 @@
+name: Feature request
+description: Propose a capability, adapter or lab change
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: The measurement or evidence problem this solves. Please describe the problem, not just the proposed solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Which layer should carry this?
+      description: Onboarding a project or runtime means adding files, not editing the core.
+      options:
+        - A new or extended adapter
+        - A descriptor field
+        - A new lab
+        - The harness core (please justify why an adapter cannot carry it)
+        - Unsure — please advise
+    validations:
+      required: true
+  - type: checkboxes
+    id: contract
+    attributes:
+      label: Contract impact
+      options:
+        - label: This would change a contract document, and therefore must change identically in perflab
