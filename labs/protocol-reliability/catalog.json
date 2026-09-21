@@ -57,7 +57,7 @@
       "targets": ["api-a"], "effects": {"classification": "read"},
       "defaults": {"loadModel": "closed", "rate": 32, "rateUnit": "concurrent-iterations"},
       "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
-      "diagnostics": {"preset": "stacks"}
+      "diagnostics": {"preset": "stacks", "profilingPolicy": "contention"}
     },
     {
       "id": "P07", "name": "cpu-pressure",
@@ -73,7 +73,7 @@
       "targets": ["api-a"], "effects": {"classification": "read"},
       "defaults": {"loadModel": "closed", "rate": 8, "rateUnit": "concurrent-iterations"},
       "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
-      "diagnostics": {"preset": "gcdump"}
+      "diagnostics": {"preset": "gcdump", "profilingPolicy": "memory"}
     },
     {
       "id": "P09", "name": "tenant-noisy-neighbor",
@@ -96,6 +96,33 @@
       "workload": {"type": "request", "selector": "P11"},
       "targets": ["api-a"], "effects": {"classification": "read"},
       "defaults": {"loadModel": "closed", "rate": 8, "rateUnit": "concurrent-iterations"},
+      "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
+      "diagnostics": {"preset": "trace", "profilingPolicy": "exceptions"}
+    },
+    {
+      "id": "P12", "name": "security-cookie-refresh-csrf",
+      "workload": {"type": "journey", "selector": "security-cookie-refresh-csrf"},
+      "targets": ["api-a"],
+      "effects": {"classification": "idempotent-write", "replayable": true,
+        "resetPolicy": "run-partition-reset"},
+      "defaults": {"loadModel": "closed", "rate": 4, "rateUnit": "concurrent-users"},
+      "lifecycle": {"ownership": "managed"},
+      "writeSafety": {"class": "managed-reference"},
+      "diagnostics": {"preset": "trace"}
+    },
+    {
+      "id": "P13", "name": "multi-origin-allowlisted-journey",
+      "workload": {"type": "journey", "selector": "multi-origin-allowlist"},
+      "targets": ["api-a"], "effects": {"classification": "read"},
+      "defaults": {"loadModel": "closed", "rate": 4, "rateUnit": "concurrent-users"},
+      "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
+      "diagnostics": {"preset": "trace"}
+    },
+    {
+      "id": "P14", "name": "distributed-k6-request",
+      "workload": {"type": "request", "selector": "P14"},
+      "targets": ["api-a"], "effects": {"classification": "read"},
+      "defaults": {"loadModel": "closed", "rate": 2, "rateUnit": "concurrent-iterations"},
       "lifecycle": {"ownership": "managed"}, "writeSafety": {"class": "none"},
       "diagnostics": {"preset": "trace"}
     }

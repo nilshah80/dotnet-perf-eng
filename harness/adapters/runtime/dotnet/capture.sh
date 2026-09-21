@@ -12,6 +12,8 @@ set -euo pipefail
 HARNESS_ROOT="${PERFLAB_HARNESS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 # shellcheck disable=SC1091
 source "${HARNESS_ROOT}/core/lib/common.sh"
+# shellcheck disable=SC1091
+source "${HARNESS_ROOT}/adapters/runtime/dotnet/capability.sh"
 
 artifact_dir="${1:?capture.sh <artifact-dir> <kind> <duration> <target-service>}"
 requested_kind="${2:?diagnostic kind required}"
@@ -29,16 +31,35 @@ if [[ -z "${assembly_name}" ]]; then
   exit 1
 fi
 
-# Stacks are captured directly by default. An operator can explicitly disable
-# that endpoint and retain the recorded CPU-trace fallback for an environment
-# where dotnet-monitor's in-process stack channel is unavailable.
+# D-P0-3. /stacks injects ICorProfiler. Pyroscope already occupies that slot
+# on a measured process, so the measurement default is the recorded CPU-trace
+# fallback. Diagnose-mode recreates an owned app with Pyroscope off and sets
+# PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true so the call-stack channel can load.
+# Do not use dotnet-stack (dotnet/diagnostics#5444 is open; no diagnostic port).
 kind="${requested_kind}"
 fallback_reason=""
-if [[ -z "${campaign_preset}" && "${kind}" == "stacks" && "${PERFLAB_ENABLE_DOTNET_MONITOR_STACKS:-false}" != "true" ]]; then
-  kind="trace"
-  fallback_reason="dotnet-monitor /stacks is disabled by default because its in-process profiler channel is unreliable in this Docker Desktop sidecar topology"
-  echo "Requested stacks for ${target}; capturing a CPU trace fallback instead."
-  echo "Set PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true to explicitly retry /stacks."
+dotnet_monitor_stacks_capture_allowed() {
+  [[ "${PERFLAB_ENABLE_DOTNET_MONITOR_STACKS:-false}" == "true" ]] || return 1
+  [[ "${PERFLAB_CONTINUOUS_PROFILING:-0}" != "1" ]] || return 1
+  [[ "${target_mode:-local}" != "remote" ]] || return 1
+  [[ "${PERFLAB_TARGET_KIND:-managed-compose}" == "managed-compose" ]] || return 1
+  return 0
+}
+if [[ -z "${campaign_preset}" && "${kind}" == "stacks" ]]; then
+  if [[ "${PERFLAB_ENABLE_DOTNET_MONITOR_STACKS:-false}" != "true" ]]; then
+    kind="trace"
+    fallback_reason="dotnet-monitor /stacks is disabled during measurement because it injects ICorProfiler, which conflicts with Pyroscope; diagnose-mode recreates an owned app with profiling off"
+    echo "Requested stacks for ${target}; capturing a CPU trace fallback instead."
+    echo "Diagnose-mode capture-runtime.sh enables /stacks after recreating with PERFLAB_CONTINUOUS_PROFILING=0."
+  elif [[ "${PERFLAB_CONTINUOUS_PROFILING:-0}" == "1" ]]; then
+    kind="trace"
+    fallback_reason="dotnet-monitor /stacks cannot share ICorProfiler with Pyroscope; the process still has continuous profiling loaded"
+    echo "Requested stacks for ${target} while Pyroscope is loaded; capturing a CPU trace fallback instead."
+  elif [[ "${target_mode:-local}" == "remote" || "${PERFLAB_TARGET_KIND:-managed-compose}" != "managed-compose" ]]; then
+    kind="trace"
+    fallback_reason="dotnet-monitor /stacks is refused on a remote or attach-only target because it injects ICorProfiler into a process this run does not own"
+    echo "Requested stacks for ${target} on a remote or attach-only target; capturing a CPU trace fallback instead."
+  fi
 fi
 
 mkdir -p "${artifact_dir}/runtime"
@@ -54,7 +75,7 @@ if [[ -z "${campaign_preset}" ]]; then
 fi
 
 processes_file="${artifact_dir}/runtime/processes-diagnostic.json"
-curl -fsS "${diagnostics_url}/processes" > "${processes_file}"
+monitor_curl -fsS "${diagnostics_url}/processes" > "${processes_file}"
 # D-P0-1. Selecting with `head -1` silently attached to the FIRST process whose
 # assembly matched, which is wrong the moment two replicas share an assembly:
 # protocol-reliability maps api-a and api-b to ProtocolReliability.Api, so a
@@ -103,7 +124,7 @@ fi
 # about one monitor, and two labs pointed at two sidecars both answer it.
 target_identity_file="${artifact_dir}/runtime/target-identity.json"
 target_detail_file="${artifact_dir}/runtime/process-detail.json"
-if ! curl -fsS --get --data-urlencode "uid=${runtime_uid}" "${diagnostics_url}/process" > "${target_detail_file}"; then
+if ! monitor_curl -fsS --get --data-urlencode "uid=${runtime_uid}" "${diagnostics_url}/process" > "${target_detail_file}"; then
   echo "Could not read process detail for uid ${runtime_uid} from ${diagnostics_url}." >&2
   echo "  Without it the capture would be attributed to a process nothing in the evidence identifies." >&2
   exit 1
@@ -206,6 +227,30 @@ if ! jqd -c --argjson container "${container_identity}" --arg cmdsha "${command_
 fi
 mv "${identity_tmp}" "${target_identity_file}"
 
+# D-P2-4. The selected process exists, but that alone does not prove this
+# monitor can execute the requested diagnostic operation. Ask its live info
+# and OpenAPI reports before opening an EventPipe session, loading the stacks
+# profiler, or requesting a dump. A missing endpoint/capability is a refusal,
+# never a late capture error after the target was perturbed.
+capability_kinds=()
+if [[ -n "${campaign_preset}" ]]; then
+  case "${campaign_preset}" in
+    cpu) capability_kinds=(trace) ;;
+    memory) capability_kinds=(gcdump) ;;
+    cpu-memory) capability_kinds=(gcdump trace) ;;
+    hang)
+      capability_kinds=(trace)
+      dotnet_monitor_stacks_capture_allowed && capability_kinds+=(stacks)
+      [[ "${PERFLAB_DIAGNOSTIC_INCLUDE_DUMP:-0}" == "1" ]] && capability_kinds+=(dump)
+      ;;
+    dump) capability_kinds=(dump) ;;
+    *) echo "Unknown runtime campaign preset '${campaign_preset}' for capability preflight." >&2; exit 1 ;;
+  esac
+else
+  capability_kinds=("${kind}")
+fi
+dotnet_monitor_capability_require "${artifact_dir}" "${runtime_uid}" "${capability_kinds[@]}" || exit 1
+
 campaign_load_dir="${artifact_dir}/runtime/campaign-load"
 run_load() {
   if [[ -n "${campaign_preset}" ]]; then
@@ -238,39 +283,93 @@ cleanup_load() {
 }
 trap cleanup_load EXIT INT TERM
 
+performance_stream_copy_limit() {
+  local dest="$1" budget="$2" limit actual
+  case "${budget}" in ''|*[!0-9]*) echo "download budget must be an integer" >&2; return 1 ;; esac
+  limit=$((budget + 1))
+  head -c "${limit}" > "${dest}.tmp" || true
+  actual="$(wc -c < "${dest}.tmp" | tr -d ' ')"
+  if (( actual == 0 )); then
+    rm -f "${dest}.tmp"
+    return 1
+  fi
+  if (( actual > budget )); then
+    rm -f "${dest}.tmp"
+    echo "Diagnostic artifact ${dest##*/} exceeded the ${budget}-byte budget during the bounded copy; it was discarded rather than left on disk." >&2
+    return 2
+  fi
+  mv "${dest}.tmp" "${dest}"
+}
+
 pull() {  # pull <dest-file> <curl-arg>...
   local dest="$1"; shift
-  # Bound the DOWNLOAD, not just the free space beforehand. A process dump is
-  # produced by the target and its size is not known until it arrives, so a
-  # pre-flight disk check is a guess: curl --max-filesize refuses mid-transfer,
-  # which is the only point at which the real size is known.
-  local budget="${PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES:-1073741824}"
-  if curl -fsS --max-filesize "${budget}" "$@" > "${dest}.tmp"; then
-    # And enforce after the fact too: --max-filesize relies on a Content-Length
-    # the server may not send, so a chunked response can exceed it silently.
-    local actual
-    actual="$(wc -c < "${dest}.tmp" | tr -d ' ')"
-    if (( actual > budget )); then
-      rm -f "${dest}.tmp"
-      echo "Diagnostic artifact ${dest##*/} reached ${actual} bytes, exceeding the ${budget}-byte budget; it was discarded rather than left in the package." >&2
-      exit 1
-    fi
-    mv "${dest}.tmp" "${dest}"
-  else
-    rm -f "${dest}.tmp"
-    echo "Diagnostic fetch failed for ${target} (${dest##*/}); the capture is incomplete." >&2
-    exit 1   # the EXIT trap stops the background load; capture.json stays "running"
+  local budget limit copy_rc curl_rc statuses
+  budget="$(diagnostic_download_budget "${dest}")"
+  limit=$((budget + 1))
+  rm -f "${dest}.tmp"
+  set +o pipefail
+  monitor_curl -fsS --max-filesize "${limit}" "$@" | performance_stream_copy_limit "${dest}" "${budget}"
+  statuses=("${PIPESTATUS[@]}")
+  curl_rc="${statuses[0]:-1}"
+  copy_rc="${statuses[1]:-1}"
+  set -o pipefail
+  if (( copy_rc == 2 )); then
+    echo "Diagnostic artifact ${dest##*/} reached more than ${budget} bytes, exceeding the ${budget}-byte budget; it was discarded rather than left in the package." >&2
+    exit 1
   fi
+  if (( copy_rc != 0 )); then
+    rm -f "${dest}.tmp" "${dest}"
+    echo "Diagnostic fetch failed for ${target} (${dest##*/}); the capture is incomplete." >&2
+    exit 1
+  fi
+  if (( curl_rc != 0 && curl_rc != 18 && curl_rc != 23 && curl_rc != 63 )); then
+    rm -f "${dest}"
+    echo "Diagnostic fetch failed for ${target} (${dest##*/}); the capture is incomplete." >&2
+    exit 1
+  fi
+}
+
+diagnostic_download_budget() { # dest-file
+  local dest="$1"
+  local budget="${PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES:-1073741824}"
+  case "${budget}" in ''|*[!0-9]*) echo "PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES must be an integer." >&2; exit 1 ;; esac
+  if [[ "${dest##*/}" == "stacks.txt" ]]; then
+    local stacks_budget="${PERFLAB_STACKS_MAX_BYTES:-16777216}"
+    case "${stacks_budget}" in ''|*[!0-9]*) echo "PERFLAB_STACKS_MAX_BYTES must be an integer." >&2; exit 1 ;; esac
+    (( stacks_budget < budget )) && budget="${stacks_budget}"
+  elif [[ "${dest##*/}" == *.dmp || "${dest##*/}" == coredump.* ]]; then
+    local dump_budget="${PERFLAB_CRASH_DUMP_MAX_BYTES:-536870912}"
+    case "${dump_budget}" in ''|*[!0-9]*) echo "PERFLAB_CRASH_DUMP_MAX_BYTES must be an integer." >&2; exit 1 ;; esac
+    (( dump_budget < budget )) && budget="${dump_budget}"
+  fi
+  printf '%s' "${budget}"
 }
 
 try_pull() { # try_pull <dest-file> <curl-arg>...
   local dest="$1"; shift
-  if curl -fsS "$@" > "${dest}.tmp"; then
-    mv "${dest}.tmp" "${dest}"
-    return 0
-  fi
+  local budget limit copy_rc curl_rc statuses
+  budget="$(diagnostic_download_budget "${dest}")"
+  limit=$((budget + 1))
   rm -f "${dest}.tmp"
-  return 1
+  set +o pipefail
+  monitor_curl -fsS --max-filesize "${limit}" "$@" | performance_stream_copy_limit "${dest}" "${budget}"
+  statuses=("${PIPESTATUS[@]}")
+  curl_rc="${statuses[0]:-1}"
+  copy_rc="${statuses[1]:-1}"
+  set -o pipefail
+  if (( copy_rc == 2 )); then
+    echo "Diagnostic artifact ${dest##*/} reached more than ${budget} bytes, exceeding the ${budget}-byte budget; it was discarded rather than left in the package." >&2
+    return 1
+  fi
+  if (( copy_rc != 0 )); then
+    rm -f "${dest}.tmp" "${dest}"
+    return 1
+  fi
+  if (( curl_rc != 0 && curl_rc != 18 && curl_rc != 23 && curl_rc != 63 )); then
+    rm -f "${dest}"
+    return 1
+  fi
+  return 0
 }
 
 if [[ -n "${campaign_preset}" ]]; then
@@ -383,8 +482,13 @@ if [[ -n "${campaign_preset}" ]]; then
       ;;
     hang)
       campaign_trace 1
+      next_seq=2
+      if dotnet_monitor_stacks_capture_allowed; then
+        campaign_snapshot stacks "${next_seq}" stacks stacks.txt stacks
+        next_seq=$((next_seq + 1))
+      fi
       if [[ "${include_dump}" == "1" ]]; then
-        campaign_snapshot dump 2 dump process.dmp dump --data-urlencode "type=WithHeap"
+        campaign_snapshot dump "${next_seq}" dump process.dmp dump --data-urlencode "type=WithHeap"
       fi
       ;;
     dump)
@@ -415,7 +519,7 @@ if [[ -n "${campaign_preset}" ]]; then
       dropped_json="${dropped_json}${dropped_json:+,}$(printf '{"artifact":"%s","bytes":%s}' \
         "$(json_escape "${oversized_file#"${artifact_dir}/"}")" "${oversized_bytes}")"
       echo "  removed ${oversized_file#"${artifact_dir}/"} (${oversized_bytes} bytes) to stay within the budget" >&2
-    done < <(find "${artifact_dir}/runtime" -type f \( -name '*.nettrace' -o -name '*.gcdump' -o -name '*.dmp' \) -print0 \
+    done < <(find "${artifact_dir}/runtime" -type f \( -name '*.nettrace' -o -name '*.gcdump' -o -name '*.dmp' -o -name 'stacks.txt' \) -print0 \
              | xargs -0 ls -S 2>/dev/null)
     printf '{"budgetBytes":%s,"bytesAfterEnforcement":%s,"removed":%s,"artifacts":[%s]}\n' \
       "${budget_bytes}" "${runtime_bytes}" "${dropped_count}" "${dropped_json}" \
@@ -566,6 +670,7 @@ limitations='['
 limitations+='"Speedscope retains CPU samples only; GC, contention and exception events present in the .nettrace are not normalized (read the raw trace for those)."'
 limitations+=',"Only symbols embedded in the captured artifacts are resolved; no external symbol server is contacted."'
 [[ "${kind}" == "trace" ]] && limitations+=',"profile=cpu enables Microsoft-Windows-DotNETRuntime 0x14C14FCCBD at Informational; GCAllocationTick is Verbose and AllocationSampling needs keyword 0x80000000000, so per-call-site allocation is NOT in this trace."'
+[[ "${kind}" == "stacks" ]] && limitations+=',"Call stacks contain type and method names from the process; they are retained locally, bounded by PERFLAB_STACKS_MAX_BYTES, and are not an exportable artifact."'
 [[ -n "${fallback_reason}" ]] && limitations+=",\"$(json_escape "${fallback_reason}")\""
 [[ "${counters_state}" == "failed" || "${counters_state}" == "missing" ]] && limitations+=",\"$(json_escape "runtime counters unavailable: ${counters_reason}")\""
 limitations+=']'

@@ -70,12 +70,14 @@ services:
   diagnostic-permissions:
     image: alpine:3.22
     user: "0:0"
-    command: ["sh", "-c", "chown -R 1654:1654 /diag && chmod 0770 /diag"]
+    command: ["sh", "-c", "mkdir -p /diag/crash-dumps/incomplete && chown -R 1654:1654 /diag && chmod -R 0770 /diag"]
     volumes:
       - diagnostic-ipc:/diag
 
   dotnet-monitor:
-    image: mcr.microsoft.com/dotnet/monitor:10.0
+    build:
+      context: ../../harness/adapters/runtime/dotnet/monitor
+      dockerfile: Dockerfile
     command:
       - collect
       - --no-auth
@@ -83,14 +85,21 @@ services:
       DOTNETMONITOR_DiagnosticPort__ConnectionMode: Listen
       DOTNETMONITOR_DiagnosticPort__EndpointName: /diag/dotnet-monitor.sock
       DOTNETMONITOR_Storage__DefaultSharedPath: /diag
+      DOTNETMONITOR_Storage__DumpTempFolder: /diag/crash-dumps
       DOTNETMONITOR_InProcessFeatures__Enabled: "true"
       DOTNETMONITOR_Urls: http://+:52323
       DOTNETMONITOR_Metrics__Endpoints: http://+:52325
+      PERF_RUN_MODE: ${PERF_RUN_MODE:-measure}
+      PERFLAB_TARGET_KIND: ${PERFLAB_TARGET_KIND:-managed-compose}
+      PERFLAB_COLLECTION_RULES: ${PERFLAB_COLLECTION_RULES:-0}
+      PERFLAB_DUMP_ACK: ${PERFLAB_DUMP_ACK:-}
     ports:
       - "127.0.0.1:18323:52323"
       - "127.0.0.1:18325:52325"
     volumes:
       - diagnostic-ipc:/diag
+    tmpfs:
+      - /diag/collection-rule-dumps:size=536870912,mode=0770,uid=1654,gid=1654
     depends_on:
       diagnostic-permissions:
         condition: service_completed_successfully
@@ -141,6 +150,10 @@ services:
       OTEL_TRACES_SAMPLER: parentbased_traceidratio
       OTEL_TRACES_SAMPLER_ARG: ${PERFLAB_TRACE_SAMPLE_RATIO:-0.25}
       DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
+      DOTNET_DbgEnableMiniDump: ${PERFLAB_DBG_ENABLE_MINIDUMP:-0}
+      COMPlus_DbgEnableMiniDump: ${PERFLAB_DBG_ENABLE_MINIDUMP:-0}
+      DOTNET_DbgMiniDumpType: "3"
+      DOTNET_DbgMiniDumpName: /diag/crash-dumps/coredump.%p
       DOTNET_gcServer: "1"
       DOTNET_GCHeapHardLimitPercent: "50"
     ports:

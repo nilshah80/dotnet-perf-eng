@@ -1827,8 +1827,9 @@ Required end-to-end cases:
    after managed-reference ownership, acknowledgement, budget, unique-partition,
    and reset readiness pass, then proves bounded cleanup.
 4. Dynamic values, retries, and think time work in a journey.
-4b. Cookies, token refresh, and CSRF work in a journey. Gate B: no lab asset
-    implements them, so this release does not advertise the capability.
+4b. Cookies, token refresh, and CSRF work in the Protocol Reliability secure
+    journey. The target issues a `Secure` cookie session, rotates a bearer
+    refresh token, and rejects a protected mutation without the CSRF proof.
 5. A failed middle operation fails the journey without corrupting request counts.
 6. k6 and JMeter split journey parent and HTTP request counts correctly.
 7. Weighted mixes declare one `memberKind`, reject nested or heterogeneous
@@ -2144,7 +2145,7 @@ the rule above that counts as not met, not as an omission.
 | 2 | JSON workload matches the equivalent TSV result | A | native `harness/core/lib/catalog-equivalence-test.sh` |
 | 3 | Stateful checkout journey with ownership/ack/budget/reset | A | native `harness/core/run/run-scenario-lifecycle-test.sh` |
 | 4 | Dynamic values, retries and think time in a journey | A | native `harness/adapters/loadgen/k6/journey-behaviour-test.sh` (dynamic values and token reuse proven against a stub that rejects unissued tokens; think time proven from observed request spacing); native `harness/adapters/loadgen/k6/journey-normalization-test.sh` (retries) |
-| 4b | Cookies, token refresh and CSRF in a journey | B | Not required for Gate A -- no lab asset implements them, so this release does not advertise them. Building them is the Gate B item; until then the capability is absent rather than unproven |
+| 4b | Cookies, token refresh and CSRF in a journey | B | native `labs/protocol-reliability/edge-security-test.sh`; native `labs/protocol-reliability/security-journey-test.sh` |
 | 5 | Failed middle operation fails the journey cleanly | A | native `harness/adapters/loadgen/k6/journey-normalization-test.sh` |
 | 6 | k6 and JMeter split journey parent and request counts | A | native `harness/adapters/loadgen/k6/journey-normalization-test.sh`; native `harness/adapters/loadgen/jmeter/runner-test.sh` |
 | 7 | Weighted mixes declare one `memberKind` | A | native `scripts/contract/foundation-test.sh` (manifest validation only) |
@@ -2153,22 +2154,22 @@ the rule above that counts as not met, not as an omission.
 | 10 | Stress distinguishes saturation from generator starvation | A | native `harness/core/analyze/bottleneck-rules-test.sh` |
 | 11 | Breakpoint records last healthy and first failing levels | A | native `harness/adapters/loadgen/k6/profile-shape-test.sh` |
 | 12 | Spike records failure and recovery time by phase | A | native `harness/adapters/loadgen/k6/profile-shape-test.sh` |
-| 13 | Soak uses one uninterrupted session with checkpoints | B | Not required for Gate A (C-12) |
+| 13 | Soak uses one uninterrupted session with checkpoints | B | native `harness/core/lib/soak-session-test.sh`; perflab `go test ./internal/session/ -run TestSoakUsesOneSession`; perflab `go test ./internal/session/ -run TestRejectRestartedGenerator`; perflab `go test ./internal/lab/ -run TestSoakCertificationRequiresFourHours` |
 | 14 | Data-scale restores and verifies each dataset fingerprint | A | native `harness/core/run/run-scenario-lifecycle-test.sh` |
-| 15 | Fault execution proves apply and restore | B | Not required for Gate A (C-7/C-8) |
+| 15 | Fault execution proves apply and restore | B | native `harness/core/lib/fault-proof-test.sh`; perflab `go test ./internal/orchestrator/ -run TestFaultRestoresOnFailureAndInterruptedMeasurement`; perflab `go test ./internal/orchestrator/ -run TestKillFaultRestoresWithStart` |
 | 16 | Async reconciles accepted/completed/duplicate/corrupt | A | native `harness/core/analyze/async-reconciliation-test.sh` |
 | 17 | Existing local process runs without deployment or termination | A | native `harness/core/run/run-scenario-lifecycle-test.sh` |
 | 18 | Existing remote environment runs without lifecycle mutation | A | native `harness/core/run/run-scenario-lifecycle-test.sh` |
 | 19 | Existing Kubernetes performs no apply/delete/scale | C | Not required for Gate A |
-| 20 | Multi-origin journey routes only to allowlisted targets | B | Not required for Gate A |
-| 21 | Six profile type states are recorded | B | Not required for Gate A (C-11, needs D-P0-3/D-P1-1) |
+| 20 | Multi-origin journey routes only to allowlisted targets | B | native `labs/protocol-reliability/multi-origin-proof-test.sh` |
+| 21 | Six profile type states are recorded | B | native `harness/core/lib/capability-qualification-test.sh`; perflab `go test ./internal/qualification/ -run TestAdvertisedCapabilitiesHaveProofs` |
 | 22 | API and worker runtime campaigns replay load separately | A | native `harness/core/run/run-scenario-lifecycle-test.sh` |
 | 23 | Baseline compatibility rejects mismatched envelopes | A | native `harness/core/analyze/compare-runs-fingerprint-test.sh`; native `harness/core/analyze/compare-runs-keep-tiering-test.sh` |
 | 24 | Required `missing`/`unsupported`/`failed`/`truncated` states | A | native `harness/core/capture/capture-evidence-empty-signal-test.sh` |
 | 25 | Cancellation preserves partial evidence and restores mutations | A | native `harness/core/run/run-scenario-lifecycle-test.sh` |
 | 26 | Secret scanning finds no credential values in artifacts | A | native `harness/core/capture/evidence-safety-test.sh` |
 | 27 | Cardinality tests reject unbounded metric/profile labels | A | native `harness/core/capture/evidence-safety-test.sh` |
-| 28 | Distributed aggregation matches a single-node fixture | B | Not required for Gate A (C-3) |
+| 28 | Distributed aggregation matches a single-node fixture | B | native `harness/core/lib/distributed-merge-test.sh`; native `labs/protocol-reliability/distributed-proof-test.sh`; perflab `scripts/contract/distributed-lab-proof.sh` |
 | 29 | Both repositories pass the fixture corpus installed alone | A | native `scripts/contract/independence.sh`; perflab `scripts/contract/independence.sh` |
 | 30 | No cross-product default, sample, discovery or recovery path | A | native `scripts/contract/independence.sh` |
 | 31 | Byte-identical manifest defines the same members | A | native `scripts/contract/verify-lock.sh` |
@@ -2178,16 +2179,16 @@ the rule above that counts as not met, not as an omission.
 | 35 | JMeter open-model uses the pinned validated strategy | A | native `harness/adapters/loadgen/jmeter/runner-test.sh` |
 | 36 | JMeter sharding does not multiply intended total load | B | Not required for Gate A (C-4) |
 | 37 | Autoscaling captures scale-out/in lag and thrashing | C | Not required for Gate A |
-| 38 | Backpressure distinguishes rejection from transport error | B | Not required for Gate A |
-| 39 | Noisy-neighbor reports fairness and per-tenant SLOs | B | Not required for Gate A |
-| 40 | Connection-churn separates DNS/TLS/connection/queue/server | B | Not required for Gate A |
+| 38 | Backpressure distinguishes rejection from transport error | B | native `labs/protocol-reliability/backpressure-proof-test.sh` |
+| 39 | Noisy-neighbor reports fairness and per-tenant SLOs | B | native `labs/protocol-reliability/edge-security-test.sh` |
+| 40 | Connection-churn separates DNS/TLS/connection/queue/server | B | native `labs/protocol-reliability/edge-security-test.sh` |
 | 41 | Browser synthetic stays separate from load-generator SLIs | C | Not required for Gate A |
 | 42 | An unmanaged target's profiler configuration is verified | A | native `harness/core/lib/lab-context-pyroscope-test.sh` |
 | 43 | Required versus optional telemetry uses the eight signals | A | native `harness/core/capture/capture-evidence-empty-signal-test.sh` (partial: metrics and logs only) |
-| 44 | Restarted pods/processes scoped to the measurement window | B | Not required for Gate A |
+| 44 | Restarted pods/processes scoped to the measurement window | B | native `labs/protocol-reliability/measurement-window-proof-test.sh` |
 | 45 | Artifacts satisfy sensitivity and retention limits | A | native `harness/core/capture/artifact-policy-test.sh` |
 | 46 | Local-host fingerprints detect power/thermal/envelope change | A | native `harness/core/analyze/environment-drift-test.sh` |
-| 47 | Resume never presents a restarted generator as one soak | B | Not required for Gate A (C-12) |
+| 47 | Resume never presents a restarted generator as one soak | B | native `harness/core/lib/soak-session-test.sh`; perflab `go test ./internal/session/ -run TestRejectRestartedGenerator`; perflab `go test ./internal/orchestrator/ -run TestLoadProfileRuntimeRejectsRestartedGenerator` |
 | 48 | Every current CLI flag and native environment name preserved | A | native `scripts/contract/native-inventory.py --check .` |
 | 49 | Adding a command, flag or native name registers it | A | native `scripts/contract/native-inventory.py --check .` |
 | 50 | Compatible stable `v1` candidates compare | A | native `harness/core/analyze/compare-runs-fingerprint-test.sh` |
@@ -2222,16 +2223,16 @@ These do not block Gate A unless the release claims the capability.
 
 | ID | Item | When it is required | Required action |
 | --- | --- | --- | --- |
-| D-P0-3 | `/stacks` never produces stacks. Native defaults the flag false; 3 of 4 images lack `/app/shared`; PerfLab hardcodes the fallback. Fallback is recorded. | Claiming post-incident hang/deadlock snapshots | Stage monitor shared libraries. Enable `/stacks` on diagnose-mode recreates with Pyroscope off. Do not flip the measurement default: in-process stacks inject an `ICorProfiler` that conflicts with Pyroscope. Do not use `dotnet-stack` (`dotnet/diagnostics#5444` is open). Correct the inverted comment at `capture.sh:32` and `README.md:700-704`. Artifact size and privacy limits are mandatory. |
-| D-P0-6 | No pre-armed collection rules, stopping events, or crash dumps. | Claiming post-incident crash/hang diagnosis | Collection rules and crash-dump config with size limits and a sensitive-data policy. A basic performance-testing release is not blocked. |
-| D-P1-1 | Profiling policy is a per-run global; `scenarios.tsv` has no column. | Advertising multiple selectable profile types | Catalog field with CLI precedence; recreate the app when startup config changes. |
-| D-P1-6 | No first-class backend or monitor authentication. | External-target or shared/production backends | Secret-backed headers, CA, optional mTLS, no secrets in artifacts. Isolated local Compose labs may stay unauthenticated. |
-| D-P1-7 | Remote evidence is window-only. | Remote-observed mode | Correlation contract; keep window-only as an explicit degraded mode. |
-| C-3 | Distributed execution is unimplemented. | Claiming distributed-load capability | Authenticated agents, leases, mergeable histograms, loss policy. Not required for a good base tool. |
+| D-P0-3 | Complete: `/stacks` is enabled only after an owned managed-Compose diagnose recreate with Pyroscope off and monitor shared libraries staged. Remote, attached, and measurement targets retain the recorded CPU-trace fallback. | Claiming post-incident hang/deadlock snapshots | `harness/adapters/runtime/dotnet/stacks-staging-test.sh`; bounded non-exportable stacks evidence. Do not use `dotnet-stack` (`dotnet/diagnostics#5444` is open). |
+| D-P0-6 | Complete: a real dotnet-monitor `CollectionRules` configuration is loaded only for an owned managed-Compose diagnose recreate when `PERFLAB_COLLECTION_RULES=1` and `PERFLAB_DUMP_ACK=i-understand-sensitive-dump`. | Claiming post-incident crash/hang diagnosis | The rule collects one Triage dump per hour to a 512 MiB monitor tmpfs. Limit+1 copy verifies the local size before source purge; oversized or unreachable sources fail closed. `harness/adapters/runtime/dotnet/collection-rules-live-test.sh` proves the monitor command line, `Running` rule, one dump, budget, and purge. |
+| D-P1-1 | Profiling policy is a per-run global; `scenarios.tsv` has no column. | Advertising multiple selectable profile types | Catalog `diagnostics.profilingPolicy` with CLI/env precedence; recreate the owned app when startup types change; refuse process-lifetime changes on an unowned target. Proof: native `harness/core/lib/catalog-profiling-policy-test.sh`; PerfLab compile, catalog, and shared-compose recreate tests. |
+| D-P1-6 | Complete: backend and monitor authorization, CA, and optional mTLS use secret handles; artifacts retain `secret://` references only. Isolated Compose remains intentionally unauthenticated. | External-target or shared/production backends | Native backend/monitor auth tests, PerfLab Grafana/plugin tests, and Protocol Reliability mTLS proof. The C# monitor client presents configured client certificates. |
+| D-P1-7 | Complete for declared remote-observed mode: an exact target run-id probe verifies the header, response, Prometheus label, Loki label, and Tempo attribute before traffic. Window-only remote telemetry remains explicitly degraded when correlation is not requested. | Remote-observed mode | Native `harness/core/lib/remote-correlation-test.sh`; PerfLab lab/orchestrator correlation tests; `labs/protocol-reliability/security-journey-test.sh`. |
+| C-3 | Complete for the closed `perflab-distributed/v1` k6 GET workload only: authenticated agents register clock-bound identities, acquire one-use leases, run fixed scripts and execution segments, and use target-proven data partitions. | Claiming distributed-load capability | Every agent fingerprints its actual k6 binary; a mixed fleet is refused. Fixed histogram counts merge before percentiles are recomputed, loss fails closed unless explicit partial mode is set, and evidence retains only the token handle. Native `labs/protocol-reliability/distributed-proof-test.sh`; PerfLab `scripts/contract/distributed-lab-proof.sh`. It is not arbitrary remote execution, JMeter distribution, or general multi-agent dispatch. |
 | C-4 | JMeter implements a subset of k6 profiles. | Advertising a JMeter profile beyond the subset | Keep the subset; fail unsupported profiles before traffic. k6 stays canonical for open-arrival and complex shapes. |
 | C-7 / C-8 | Fault and reliability orchestration is narrow. | Advertising fault or reliability qualification | Safe apply/restore confirmation, emergency cleanup, recovery correctness. Network/disk faults may stay deferred. |
-| C-9 / C-10 / C-11 | Live qualification of Protocol Reliability, profiles, and Pyroscope types. | Each advertised lab, generator, profile, or diagnostic type | Qualify every supported capability, not every possible combination. C-11 still needs D-P0-3 and D-P1-1 before a six-type plus `/stacks` campaign is claimed. |
-| C-12 | Four-hour soak is pending. | A stability or soak-certification claim | One uninterrupted session, heartbeats, slopes, cancellation. Does not block a short-run Gate A release. Eight- and 24-hour runs stay Gate C. |
+| C-9 / C-10 / C-11 | Complete: advertised Protocol Reliability profiles, six Pyroscope types, and diagnose-mode `/stacks` are qualified with fixed proof commands. | Each advertised lab, generator, profile, or diagnostic type | `harness/core/lib/capability-qualification-test.sh`; PerfLab qualification tests; the live Protocol Reliability Gate B suite. |
+| C-12 | Complete: a live 14,400-second Protocol Reliability soak (`gateb-soak-20260919T135323Z`) produced a verified evidence package. | A stability or soak-certification claim | One uninterrupted generator identity, heartbeats, snapshots, target-window/no-restart proof, and cancellation handling are enforced; the recorded session has 2,924 identity-bound heartbeats. Eight- and 24-hour runs stay Gate C. |
 
 ### 23.4 Gate C — platform expansion
 
@@ -2272,11 +2273,11 @@ command that runs in a contract check.
 | 8 | Essential data reset, ownership, interruption recovery, fingerprints | C-6 | A | Done |
 | 9 | Exclude confounded independent-run numerical parity from release qualification; use same-input derivation checks if ever needed | C-14 | A | Done |
 | 10 | Gate A acceptance-case map | C-15 | A | Done |
-| 11 | Per-scenario profiling policy when multiple types are advertised | D-P1-1 | B | Not started |
-| 12 | Diagnose-mode `/stacks` with profiler coexistence rules | D-P0-3 | B | Not started |
-| 13 | Collection rules and crash dumps if post-incident capture is claimed | D-P0-6 | B | Not started |
-| 14 | External-target auth; qualify each advertised capability | D-P1-6, C-9, C-10, C-11 | B | Not started |
-| 15 | Advertised JMeter extras, soak cert, faults, distributed load | C-4, C-12, C-7, C-8, C-3 | B | Not started |
+| 11 | Per-scenario profiling policy when multiple types are advertised | D-P1-1 | B | Done |
+| 12 | Diagnose-mode `/stacks` with profiler coexistence rules | D-P0-3 | B | Done |
+| 13 | Collection rules and crash dumps if post-incident capture is claimed | D-P0-6 | B | Done |
+| 14 | External-target auth; qualify each advertised capability | D-P1-6, C-9, C-10, C-11 | B | Done |
+| 15 | Advertised JMeter extras, soak cert, faults, distributed load | C-4, C-12, C-7, C-8, C-3 | B | Done except C-4: JMeter extras remain deliberately unadvertised |
 | 16 | Remaining Gate C diagnostics and provenance | D-P1-3, D-P1-4, D-P1-8, D-P1-10, D-P2-7, D-P2-* remainder, C-13 | C | Not started |
 
 ### 23.6 Claims examined and rejected

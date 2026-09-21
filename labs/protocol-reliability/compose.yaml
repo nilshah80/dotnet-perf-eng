@@ -15,6 +15,10 @@ x-api: &api
     PERFLAB_PROFILING_KEEP_TIERING: ${PERFLAB_PROFILING_KEEP_TIERING:-0}
     PERFLAB_PROFILING_MIN_CORES_THRESHOLD: ${PERFLAB_PROFILING_MIN_CORES_THRESHOLD:-0.1}
     PERFLAB_PROFILING_EFFECTIVE_CPU_CORES: "0.5"
+    DOTNET_DbgEnableMiniDump: ${PERFLAB_DBG_ENABLE_MINIDUMP:-0}
+    COMPlus_DbgEnableMiniDump: ${PERFLAB_DBG_ENABLE_MINIDUMP:-0}
+    DOTNET_DbgMiniDumpType: "3"
+    DOTNET_DbgMiniDumpName: /diag/crash-dumps/coredump.%p
     PYROSCOPE_SERVER_ADDRESS: http://lgtm:4040
     OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4317
     OTEL_METRIC_EXPORT_INTERVAL: "5000"
@@ -51,25 +55,40 @@ services:
   diagnostic-permissions:
     image: alpine:3.22
     user: "0:0"
-    command: ["sh", "-c", "chown -R 1654:1654 /diag && chmod 0770 /diag"]
+    command: ["sh", "-c", "mkdir -p /diag/crash-dumps/incomplete && chown -R 1654:1654 /diag && chmod -R 0770 /diag"]
     volumes:
       - diagnostic-ipc:/diag
 
   dotnet-monitor:
-    image: mcr.microsoft.com/dotnet/monitor:10.0
+    build:
+      context: ../../harness/adapters/runtime/dotnet/monitor
+      dockerfile: Dockerfile
     command: ["collect", "--no-auth"]
     environment:
       DOTNETMONITOR_DiagnosticPort__ConnectionMode: Listen
       DOTNETMONITOR_DiagnosticPort__EndpointName: /diag/dotnet-monitor.sock
       DOTNETMONITOR_Storage__DefaultSharedPath: /diag
+      DOTNETMONITOR_Storage__DumpTempFolder: /diag/crash-dumps
       DOTNETMONITOR_Urls: http://+:52323
       DOTNETMONITOR_Metrics__Endpoints: http://+:52325
       DOTNETMONITOR_InProcessFeatures__Enabled: "true"
+      # The image entrypoint reads these only to decide whether to configure a
+      # real CollectionRules egress. An unacknowledged or measurement-mode
+      # launch gets no rule configuration at all.
+      PERF_RUN_MODE: ${PERF_RUN_MODE:-measure}
+      PERFLAB_TARGET_KIND: ${PERFLAB_TARGET_KIND:-managed-compose}
+      PERFLAB_COLLECTION_RULES: ${PERFLAB_COLLECTION_RULES:-0}
+      PERFLAB_DUMP_ACK: ${PERFLAB_DUMP_ACK:-}
     ports:
       - "127.0.0.1:19323:52323"
       - "127.0.0.1:19325:52325"
     volumes:
       - diagnostic-ipc:/diag
+    # The rule's only egress is storage bounded before it writes. It overlays
+    # a child of the shared diagnostic volume without exposing the dumps to an
+    # app container.
+    tmpfs:
+      - /diag/collection-rule-dumps:size=536870912,mode=0770,uid=1654,gid=1654
     depends_on:
       diagnostic-permissions:
         condition: service_completed_successfully
@@ -115,6 +134,7 @@ services:
     ports:
       - "127.0.0.1:18080:8080"
       - "127.0.0.1:18081:8081"
+      - "127.0.0.1:18084:8082"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:

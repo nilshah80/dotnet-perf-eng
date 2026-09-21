@@ -140,7 +140,8 @@
         "class": "none"
       },
       "diagnostics": {
-        "preset": "gcdump"
+        "preset": "gcdump",
+        "profilingPolicy": "memory"
       }
     },
     {
@@ -336,7 +337,8 @@
         "class": "none"
       },
       "diagnostics": {
-        "preset": "gcdump"
+        "preset": "gcdump",
+        "profilingPolicy": "memory"
       }
     },
     {
@@ -448,7 +450,8 @@
         "class": "none"
       },
       "diagnostics": {
-        "preset": "gcdump"
+        "preset": "gcdump",
+        "profilingPolicy": "memory"
       }
     },
     {
@@ -588,7 +591,8 @@
         "class": "none"
       },
       "diagnostics": {
-        "preset": "gcdump"
+        "preset": "gcdump",
+        "profilingPolicy": "memory"
       }
     },
     {
@@ -784,7 +788,8 @@
         "class": "none"
       },
       "diagnostics": {
-        "preset": "stacks"
+        "preset": "stacks",
+        "profilingPolicy": "contention"
       }
     }
   ]

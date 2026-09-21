@@ -81,6 +81,7 @@ done
 
 # Explicit remote endpoints, services, and verification source are accepted by context loading.
 out="$(PERFLAB_LAB=remote-example PERFLAB_CONTINUOUS_PROFILING=1 PERFLAB_REMOTE_TELEMETRY=1 \
+    PERFLAB_BACKEND_AUTHORIZATION='Bearer test-token' \
     PERFLAB_PROMETHEUS_URL=https://prom.example PERFLAB_TEMPO_URL=https://tempo.example \
     PERFLAB_LOKI_URL=https://loki.example PERFLAB_PROM_JOB_REGEX=api PERFLAB_SERVICE_NAME_REGEX=api \
     PERFLAB_PYROSCOPE_URL=https://pyroscope.example PERFLAB_PYROSCOPE_SERVICES=checkout-api \
@@ -94,6 +95,7 @@ printf '%s\n' "${out}" | grep -q 'profiling=1' || fail "continuous_profiling not
 # A profile type the remote agent does not list must be refused: an agent
 # running cpu-only cannot substantiate an allocation finding.
 if out="$(PERFLAB_LAB=remote-example PERFLAB_CONTINUOUS_PROFILING=1 PERFLAB_REMOTE_TELEMETRY=1 \
+    PERFLAB_BACKEND_AUTHORIZATION='Bearer test-token' \
     PERFLAB_PROMETHEUS_URL=https://prom.example PERFLAB_TEMPO_URL=https://tempo.example \
     PERFLAB_LOKI_URL=https://loki.example PERFLAB_PROM_JOB_REGEX=api PERFLAB_SERVICE_NAME_REGEX=api \
     PERFLAB_PYROSCOPE_URL=https://pyroscope.example PERFLAB_PYROSCOPE_SERVICES=checkout-api \

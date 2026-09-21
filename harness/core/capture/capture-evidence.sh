@@ -21,26 +21,37 @@ manifest="${artifact_dir}/manifest.json"
 # capture what the ACTIVE config is before the manifest read below overwrites them.
 env_target_mode="${target_mode}"
 env_remote_telemetry="${remote_telemetry}"
+env_remote_correlation="${remote_correlation:-0}"
 env_continuous_profiling="${continuous_profiling:-0}"
 
 # Read the manifest fields we need in one jqd call (standalone-safe). The recorded
 # target/remoteTelemetry say what the run actually WAS and gate the backend captures.
-read_fields 14 < <(
+read_fields 23 < <(
   jqd -r '[.runId,(.telemetryRunId//.runId),.scenarioId,(.workload.loadGenerator//"wrk"),(.startedEpoch//0),(.target//"local"),(.remoteTelemetry // false),(.continuousProfiling // false),(.profilingKeepTiering // false),(.measurementStartedEpoch // 0),(.measurementEndedEpoch // 0),(.status // ""),
     # (.faultApplied // "") would map a persisted `false` to "" (jq // treats false
     # like null), defeating the explicit fault-outcome guard; has() distinguishes an
     # absent key ("") from a real false ("false").
-    (if has("faultApplied") then (.faultApplied|tostring) else "" end),(if has("faultRestored") then (.faultRestored|tostring) else "" end)] | .[] | tostring' < "${manifest}") || exit 1
+    (if has("faultApplied") then (.faultApplied|tostring) else "" end),(if has("faultRestored") then (.faultRestored|tostring) else "" end),
+    (.remoteCorrelation.enabled // false),(.remoteCorrelation.verified // false),(.remoteCorrelation.version // ""),(.remoteCorrelation.header // ""),
+    (.remoteCorrelation.responseRunIdField // ""),(.remoteCorrelation.responseVersionField // ""),(.remoteCorrelation.prometheusLabel // ""),
+    (.remoteCorrelation.lokiLabel // ""),(.remoteCorrelation.tempoAttribute // "")] | .[] | tostring' < "${manifest}") || exit 1
 run_id="${TSV_FIELDS[0]}"; telemetry_run_id="${TSV_FIELDS[1]}"; scenario_id="${TSV_FIELDS[2]}"
 load_gen="${TSV_FIELDS[3]}"; manifest_start_epoch="${TSV_FIELDS[4]}"; manifest_target="${TSV_FIELDS[5]}"
 manifest_rt="${TSV_FIELDS[6]}"; manifest_cp="${TSV_FIELDS[7]}"; manifest_keep="${TSV_FIELDS[8]}"
 manifest_meas_start="${TSV_FIELDS[9]}"; manifest_meas_end="${TSV_FIELDS[10]}"
 manifest_prior_status="${TSV_FIELDS[11]}"; manifest_fault_applied="${TSV_FIELDS[12]}"
 manifest_fault_restored="${TSV_FIELDS[13]}"
+manifest_rc="${TSV_FIELDS[14]}"; manifest_rc_verified="${TSV_FIELDS[15]}"
+manifest_rc_version="${TSV_FIELDS[16]}"; manifest_rc_header="${TSV_FIELDS[17]}"
+manifest_rc_run_field="${TSV_FIELDS[18]}"; manifest_rc_version_field="${TSV_FIELDS[19]}"
+manifest_rc_prom_label="${TSV_FIELDS[20]}"; manifest_rc_loki_label="${TSV_FIELDS[21]}"
+manifest_rc_tempo_attr="${TSV_FIELDS[22]}"
 manifest_target="${manifest_target:-local}"
 [[ "${manifest_rt}" == "true" ]] && manifest_rt=1 || manifest_rt=0
 [[ "${manifest_cp}" == "true" ]] && manifest_cp=1 || manifest_cp=0
 [[ "${manifest_keep}" == "true" ]] && manifest_keep=1 || manifest_keep=0
+[[ "${manifest_rc}" == "true" ]] && manifest_rc=1 || manifest_rc=0
+[[ "${manifest_rc_verified}" == "true" ]] && manifest_rc_verified=1 || manifest_rc_verified=0
 
 # Standalone-recapture guard: the package records what it WAS; the ACTIVE lab/env
 # must match, because the backend URLs come from the env and default to localhost.
@@ -55,6 +66,31 @@ if [[ "${manifest_rt}" == "1" && "${env_remote_telemetry}" != "1" ]]; then
   echo "Config/manifest mismatch: package is remote-observed, but PERFLAB_REMOTE_TELEMETRY is not enabled now -- the telemetry URLs were not required and would default to localhost. Re-run with PERFLAB_REMOTE_TELEMETRY=1 and the deployed backend URLs." >&2
   exit 1
 fi
+if [[ "${manifest_rc}" == "1" ]]; then
+  if [[ "${manifest_target}" != "remote" || "${manifest_rt}" != "1" || "${manifest_rc_verified}" != "1" ]]; then
+    echo "Manifest claims remote run-id correlation without a verified remote-observed run; refusing to recapture it as correlated evidence." >&2
+    exit 1
+  fi
+  if [[ "${env_remote_correlation}" != "1" ]]; then
+    echo "Config/manifest mismatch: package is remote run-id correlated, but PERFLAB_REMOTE_CORRELATION is not enabled now. Re-run with the declared target contract; otherwise this recapture would silently downgrade to a different selector." >&2
+    exit 1
+  fi
+  performance_remote_correlation_validate || exit 1
+  if [[ "${manifest_rc_version}" != "${remote_correlation_version}" || "${manifest_rc_header}" != "${remote_correlation_header}" ||
+        "${manifest_rc_run_field}" != "${remote_correlation_response_run_id_field}" || "${manifest_rc_version_field}" != "${remote_correlation_response_version_field}" ||
+        "${manifest_rc_prom_label}" != "${remote_correlation_prometheus_label}" || "${manifest_rc_loki_label}" != "${remote_correlation_loki_label}" ||
+        "${manifest_rc_tempo_attr}" != "${remote_correlation_tempo_attribute}" ]]; then
+    echo "Config/manifest mismatch: remote run-id correlation contract differs from the recorded package; refusing to query a different target signal contract." >&2
+    exit 1
+  fi
+  if [[ "${run_id_label:-}" != "${remote_correlation_prometheus_label}" ]]; then
+    echo "Config/manifest mismatch: PERFLAB_RUN_ID_ATTR maps to ${run_id_label:-empty}, but remote correlation requires ${remote_correlation_prometheus_label}." >&2
+    exit 1
+  fi
+elif [[ "${env_remote_correlation}" == "1" ]]; then
+  echo "Config/manifest mismatch: active remote correlation is enabled but this package was window-scoped; refusing to rewrite its evidence scope." >&2
+  exit 1
+fi
 if [[ "${manifest_cp}" == "1" && "${env_continuous_profiling}" != "1" ]]; then
   echo "Config/manifest mismatch: package recorded continuousProfiling, but PERFLAB_CONTINUOUS_PROFILING is not enabled now. Re-run with PERFLAB_CONTINUOUS_PROFILING=1 (and, for remote, PERFLAB_PYROSCOPE_URL)." >&2
   exit 1
@@ -65,6 +101,7 @@ if [[ "${manifest_cp}" == "0" && "${env_continuous_profiling}" == "1" ]]; then
 fi
 target_mode="${manifest_target}"
 remote_telemetry="${manifest_rt}"
+remote_correlation="${manifest_rc}"
 continuous_profiling="${manifest_cp}"
 export PERFLAB_CONTINUOUS_PROFILING="${continuous_profiling}"
 profiling_keep_tiering="${manifest_keep}"
@@ -115,11 +152,21 @@ mkdir -p "${artifact_dir}/source"
 # ---------------------------------------------------------------------------
 capture_telemetry=0
 if [[ "${target_mode}" == "local" || "${remote_telemetry}" == "1" ]]; then capture_telemetry=1; fi
+correlated_run=0
 if [[ "${target_mode}" == "local" ]]; then
   # Local owns the run: scope app metrics + traces by the exact perf.run.id.
+  correlated_run=1
   prom_run_id_matcher="${run_id_label}=\"${telemetry_run_id}\""      # standalone inside {...}
   prom_run_id_selector=",${run_id_label}=\"${telemetry_run_id}\""    # appended after another selector
   trace_run_id_pred=" && resource.${run_id_attr} = \"${telemetry_run_id}\""
+elif [[ "${remote_correlation}" == "1" ]]; then
+  # This remote target proved its dynamic request contract before traffic. App
+  # meters and structured logs use perf_run_id; traces use a span attribute
+  # because resource attributes describe the already-running process.
+  correlated_run=1
+  prom_run_id_matcher="${remote_correlation_prometheus_label}=\"${telemetry_run_id}\""
+  prom_run_id_selector=",${remote_correlation_prometheus_label}=\"${telemetry_run_id}\""
+  trace_run_id_pred=" && ${remote_correlation_tempo_attribute} = \"${telemetry_run_id}\""
 else
   # Remote-observed carries no perf.run.id, so it scopes app metrics by the deployed
   # env's JOB label + window (not an empty selector: job scoping keeps a shared
@@ -133,8 +180,13 @@ fi
 if [[ "${capture_telemetry}" == "1" ]]; then
 mkdir -p "${artifact_dir}/telemetry/metrics" "${artifact_dir}/telemetry/traces/details" \
          "${artifact_dir}/telemetry/logs"
-[[ "${target_mode}" == "remote" ]] && \
-  echo "Remote-observed: reading Prometheus/Tempo/Loki scoped by the measurement window ${start_epoch}-${end_epoch} (NOT run-id isolated; other traffic in the window is included)." >&2
+if [[ "${target_mode}" == "remote" ]]; then
+  if [[ "${remote_correlation}" == "1" ]]; then
+    echo "Remote-observed: reading Prometheus/Tempo/Loki by verified run id ${telemetry_run_id}, bounded to the measurement window ${start_epoch}-${end_epoch}." >&2
+  else
+    echo "Remote-observed: reading Prometheus/Tempo/Loki scoped by the measurement window ${start_epoch}-${end_epoch} (NOT run-id isolated; other traffic in the window is included)." >&2
+  fi
+fi
 
 # Instant vs range: gauges/rates must be read over the run window, because an
 # instant query after load stops reports an idle process and hides the peak.
@@ -177,14 +229,14 @@ record_query() { # record_query <signal> <backend> <endpoint> <query> <artifact>
 }
 capture_prometheus_query() {
   local state=captured
-  curl -fsS --max-time 20 --get --data-urlencode "query=$2" \
+  backend_curl -fsS --max-time 20 --get --data-urlencode "query=$2" \
     "${prometheus_url}/api/v1/query" > "${artifact_dir}/telemetry/metrics/$1.json" \
     || { echo "WARNING: Prometheus instant query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; metric_query_failures=$((metric_query_failures + 1)); state=failed; }
   record_query metrics prometheus "/api/v1/query" "$2" "telemetry/metrics/$1.json" "${state}"
 }
 capture_prometheus_range() {
   local state=captured
-  curl -fsS --max-time 30 --get --data-urlencode "query=$2" \
+  backend_curl -fsS --max-time 30 --get --data-urlencode "query=$2" \
     --data-urlencode "start=${start_epoch}" --data-urlencode "end=${end_epoch}" --data-urlencode "step=5" \
     "${prometheus_url}/api/v1/query_range" > "${artifact_dir}/telemetry/metrics/$1.json" \
     || { echo "WARNING: Prometheus range query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; metric_query_failures=$((metric_query_failures + 1)); state=failed; }
@@ -218,17 +270,22 @@ grade_metric_role() { # grade_metric_role <role>
 # scoping regex below is derived from them. The prefix is per-lab
 # (PERFLAB_APP_METRIC_PREFIX, default "perflab").
 if [[ "${target_mode}" == "remote" ]]; then
-  # Remote-observed uses RANGE (window) queries so instance discovery below unions
-  # every instance seen DURING the window -- an instance that restarted or scaled in
-  # mid-window would be missed by an instant query taken only at capture time.
+  # Remote-observed uses RANGE queries so instance discovery unions every
+  # instance that served this run during the window. With a verified contract
+  # the range is also filtered by its exact perf_run_id; without one it remains
+  # the explicit job/window degraded mode.
   capture_prometheus_range scenario_executions "${app_metric_prefix}_scenario_executions_total{${prom_run_id_matcher}}"
   capture_prometheus_range application_metrics "{__name__=~\"${app_metric_prefix}_.*\"${prom_run_id_selector}}"
   capture_prometheus_range service_instances "target_info{${prom_run_id_matcher}}"
 
 else
-  capture_prometheus_query scenario_executions "${app_metric_prefix}_scenario_executions_total{${prom_run_id_matcher}}"
-  capture_prometheus_query application_metrics "{__name__=~\"${app_metric_prefix}_.*\"${prom_run_id_selector}}"
-  capture_prometheus_query service_instances "target_info{${prom_run_id_matcher}}"
+  # Local runs are also range-scoped. An instant query after a process restart
+  # sees only the replacement generation (or a stale scrape), while the exact
+  # measurement range retains every instance that actually served this run and
+  # excludes generations outside the window.
+  capture_prometheus_range scenario_executions "${app_metric_prefix}_scenario_executions_total{${prom_run_id_matcher}}"
+  capture_prometheus_range application_metrics "{__name__=~\"${app_metric_prefix}_.*\"${prom_run_id_selector}}"
+  capture_prometheus_range service_instances "target_info{${prom_run_id_matcher}}"
 fi
 # D-P0-9: telemetry-loss accounting, for BOTH the local and remote paths. Every
 # other signal in this package is read THROUGH the collector, so a silent drop
@@ -267,10 +324,15 @@ service_instance_regex="$(
 )"
 service_instance_regex="${service_instance_regex:-__no_correlated_service_instance__}"
 # Remote-observed has no run-id fallback. If neither application metrics nor
-# resource identity match its job/window, runtime metrics cannot be correlated.
-# Keep that incomplete state visible instead of claiming a diagnosable package.
+# resource identity match its declared selector, runtime metrics cannot be
+# correlated. Keep that incomplete state visible instead of claiming a
+# diagnosable package.
 if [[ "${target_mode}" == "remote" && "${service_instance_regex}" == "__no_correlated_service_instance__" ]]; then
-  echo "WARNING: no application or target_info series matched job=~\"${prom_job_regex}\" in the window; runtime metric files will be EMPTY. Check PERFLAB_APP_METRIC_PREFIX matches the deployed app and PERFLAB_PROM_JOB_REGEX its Prometheus job." >&2
+  if [[ "${remote_correlation}" == "1" ]]; then
+    echo "WARNING: no application or target_info series matched ${remote_correlation_prometheus_label}=\"${telemetry_run_id}\" in the window; runtime metric files will be EMPTY. Check the target writes the declared per-request metric label." >&2
+  else
+    echo "WARNING: no application or target_info series matched job=~\"${prom_job_regex}\" in the window; runtime metric files will be EMPTY. Check PERFLAB_APP_METRIC_PREFIX matches the deployed app and PERFLAB_PROM_JOB_REGEX its Prometheus job." >&2
+  fi
   capture_incomplete=1
 fi
 
@@ -319,7 +381,7 @@ capture_tempo_slice() { # <start-seconds> <end-seconds>
   trace_page=$((trace_page + 1))
   page_file="${trace_pages_dir}/search-$(printf '%05d' "${trace_page}").json"
   for attempt in $(seq 1 6); do
-    if curl -fsS --max-time 20 --get \
+    if backend_curl -fsS --max-time 20 --get \
         --data-urlencode "q=${trace_query}" \
         --data-urlencode "start=${slice_start}" --data-urlencode "end=${slice_end}" --data-urlencode "limit=${page_limit}" \
         --data-urlencode "most_recent=true" \
@@ -391,7 +453,7 @@ if grep -q '"traceID"' "${trace_search_file}" 2>/dev/null; then
     detail="${artifact_dir}/telemetry/traces/details/${trace_id}.json"
     # Stage then publish so a failed fetch cannot leave a zero-byte artifact
     # indistinguishable from a captured trace.
-    if curl -fsS --max-time 20 "${tempo_url}/api/traces/${trace_id}" > "${detail}.tmp" 2>/dev/null; then
+    if backend_curl -fsS --max-time 20 "${tempo_url}/api/traces/${trace_id}" > "${detail}.tmp" 2>/dev/null; then
       mv "${detail}.tmp" "${detail}"
     else
       rm -f "${detail}.tmp"; trace_detail_failures=$((trace_detail_failures + 1))
@@ -417,11 +479,14 @@ telemetry_trace_details="$(find "${artifact_dir}/telemetry/traces/details" -type
 # Loki logs use backward pagination with transport pages capped at 1,000 records.
 # PERFLAB_LOG_LIMIT is the total phase budget, not a single-response size.
 log_query="{service_name=~\"${service_name_regex}\"}"
-if [[ "${target_mode}" == "local" ]]; then
+if [[ "${correlated_run}" == "1" ]]; then
   # Match PerfLab's canonical Loki query: resource labels select the service and
-  # the structured run attribute prevents concurrent/local traffic from leaking
-  # into this evidence window. Remote-observed runs remain window-scoped.
-  log_query+=" | ${run_id_label}=\"${telemetry_run_id}\""
+  # the structured run attribute prevents concurrent traffic from leaking into
+  # this evidence window. Remote targets use this only after the v1 probe has
+  # proved their dynamic per-request contract.
+  log_label="${run_id_label}"
+  [[ "${target_mode}" == "remote" ]] && log_label="${remote_correlation_loki_label}"
+  log_query+=" | ${log_label}=\"${telemetry_run_id}\""
 fi
 log_file="${artifact_dir}/telemetry/logs/query-range.json"
 log_pages_dir="${artifact_dir}/telemetry/logs/pages"
@@ -438,7 +503,7 @@ while (( log_total < log_limit )); do
   log_page_file="${log_pages_dir}/page-$(printf '%05d' "${log_page}").json"
   page_ok=0
   for attempt in $(seq 1 6); do
-    if curl -fsS --max-time 30 --get \
+    if backend_curl -fsS --max-time 30 --get \
         --data-urlencode "query=${log_query}" \
         --data-urlencode "start=${log_start}" --data-urlencode "end=${log_end}" \
         --data-urlencode "direction=backward" --data-urlencode "limit=${log_page_limit}" \
@@ -590,9 +655,11 @@ fi
 if [[ "${PERF_WORKLOAD_KIND:-}" == "journey" || "${PERF_WRITE_ACK:-}" == "managed-reference" ]]; then
   write_safety_class="managed-reference"
 fi
-printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","loadGenerator":"%s","writeSafety":{"class":"%s"},"lifecycle":{"ownership":"%s"},"observations":%s}\n' \
+remote_correlation_fact=false
+[[ "${remote_correlation}" == "1" ]] && remote_correlation_fact=true
+printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","loadGenerator":"%s","remoteCorrelation":%s,"writeSafety":{"class":"%s"},"lifecycle":{"ownership":"%s"},"observations":%s}\n' \
   "$(json_escape "${run_id}")" "$(json_escape "${telemetry_run_id}")" "$(json_escape "${scenario_id}")" \
-  "$(json_escape "${load_gen}")" "$(json_escape "${write_safety_class}")" "$(json_escape "${lifecycle_ownership}")" "$(cat "${obs_file}")" \
+  "$(json_escape "${load_gen}")" "${remote_correlation_fact}" "$(json_escape "${write_safety_class}")" "$(json_escape "${lifecycle_ownership}")" "$(cat "${obs_file}")" \
   > "${artifact_dir}/facts.json"
 if [[ -s "${artifact_dir}/benchmark/compatibility.json" ]]; then
   if cat "${artifact_dir}/facts.json" "${artifact_dir}/benchmark/compatibility.json" \
@@ -625,7 +692,7 @@ if [[ "${capture_telemetry}" == "1" ]]; then
   eff_si="${service_instance_regex:-.+}"
   eff_reqrate="sum(rate(http_server_request_duration_seconds_count{service_instance_id=~\"${eff_si}\",http_route!~\"/health.*|\"}[${eff_window}s]))"
   prom_scalar() {
-    curl -fsS -G "${prometheus_url}/api/v1/query" \
+    backend_curl -fsS -G "${prometheus_url}/api/v1/query" \
       --data-urlencode "query=$1" --data-urlencode "time=${end_epoch}" 2>/dev/null \
       | jqd -r '.data.result[0].value[1] // empty' 2>/dev/null || true
   }

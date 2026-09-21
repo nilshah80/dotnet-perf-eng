@@ -9,6 +9,8 @@ const path = __ENV.PERF_PATH || '/api/reliability/status';
 const body = __ENV.PERF_BODY || '';
 const runId = __ENV.PERF_RUN_ID || 'k6-manual';
 const expectedBackpressure = new Counter('reliability_expected_backpressure');
+const transportErrors = new Counter('reliability_transport_errors');
+const unexpectedStatusErrors = new Counter('reliability_unexpected_status_errors');
 
 setResponseCallback(expectedStatuses({ min: 200, max: 399 }, 429, 503));
 
@@ -24,6 +26,14 @@ export default function () {
   });
   if (response.status === 429 || response.status === 503) {
     expectedBackpressure.add(1);
+  }
+  // A completed 429/503 is application backpressure, not a transport fault.
+  // k6 may attach an error_code to non-2xx responses, so status 0 is the only
+  // reliable transport-error discriminator here.
+  if (response.status === 0) {
+    transportErrors.add(1);
+  } else if (!(response.status >= 200 && response.status < 400) && response.status !== 429 && response.status !== 503) {
+    unexpectedStatusErrors.add(1);
   }
   check(response, {
     'expected reliability status': value =>

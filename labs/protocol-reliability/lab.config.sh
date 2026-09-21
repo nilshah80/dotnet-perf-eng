@@ -8,6 +8,7 @@ PERFLAB_APP_SERVICES="api-a api-b gateway"
 PERFLAB_PRIMARY_APP_SERVICE="api-a"
 PERFLAB_BASE_URL="${PERFLAB_BASE_URL:-http://127.0.0.1:18080}"
 PERFLAB_READY_URL="${PERFLAB_READY_URL:-http://127.0.0.1:18080/health/ready}"
+PERF_SECONDARY_BASE_URL="${PERF_SECONDARY_BASE_URL:-http://127.0.0.1:18084}"
 PERFLAB_INTERNAL_BASE_URL="http://gateway:8080"
 PERFLAB_COMPOSE_NETWORK="protocol-reliability_default"
 
@@ -21,10 +22,25 @@ PERFLAB_TEMPO_URL="http://127.0.0.1:13200"
 PERFLAB_LOKI_URL="http://127.0.0.1:13100"
 PERFLAB_PYROSCOPE_URL="http://127.0.0.1:14040"
 PERFLAB_DIAGNOSTICS_URL="http://127.0.0.1:19323"
-# The /stacks in-process channel cannot cross Docker network namespaces in this
-# shared sidecar topology. Keep the requested kind in provenance and use the
-# runtime adapter's sampled-stack trace fallback; dump analysis still captures
-# an instantaneous clrstack -all snapshot.
+# D-P1-7 remote-observed opt-in. The target echoes the generated run id before
+# traffic, custom metrics/logs carry perf_run_id, and request spans carry the
+# dynamic (not process-lifetime) span.perf.run.id attribute.
+PERFLAB_REMOTE_CORRELATION_VERSION="perflab-run-id-v1"
+PERFLAB_REMOTE_CORRELATION_PROBE_PATH="/api/reliability/correlation"
+PERFLAB_REMOTE_CORRELATION_HEADER="X-Perf-Run-Id"
+PERFLAB_REMOTE_CORRELATION_RESPONSE_RUN_ID_FIELD="runId"
+PERFLAB_REMOTE_CORRELATION_RESPONSE_VERSION_FIELD="contractVersion"
+PERFLAB_REMOTE_CORRELATION_PROMETHEUS_LABEL="perf_run_id"
+PERFLAB_REMOTE_CORRELATION_LOKI_LABEL="perf_run_id"
+PERFLAB_REMOTE_CORRELATION_TEMPO_ATTRIBUTE="span.perf.run.id"
+# Case 44: every measured P* window is bracketed by this target-owned
+# attestation. It reports the exact process instance that served the run at
+# start/end; a restart becomes evidence, not a stale instance merge.
+PERFLAB_MEASUREMENT_WINDOW_PROBE_PATH="/api/reliability/window"
+PERFLAB_MEASUREMENT_WINDOW_VERSION="perflab-measurement-window-v1"
+# Measurement default: /stacks injects ICorProfiler and cannot share that slot
+# with Pyroscope. Diagnose-mode capture-runtime.sh overrides this to true after
+# recreating the owned app with PERFLAB_CONTINUOUS_PROFILING=0.
 PERFLAB_ENABLE_DOTNET_MONITOR_STACKS="false"
 PERFLAB_PYROSCOPE_SERVICES="protocol-reliability-a protocol-reliability-b"
 PERFLAB_PYROSCOPE_REQUIRED_SERVICES="protocol-reliability-a protocol-reliability-b"
@@ -45,4 +61,4 @@ PERFLAB_DIAG_TARGETS="api-a:ProtocolReliability.Api api-b:ProtocolReliability.Ap
 PERFLAB_DIAG_PRESETS="trace gcdump stacks dump"
 PERFLAB_ADMIN_TOKEN="${PERFLAB_ADMIN_TOKEN:-protocol-reliability-local}"
 PERF_GRPC_TARGET="${PERF_GRPC_TARGET:-127.0.0.1:18081}"
-export PERFLAB_ADMIN_TOKEN PERF_GRPC_TARGET
+export PERFLAB_ADMIN_TOKEN PERF_GRPC_TARGET PERF_SECONDARY_BASE_URL

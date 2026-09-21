@@ -31,7 +31,7 @@ repo_root="$(cd "${harness_root}/.." && pwd)"
 # via jqd and the harness emits its own JSON with printf.)
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*)
-    export MSYS2_ENV_CONV_EXCL='PERF_BASE_URL;PERF_METHOD;PERF_PATH;PERF_BODY;PERF_RUN_ID;PERF_SCENARIO;PERF_RUN_MODE;PERF_HEADERS;PERF_MIX;PERFLAB_CONNECTIONS;PERFLAB_DURATION_SECONDS;PERFLAB_GENERATOR_NETWORK_PATH;PERFLAB_PLUGIN_IMAGE_DIGEST'
+    export MSYS2_ENV_CONV_EXCL='PERF_BASE_URL;PERF_SECONDARY_BASE_URL;PERF_METHOD;PERF_PATH;PERF_BODY;PERF_RUN_ID;PERF_SCENARIO;PERF_RUN_MODE;PERF_HEADERS;PERF_MIX;PERF_ALLOWED_ORIGINS;PERFLAB_CONNECTIONS;PERFLAB_DURATION_SECONDS;PERFLAB_GENERATOR_NETWORK_PATH;PERFLAB_PLUGIN_IMAGE_DIGEST'
     ;;
 esac
 
@@ -97,6 +97,84 @@ PERFLAB_JQ_IMAGE="${PERFLAB_JQ_IMAGE:-ghcr.io/jqlang/jq:1.7.1}"
 jqd() {
   MSYS_NO_PATHCONV=1 docker run --rm -i "${PERFLAB_JQ_IMAGE}" "$@" | tr -d '\r'
   return "${PIPESTATUS[0]}"
+}
+
+# D-P1-6. Values stay in the environment. Evidence records secret:// handles
+# only. Isolated local Compose labs call these with empty auth and stay
+# unauthenticated. Defined before lab-context so remote verification can use
+# them at source time.
+backend_curl() {
+  local args=()
+  if [[ -n "${PERFLAB_BACKEND_AUTHORIZATION:-}" ]]; then
+    args+=(-H "Authorization: ${PERFLAB_BACKEND_AUTHORIZATION}")
+  fi
+  if [[ -n "${PERFLAB_BACKEND_CA_FILE:-}" ]]; then
+    args+=(--cacert "${PERFLAB_BACKEND_CA_FILE}")
+  fi
+  if [[ -n "${PERFLAB_BACKEND_CLIENT_CERT:-}" && -n "${PERFLAB_BACKEND_CLIENT_KEY:-}" ]]; then
+    args+=(--cert "${PERFLAB_BACKEND_CLIENT_CERT}" --key "${PERFLAB_BACKEND_CLIENT_KEY}")
+  fi
+  if (( ${#args[@]} > 0 )); then
+    command curl "${args[@]}" "$@"
+  else
+    command curl "$@"
+  fi
+}
+
+monitor_curl() {
+  local args=()
+  if [[ -n "${PERFLAB_MONITOR_AUTHORIZATION:-}" ]]; then
+    args+=(-H "Authorization: ${PERFLAB_MONITOR_AUTHORIZATION}")
+  fi
+  if [[ -n "${PERFLAB_MONITOR_CA_FILE:-}" ]]; then
+    args+=(--cacert "${PERFLAB_MONITOR_CA_FILE}")
+  fi
+  if [[ -n "${PERFLAB_MONITOR_CLIENT_CERT:-}" && -n "${PERFLAB_MONITOR_CLIENT_KEY:-}" ]]; then
+    args+=(--cert "${PERFLAB_MONITOR_CLIENT_CERT}" --key "${PERFLAB_MONITOR_CLIENT_KEY}")
+  fi
+  if (( ${#args[@]} > 0 )); then
+    command curl "${args[@]}" "$@"
+  else
+    command curl "$@"
+  fi
+}
+
+# The load-generator header bag may carry a target Authorization value, but it
+# must never replace the correlation identity that the harness generates for a
+# run. A caller that could override X-Perf-Run-Id would make a successful probe
+# meaningless: the probe could carry one ID while every measured request carries
+# another. Validate the bag once before any target request (including readiness
+# and the remote correlation probe), and pass it as independent curl arguments
+# rather than evaluating user-controlled text.
+validate_target_headers() {
+  [[ -z "${PERF_HEADERS:-}" ]] && return 0
+  if ! printf '%s' "${PERF_HEADERS}" | jqd -e '
+    type == "object" and
+    all(to_entries[];
+      (.key | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")) and
+      (.value | type) == "string" and
+      ((.value | length) <= 16384) and
+      ((.value | test("[\\r\\n]") | not)) and
+      ((.key | ascii_downcase) != "x-perf-run-id"))
+  ' >/dev/null 2>&1; then
+    echo "PERF_HEADERS must be a bounded JSON object of string HTTP headers and must not override X-Perf-Run-Id." >&2
+    return 1
+  fi
+}
+
+target_curl() {
+  local args=() header
+  validate_target_headers || return 1
+  if [[ -n "${PERF_HEADERS:-}" ]]; then
+    while IFS= read -r header; do
+      [[ -n "${header}" ]] && args+=(-H "${header}")
+    done < <(printf '%s' "${PERF_HEADERS}" | jqd -r 'to_entries[] | "\(.key): \(.value)"')
+  fi
+  if (( ${#args[@]} > 0 )); then
+    command curl "${args[@]}" "$@"
+  else
+    command curl "$@"
+  fi
 }
 
 # Lab-specific initialization (compose file, base/ready URLs, telemetry regexes,
@@ -319,10 +397,11 @@ scenario_value() {
   case "$field" in
     id) col=1 ;; name) col=2 ;; method) col=3 ;; path) col=4 ;; body) col=5 ;;
     target) col=6 ;; diagnostic) col=7 ;; connections) col=8 ;;
-    type|selector) col=0 ;;
+      type|selector) col=0 ;;
+      profilingPolicy) col=0 ;;
     *) echo "Unknown scenario field '${field}'." >&2; return 1 ;;
   esac
-  if [[ -n "${scenario_catalog:-}" && -f "${scenario_catalog}" && "$field" != "type" && "$field" != "selector" ]]; then
+  if [[ -n "${scenario_catalog:-}" && -f "${scenario_catalog}" && "$field" != "type" && "$field" != "selector" && "$field" != "profilingPolicy" ]]; then
     local from_tsv
     from_tsv="$(awk -F'\t' -v id="${id}" -v c="${col}" '
       $0 ~ /^[[:space:]]*#/ { next }
@@ -342,6 +421,7 @@ scenario_value() {
       type|selector) filter=".workload.${field}" ;;
       target) filter='.targets[0]' ;;
       diagnostic) filter='.diagnostics.preset' ;;
+      profilingPolicy) filter='.diagnostics.profilingPolicy' ;;
       connections) filter='.defaults.rate' ;;
       *) filter='' ;;
     esac

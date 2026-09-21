@@ -33,6 +33,7 @@ diag_target() { printf 'Fixture.Api'; }
 json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s}"; }
 loadgen_warmup() { mkdir -p "$1"; printf '{}' > "$1/warmup.json"; }
 loadgen_measure() { mkdir -p "$1"; printf '{}' > "$1/diagnostic.json"; }
+monitor_curl() { curl "$@"; }
 compose() {
   # Mirrors `compose ps --format json <service>`: one JSON object per line.
   if [[ "${1:-}" == "ps" && "${PERFLAB_TEST_COMPOSE_PS:-1}" == "1" ]]; then
@@ -42,6 +43,8 @@ compose() {
   return 1
 }
 EOF
+mkdir -p "${test_root}/harness/adapters/runtime/dotnet"
+cp "${adapter_dir}/capability.sh" "${test_root}/harness/adapters/runtime/dotnet/capability.sh"
 
 # Two replicas of the same service. Both match assembly 'Fixture.Api', which is
 # exactly the shape that used to resolve silently to whichever came first.
@@ -69,6 +72,8 @@ cat > "${test_root}/bin/curl" <<'EOF'
 set -euo pipefail
 url="${*: -1}"
 case "${url}" in
+  */info) printf '{"version":"10.0","runtimeVersion":"10.0","diagnosticPortMode":"Listen","diagnosticPortName":"/diag/monitor.sock","capabilities":[{"name":"call_stacks","enabled":true}]}' ;;
+  */) printf '{"paths":{"/trace":{"get":{}},"/gcdump":{"get":{}},"/dump":{"get":{}},"/stacks":{"get":{}}}}' ;;
   */processes) cat "${PERFLAB_TEST_PROCESSES}" ;;
   */process)
     uid=""

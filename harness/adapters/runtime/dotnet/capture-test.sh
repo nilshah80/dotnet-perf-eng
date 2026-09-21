@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 
 adapter_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 test_root="$(mktemp -d)"
@@ -11,10 +12,11 @@ load_generator=k6
 diagnostics_url=http://monitor
 artifacts_root="${PERFLAB_TEST_ARTIFACTS_ROOT:-}"
 diag_target() { printf 'Fixture.Api'; }
-jqd() { cat >/dev/null; printf 'fixture-uid\n'; }
+jqd() { jq "$@"; }
 json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s}"; }
 loadgen_warmup() { mkdir -p "$1"; printf 'warmup\n' >> "${PERFLAB_TEST_CALLS}"; printf '{}' > "$1/warmup.json"; }
 loadgen_measure() { mkdir -p "$1"; printf 'diagnostic\n' >> "${PERFLAB_TEST_CALLS}"; printf '{}' > "$1/diagnostic.json"; }
+monitor_curl() { curl "$@"; }
 compose() {
   local previous='' argument output=''
   for argument in "$@"; do [[ "${previous}" == '--output' ]] && output="${argument}"; previous="${argument}"; done
@@ -29,13 +31,18 @@ compose() {
   fi
 }
 EOF
+mkdir -p "${test_root}/harness/adapters/runtime/dotnet"
+cp "${adapter_dir}/capability.sh" "${test_root}/harness/adapters/runtime/dotnet/capability.sh"
 
 cat > "${test_root}/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 url="${*: -1}"
 case "${url}" in
-  */processes) printf '[{"uid":"fixture-uid","managedEntryPointAssemblyName":"Fixture.Api"}]' ;;
+  */info) printf '{"version":"10.0","runtimeVersion":"10.0","diagnosticPortMode":"Listen","diagnosticPortName":"/diag/monitor.sock","capabilities":[{"name":"call_stacks","enabled":true}]}' ;;
+  */) printf '{"paths":{"/trace":{"get":{}},"/gcdump":{"get":{}},"/dump":{"get":{}},"/stacks":{"get":{}}}}' ;;
+  */processes) printf '[{"uid":"fixture-uid","pid":4242,"name":"Fixture.Api","managedEntryPointAssemblyName":"Fixture.Api"}]' ;;
+  */process) printf '{"uid":"fixture-uid","pid":4242,"name":"Fixture.Api","managedEntryPointAssemblyName":"Fixture.Api","commandLine":"dotnet Fixture.Api.dll","operatingSystem":"Linux","processArchitecture":"arm64"}' ;;
   */gcdump)
     count=0; [[ -f "${PERFLAB_TEST_GCDUMP_COUNT}" ]] && count="$(cat "${PERFLAB_TEST_GCDUMP_COUNT}")"
     count=$((count + 1)); printf '%s' "${count}" > "${PERFLAB_TEST_GCDUMP_COUNT}"
@@ -147,5 +154,87 @@ PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
 [[ -s "${direct_stacks_output}/runtime/api/stacks.txt" ]]
 grep -q '"requestedDiagnostic":"stacks","effectiveDiagnostic":"stacks"' \
   "${direct_stacks_output}/runtime/capture.json"
+grep -q 'Call stacks contain type and method names' \
+  "${direct_stacks_output}/runtime/capture.json"
+
+conflict_stacks_output="${test_root}/conflict-stacks"
+mkdir -p "${conflict_stacks_output}"; : > "${test_root}/conflict-stacks-calls"
+PATH="${test_root}/bin:${PATH}" \
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_CALLS="${test_root}/conflict-stacks-calls" \
+PERFLAB_TEST_GCDUMP_COUNT="${test_root}/conflict-stacks-gcdumps" \
+PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true \
+PERFLAB_CONTINUOUS_PROFILING=1 \
+PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
+  bash "${adapter_dir}/capture.sh" "${conflict_stacks_output}" stacks 1 api >/dev/null 2>&1
+[[ -s "${conflict_stacks_output}/runtime/api/cpu.nettrace" ]]
+[[ ! -e "${conflict_stacks_output}/runtime/api/stacks.txt" ]]
+grep -q '"requestedDiagnostic":"stacks","effectiveDiagnostic":"trace"' \
+  "${conflict_stacks_output}/runtime/capture.json"
+grep -q 'cannot share ICorProfiler with Pyroscope' \
+  "${conflict_stacks_output}/runtime/capture.json"
+
+hang_stacks_output="${test_root}/hang-stacks"
+mkdir -p "${hang_stacks_output}"; : > "${test_root}/hang-stacks-calls"
+PATH="${test_root}/bin:${PATH}" \
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_CALLS="${test_root}/hang-stacks-calls" \
+PERFLAB_TEST_GCDUMP_COUNT="${test_root}/hang-stacks-gcdumps" \
+PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true \
+PERFLAB_CONTINUOUS_PROFILING=0 \
+PERFLAB_DIAGNOSTIC_RECOVERY_SECONDS=0 \
+PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES=67108864 \
+PERFLAB_DIAGNOSTIC_INCLUDE_DUMP=0 \
+PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
+  bash "${adapter_dir}/capture.sh" "${hang_stacks_output}" preset:hang 1 api >/dev/null 2>&1
+[[ -s "${hang_stacks_output}/runtime/captures/trace/cpu.nettrace" ]]
+[[ -s "${hang_stacks_output}/runtime/captures/stacks/stacks.txt" ]]
+
+hostile_remote="${test_root}/hostile-remote"
+mkdir -p "${hostile_remote}"; : > "${test_root}/hostile-remote-calls"
+PATH="${test_root}/bin:${PATH}" \
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_CALLS="${test_root}/hostile-remote-calls" \
+PERFLAB_TEST_GCDUMP_COUNT="${test_root}/hostile-remote-gcdumps" \
+PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true \
+target_mode=remote \
+PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
+  bash "${adapter_dir}/capture.sh" "${hostile_remote}" stacks 1 api >/dev/null 2>&1
+[[ -s "${hostile_remote}/runtime/api/cpu.nettrace" ]]
+[[ ! -e "${hostile_remote}/runtime/api/stacks.txt" ]]
+grep -q '"requestedDiagnostic":"stacks","effectiveDiagnostic":"trace"' \
+  "${hostile_remote}/runtime/capture.json"
+grep -q 'remote or attach-only' "${hostile_remote}/runtime/capture.json"
+
+hostile_attach="${test_root}/hostile-attach"
+mkdir -p "${hostile_attach}"; : > "${test_root}/hostile-attach-calls"
+PATH="${test_root}/bin:${PATH}" \
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_CALLS="${test_root}/hostile-attach-calls" \
+PERFLAB_TEST_GCDUMP_COUNT="${test_root}/hostile-attach-gcdumps" \
+PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true \
+PERFLAB_TARGET_KIND=existing-process \
+PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
+  bash "${adapter_dir}/capture.sh" "${hostile_attach}" stacks 1 api >/dev/null 2>&1
+[[ -s "${hostile_attach}/runtime/api/cpu.nettrace" ]]
+[[ ! -e "${hostile_attach}/runtime/api/stacks.txt" ]]
+grep -q 'remote or attach-only' "${hostile_attach}/runtime/capture.json"
+
+hostile_hang="${test_root}/hostile-hang"
+mkdir -p "${hostile_hang}"; : > "${test_root}/hostile-hang-calls"
+PATH="${test_root}/bin:${PATH}" \
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_CALLS="${test_root}/hostile-hang-calls" \
+PERFLAB_TEST_GCDUMP_COUNT="${test_root}/hostile-hang-gcdumps" \
+PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true \
+PERFLAB_CONTINUOUS_PROFILING=0 \
+PERFLAB_DIAGNOSTIC_RECOVERY_SECONDS=0 \
+PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES=67108864 \
+PERFLAB_DIAGNOSTIC_INCLUDE_DUMP=0 \
+target_mode=remote \
+PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
+  bash "${adapter_dir}/capture.sh" "${hostile_hang}" preset:hang 1 api >/dev/null 2>&1
+[[ -s "${hostile_hang}/runtime/captures/trace/cpu.nettrace" ]]
+[[ ! -e "${hostile_hang}/runtime/captures/stacks/stacks.txt" ]]
 
 echo "dotnet runtime campaign adapter tests passed"

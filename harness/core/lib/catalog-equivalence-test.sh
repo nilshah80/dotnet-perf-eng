@@ -86,7 +86,7 @@ for catalog in "${repo}"/labs/*/catalog.json; do
 
   # Every declared unit must be one the harness understands, or it resolves to
   # a default at run time and the declaration was decorative.
-  bad_unit="$(jq -r '[.scenarios[] | select((.defaults.rateUnit // "") | test("^(concurrent-iterations|requests/s|journeys/s|iterations/s)$") | not) | "\(.id)=\(.defaults.rateUnit)"] | join(", ")' "${catalog}")"
+  bad_unit="$(jq -r '[.scenarios[] | select((.defaults.rateUnit // "") | test("^(concurrent-iterations|concurrent-users|requests/s|journeys/s|iterations/s)$") | not) | "\(.id)=\(.defaults.rateUnit)"] | join(", ")' "${catalog}")"
   [[ -z "${bad_unit}" ]] || fail "${lab}: unrecognised rate unit(s): ${bad_unit}"
 done
 

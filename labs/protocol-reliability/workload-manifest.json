@@ -14,6 +14,9 @@
     {"id":"P08","type":"request","iterationContract":"one-request","generators":["k6","jmeter"]},
     {"id":"P09","type":"request","iterationContract":"one-request","generators":["k6","jmeter"]},
     {"id":"P10","type":"protocol","iterationContract":"one-journey","generators":["k6"],"protocol":"browser-synthetic","entrypoints":{"k6":"labs/protocol-reliability/loadgen/browser.js"}},
-    {"id":"P11","type":"request","iterationContract":"one-request","generators":["k6","jmeter"]}
+    {"id":"P11","type":"request","iterationContract":"one-request","generators":["k6","jmeter"]},
+    {"id":"P12","type":"journey","iterationContract":"one-journey","generators":["k6"],"entrypoints":{"k6":"labs/protocol-reliability/loadgen/journey.js"},"files":["labs/protocol-reliability/loadgen/journey.js","harness/adapters/loadgen/k6/journey.js"],"operations":["login","form","expired-access","refresh","csrf-rejected","submit","refresh-replay-rejected"],"targets":["api-a"],"amplification":{"min":7,"max":7}},
+    {"id":"P13","type":"journey","iterationContract":"one-journey","generators":["k6"],"entrypoints":{"k6":"labs/protocol-reliability/loadgen/multi-origin.js"},"files":["labs/protocol-reliability/loadgen/multi-origin.js","harness/adapters/loadgen/k6/journey.js"],"operations":["primary-status","secondary-connection-churn"],"targets":["api-a"],"allowedOrigins":["http://127.0.0.1:18080","http://127.0.0.1:18084"],"amplification":{"min":2,"max":2}},
+    {"id":"P14","type":"request","iterationContract":"one-request","generators":["k6"],"distributedMode":"k6-request-v1","entrypoints":{"k6":"harness/core/distributed/k6-distributed.js"},"files":["harness/core/distributed/k6-distributed.js"],"operations":["distributed-request"],"targets":["api-a"],"amplification":{"min":1,"max":1}}
   ]
 }

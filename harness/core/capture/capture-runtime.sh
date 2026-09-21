@@ -5,6 +5,8 @@
 set -euo pipefail
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/performance.sh"
 
 artifact_dir="${1:?Usage: capture-runtime.sh <artifact-directory> [trace|gcdump|stacks|dump] [duration-seconds] | <artifact-directory> --preset <cpu|memory|cpu-memory|hang|dump> [duration-seconds] [--include-dump]}"
 manifest="${artifact_dir}/manifest.json"
@@ -62,6 +64,29 @@ if [[ "${dump_requested}" == "1" && "${PERFLAB_DUMP_ACK:-}" != "i-understand-sen
   echo "Process dumps may contain secrets or personal data. Set PERFLAB_DUMP_ACK=i-understand-sensitive-dump to acknowledge this capture." >&2
   exit 1
 fi
+if [[ "${PERFLAB_COLLECTION_RULES:-0}" == "1" ]]; then
+  if [[ "${PERFLAB_DUMP_ACK:-}" != "i-understand-sensitive-dump" ]]; then
+    echo "Collection rules arm crash dumps. Set PERFLAB_DUMP_ACK=i-understand-sensitive-dump before PERFLAB_COLLECTION_RULES=1." >&2
+    exit 1
+  fi
+  if [[ "${target_mode}" == "remote" || "${PERFLAB_TARGET_KIND:-managed-compose}" != "managed-compose" ]]; then
+    echo "Collection rules require an owned target; refusing to pre-arm crash dumps on a remote process." >&2
+    exit 1
+  fi
+  # This is the same configuration file that the gated monitor image loads
+  # with --configuration-file-path. Do not substitute a descriptive policy for
+  # the live rule: the artifact must show exactly the trigger, action, egress,
+  # and ActionCount limit that governed the capture.
+  collection_rules_file="${repo_root}/harness/adapters/runtime/dotnet/monitor/collection-rules.json"
+  [[ -f "${collection_rules_file}" ]] || { echo "Missing dotnet-monitor CollectionRules configuration: ${collection_rules_file}" >&2; exit 1; }
+  mkdir -p "${artifact_dir}/runtime"
+  cp "${collection_rules_file}" "${artifact_dir}/runtime/collection-rules.json"
+  # Do not combine a process-level createdump hook with the monitor rule. The
+  # hook writes to the shared volume before any bound can be applied; the rule
+  # egress is instead mounted as a dedicated 512 MiB tmpfs in the monitor.
+  unset PERFLAB_DBG_ENABLE_MINIDUMP
+  echo "dotnet-monitor CollectionRules armed (${collection_rules_file}); Triage dumps remain local, tmpfs-bounded, and non-exportable."
+fi
 
 # The disk check and budget applied only to CAMPAIGNS. A direct `dump` writes a
 # full-heap process dump -- the largest artifact this harness produces -- with no
@@ -108,6 +133,17 @@ if [[ "${#manifest_fields[@]}" -ne 12 ]]; then
 fi
 scenario_id="${manifest_fields[0]}"
 telemetry_run_id="${manifest_fields[1]}"
+if [[ "${continuous_profiling:-0}" == "1" ]]; then
+  measured_policy="$(jqd -r '.profilingPolicy // empty' < "${manifest}")"
+  measured_types="$(jqd -r '.profilingTypes // empty' < "${manifest}")"
+  if [[ -n "${measured_types}" ]]; then
+    export PERFLAB_PROFILING_POLICY="${measured_policy:-cpu}"
+    export PERFLAB_PROFILING_TYPES="${measured_types}"
+    export PERFLAB_PROFILING_POLICY_SOURCE="measurement"
+  else
+    resolve_profiling_policy "${scenario_id}" || exit 1
+  fi
+fi
 manifest_generator="${manifest_fields[2]}"
 manifest_target="${manifest_fields[3]}"
 manifest_base_url="${manifest_fields[4]}"
@@ -207,6 +243,13 @@ if [[ "${manifest_dataset}" == seedScale=* ]]; then
   fi
 fi
 
+# D-P0-3. An inherited PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true from the
+# operator environment must not arm ICorProfiler on a remote or attach-only
+# target. The flag is set only after a successful owned compose recreate.
+unset PERFLAB_ENABLE_DOTNET_MONITOR_STACKS
+export target_mode
+export PERFLAB_TARGET_KIND="${PERFLAB_TARGET_KIND:-managed-compose}"
+
 if [[ "${target_mode}" == "remote" ]]; then
   # Remote diagnostics: the app is NOT owned, so it is NOT recreated. Gated behind
   # opt-in (PERFLAB_REMOTE_DIAGNOSTICS=1) AND an explicit ack, because attaching a
@@ -259,9 +302,21 @@ elif [[ "${PERFLAB_TARGET_KIND:-managed-compose}" != "managed-compose" ]]; then
 else
   echo "Recreating app in diagnose mode for ${scenario_id}..."
   require_target_ownership "recreate the application for a diagnostic capture" || exit 1
+  # D-P0-3. /stacks injects ICorProfiler. Recreate with Pyroscope off so the
+  # monitor call-stack channel can occupy that slot. EventPipe traces still
+  # coexist with Pyroscope; only in-process stacks need the exclusive slot.
+  if [[ "${requested_kind}" == "stacks" || "${requested_preset}" == "hang" ]]; then
+    export PERFLAB_CONTINUOUS_PROFILING=0
+    unset PERFLAB_PROFILING_TYPES
+    continuous_profiling=0
+    echo "Diagnose-mode /stacks: recreating with PERFLAB_CONTINUOUS_PROFILING=0 so ICorProfiler is free."
+  fi
   # shellcheck disable=SC2086
   compose up -d --force-recreate ${app_services}
   wait_for_api
+  if [[ "${requested_kind}" == "stacks" || "${requested_preset}" == "hang" ]]; then
+    export PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true
+  fi
 fi
 
 # A diagnostic perturbs the process, so only one may run against a given target
@@ -294,6 +349,40 @@ else
   "${capture}" "${artifact_dir}" "${requested_kind}" "${duration_seconds}" "${target}" || capture_rc=$?
 fi
 measurement_after="$(measurement_guard)"
+if [[ "${PERFLAB_COLLECTION_RULES:-0}" == "1" && "${target_mode}" != "remote" ]]; then
+  crash_dir="${artifact_dir}/runtime/crash-dumps"
+  collection_dump_dir="${crash_dir}/collection-rules"
+  mkdir -p "${collection_dump_dir}"
+  performance_crash_dump_collect_path_from dotnet-monitor /diag/collection-rule-dumps "${collection_dump_dir}" || {
+    echo "Failed to copy or purge dotnet-monitor CollectionRules egress; refusing to leave an unenforced dump source." >&2
+    exit 1
+  }
+  collection_dump_count="$(find "${collection_dump_dir}" -type f ! -name '.*' | wc -l | tr -d ' ')"
+  if [[ "${collection_dump_count}" != "1" ]]; then
+    echo "CollectionRules was armed but did not yield exactly one in-budget local Triage dump (found ${collection_dump_count})." >&2
+    exit 1
+  fi
+  rule_identity="${artifact_dir}/runtime/target-identity.json"
+  [[ -s "${rule_identity}" ]] || { echo "CollectionRules was armed but the diagnostic target identity was not recorded." >&2; exit 1; }
+  rule_uid="$(jqd -r '.uid // empty' < "${rule_identity}")"
+  [[ -n "${rule_uid}" ]] || { echo "CollectionRules was armed but target identity contains no monitor uid." >&2; exit 1; }
+  rules_status_file="${artifact_dir}/runtime/collection-rules-status.json"
+  if ! monitor_curl -fsS --get --data-urlencode "uid=${rule_uid}" "${diagnostics_url}/collectionrules" > "${rules_status_file}"; then
+    echo "Could not verify the live dotnet-monitor CollectionRules state for uid ${rule_uid}." >&2
+    exit 1
+  fi
+  rule_state="$(jqd -r '.PerflabCrashDump.state // empty' < "${rules_status_file}")"
+  rule_reason="$(jqd -r '.PerflabCrashDump.stateReason // empty' < "${rules_status_file}")"
+  case "${rule_state}" in
+    Running|Executing|Throttled|Completed) ;;
+    *) echo "dotnet-monitor did not report an active PerflabCrashDump CollectionRule (state='${rule_state:-empty}', reason='${rule_reason:-empty}')." >&2; exit 1 ;;
+  esac
+  jqd -nc --arg state "${rule_state}" --arg reason "${rule_reason}" --arg uid "${rule_uid}" \
+    --arg egress "/diag/collection-rule-dumps" --argjson dumps "${collection_dump_count}" \
+    '{version:"perflab-dotnet-monitor-collection-rules-v1",state:$state,stateReason:$reason,targetUid:$uid,egress:$egress,localDumps:$dumps,maxBytes:536870912,actionCountLimit:1,sensitiveDataPolicy:"ack-required-not-exportable"}' \
+    > "${rules_status_file}"
+  performance_crash_dump_enforce "${crash_dir}"
+fi
 if [[ "${measurement_before}" != "${measurement_after}" ]]; then
   echo "Runtime diagnostics changed measured facts or observations; refusing the mutated evidence package." >&2
   exit 1

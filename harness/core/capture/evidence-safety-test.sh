@@ -19,7 +19,7 @@ fail() { echo "evidence-safety-test: $*" >&2; exit 1; }
 # Values, not names: PERFLAB_..._PASSWORD appearing as a variable NAME in a
 # descriptor is configuration, while the resolved value in a captured artifact
 # is a disclosure.
-secret_names='POSTGRES_PASSWORD RABBITMQ_PASSWORD PERFLAB_MONITOR_TOKEN PERFLAB_BACKEND_TOKEN'
+secret_names='POSTGRES_PASSWORD RABBITMQ_PASSWORD PERFLAB_MONITOR_TOKEN PERFLAB_BACKEND_TOKEN PERFLAB_BACKEND_AUTHORIZATION PERFLAB_MONITOR_AUTHORIZATION PERFLAB_DISTRIBUTED_TOKEN'
 
 # The lab descriptors must never hardcode a credential value: every one has to
 # come from the environment with a documented default, so a real deployment can

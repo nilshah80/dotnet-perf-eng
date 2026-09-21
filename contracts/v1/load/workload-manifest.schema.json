@@ -97,6 +97,17 @@
             "$ref": "#/$defs/token"
           }
         },
+        "allowedOrigins": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^https?://[^/?#@\\s]+/?$"
+          }
+        },
+        "distributedMode": {
+          "const": "k6-request-v1"
+        },
         "memberKind": {
           "enum": [
             "request",
@@ -155,6 +166,39 @@
               "memberKind",
               "members"
             ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "allowedOrigins"
+            ]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "journey"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "distributedMode"
+            ]
+          },
+          "then": {
+            "properties": {
+              "type": {
+                "const": "request"
+              },
+              "generators": {
+                "contains": {
+                  "const": "k6"
+                }
+              }
+            }
           }
         }
       ]

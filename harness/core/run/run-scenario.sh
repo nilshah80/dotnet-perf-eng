@@ -47,17 +47,95 @@ else
     export PERF_PARTITION_READY="${PERF_PARTITION_READY:-0}"
   fi
 fi
+if [[ "${continuous_profiling:-0}" == "1" ]]; then
+  resolve_profiling_policy "${scenario_id}" || {
+    echo "continuous profiling policy rejected before traffic" >&2
+    exit 1
+  }
+fi
 if [[ "${PERF_WORKLOAD_KIND}" == "journey" || "${PERF_WORKLOAD_KIND}" == "mix" || "${PERF_MIX_KIND:-}" == "journey" ]] && [[ "${load_generator}" == "wrk" ]]; then
   echo "capability generator.wrk.journey is unsupported; rejected before traffic" >&2
   exit 1
+fi
+performance_manifest_selector_preflight "${workload_manifest:-}" "${scenario_id}" "${load_generator}" "${PERF_WORKLOAD_KIND:-request}" || exit 1
+if [[ -n "${workload_manifest:-}" && -f "${workload_manifest}" ]]; then
+  # A selector may declare a closed multi-origin journey set. Derive this from
+  # the manifest, not a caller-provided PERF_ALLOWED_ORIGINS value, before even
+  # readiness traffic can leave the host.
+  if manifest_allowed_origins="$(performance_manifest_allowed_origins_preflight "${workload_manifest}" "${scenario_id}" "${base_url}")"; then
+    if [[ -n "${manifest_allowed_origins}" ]]; then
+      export PERF_ALLOWED_ORIGINS="${manifest_allowed_origins}"
+    else
+      unset PERF_ALLOWED_ORIGINS
+    fi
+  else
+    echo "workload origin allowlist rejected before traffic" >&2
+    exit 1
+  fi
 fi
 performance_capability_preflight "${load_generator}" "${PERF_WORKLOAD_KIND:-request}" "${PERF_PROTOCOL:-}" || {
   echo "capability advertisement rejected before traffic" >&2
   exit 1
 }
-if [[ "${PERFLAB_SHARDS:-1}" != "1" ]]; then
-  echo "distributed execution is not implemented; refusing shards rather than averaging percentiles" >&2
+distributed_enabled=0
+distributed_shards="${PERFLAB_SHARDS:-${PERF_SHARDS:-1}}"
+distributed_agents="${PERFLAB_DISTRIBUTED_AGENT_URLS:-}"
+distributed_target_origin=""
+if [[ ! "${distributed_shards}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "PERFLAB_SHARDS must be a positive integer" >&2
   exit 1
+fi
+if (( distributed_shards > 1 )); then
+  # C-3 supports exactly the deliberately closed k6 request protocol. It is
+  # not a general remote command runner and it does not make JMeter extras
+  # appear implemented merely because more than one agent exists.
+  [[ "${PERFLAB_DISTRIBUTED:-0}" == "1" ]] || {
+    echo "distributed shards require PERFLAB_DISTRIBUTED=1" >&2
+    exit 1
+  }
+  [[ "${load_generator}" == "k6" && "${PERF_WORKLOAD_KIND:-request}" == "request" && "${method}" == "GET" && -z "${body}" ]] || {
+    echo "distributed execution supports only the declared k6 GET request selector" >&2
+    exit 1
+  }
+  case "${load_profile}" in steady|closed) ;; *)
+    echo "distributed execution supports steady or closed k6 profiles only" >&2
+    exit 1
+  esac
+  [[ -z "${PERF_HEADERS:-}" ]] || {
+    echo "distributed execution refuses caller-supplied request headers; the v1 agent has a fixed target-owned request contract" >&2
+    exit 1
+  }
+  performance_distributed_selector_preflight "${workload_manifest:-}" "${scenario_id}" "${load_generator}" "${PERF_WORKLOAD_KIND:-request}" || exit 1
+  [[ -n "${distributed_agents}" && -n "${PERFLAB_DISTRIBUTED_TOKEN:-}" ]] || {
+    echo "distributed execution requires PERFLAB_DISTRIBUTED_AGENT_URLS and the secret PERFLAB_DISTRIBUTED_TOKEN" >&2
+    exit 1
+  }
+  IFS=',' read -r -a distributed_agent_list <<< "${distributed_agents}"
+  (( ${#distributed_agent_list[@]} == distributed_shards )) || {
+    echo "distributed execution requires exactly one declared agent URL per shard" >&2
+    exit 1
+  }
+  for distributed_agent_url in "${distributed_agent_list[@]}"; do
+    distributed_agent_origin="$(performance_origin_from_url "${distributed_agent_url}")" || exit 1
+    [[ "${distributed_agent_url}" == "${distributed_agent_origin}" ]] || {
+      echo "distributed agent URLs must be canonical origins without a path" >&2
+      exit 1
+    }
+  done
+  distributed_target_origin="$(performance_origin_from_url "${base_url}")" || exit 1
+  [[ -x "${harness_core_dir}/distributed/agent.py" ]] || {
+    echo "distributed k6 controller is unavailable at ${harness_core_dir}/distributed/agent.py" >&2
+    exit 1
+  }
+  case "${PERFLAB_DISTRIBUTED_PARTIAL:-0}" in 0|1) ;; *)
+    echo "PERFLAB_DISTRIBUTED_PARTIAL must be 0 or 1" >&2
+    exit 1
+  esac
+  case "${PERFLAB_DISTRIBUTED_ALLOW_INSECURE_LOCAL:-0}" in 0|1) ;; *)
+    echo "PERFLAB_DISTRIBUTED_ALLOW_INSECURE_LOCAL must be 0 or 1" >&2
+    exit 1
+  esac
+  distributed_enabled=1
 fi
 profiling_preflight_json='{"captureState":"not-applicable","reason":"continuous profiling is disabled"}'
 if [[ "${continuous_profiling:-0}" == "1" ]]; then
@@ -85,6 +163,12 @@ suite_run_id="${PERFLAB_SUITE_RUN_ID:-}"
 suite_scenario_index="${PERFLAB_SUITE_SCENARIO_INDEX:-}"
 suite_scenario_count="${PERFLAB_SUITE_SCENARIO_COUNT:-}"
 
+# The generated run id is not a user-configurable target header. Rejecting an
+# override here covers every generator before a lease, readiness call, or load
+# request can use it; otherwise a remote correlation probe could prove one ID
+# while the workload transmitted another.
+validate_target_headers || exit 1
+
 mkdir -p "${artifact_dir}/benchmark" "${artifact_dir}/analysis"
 printf '%s\n' "${profiling_preflight_json}" > "${artifact_dir}/analysis/profiling-preflight.json"
 # telemetry/dependencies/runtime hold OWNED-target captures; a remote package has
@@ -107,6 +191,9 @@ started_epoch="$(date -u +%s)"
 # duration for the manifest, the mid-load snapshot, and the fault window so they
 # cannot diverge from what actually ran.
 effective_duration="$(loadgen_effective_duration "${connections}" "${duration_seconds}")"
+if [[ "${load_profile}" == "soak" ]]; then
+  performance_soak_cert_preflight "${effective_duration}" || exit 1
+fi
 dataset_identity="${PERFLAB_DATASET_IDENTITY:-seedScale=${SEED_SCALE:-default}}"
 # Record fault parameters (set by run-fault.sh) so the package is self-describing.
 fault_field=""
@@ -124,16 +211,36 @@ fi
 # scoped Prometheus/Tempo/Loki also read) so capture-evidence knows authoritatively
 # what to capture even on a standalone re-invocation. Always false for local.
 remote_telemetry_json=false; [[ "${remote_telemetry:-0}" == "1" ]] && remote_telemetry_json=true
+remote_correlation_field=""
+if [[ "${target_mode}" == "remote" && "${remote_correlation:-0}" == "1" ]]; then
+  correlation_proof="${artifact_dir}/analysis/remote-correlation.json"
+  performance_remote_correlation_probe "${base_url}" "${telemetry_run_id}" "${correlation_proof}" || {
+    echo "Refusing remote traffic because the target did not prove the run-id correlation contract." >&2
+    exit 1
+  }
+  remote_correlation_field="$(printf ',\"remoteCorrelation\":{\"enabled\":true,\"verified\":true,\"version\":\"%s\",\"probePath\":\"%s\",\"header\":\"%s\",\"responseRunIdField\":\"%s\",\"responseVersionField\":\"%s\",\"prometheusLabel\":\"%s\",\"lokiLabel\":\"%s\",\"tempoAttribute\":\"%s\",\"proof\":\"analysis/remote-correlation.json\"}' \\
+    "$(json_escape "${remote_correlation_version}")" "$(json_escape "${remote_correlation_probe_path}")" \\
+    "$(json_escape "${remote_correlation_header}")" "$(json_escape "${remote_correlation_response_run_id_field}")" \\
+    "$(json_escape "${remote_correlation_response_version_field}")" "$(json_escape "${remote_correlation_prometheus_label}")" \\
+    "$(json_escape "${remote_correlation_loki_label}")" "$(json_escape "${remote_correlation_tempo_attribute}")")"
+fi
+distributed_field=""
+if [[ "${distributed_enabled}" == "1" ]]; then
+  distributed_field="$(printf ',"distributed":{"enabled":true,"protocol":"perflab-distributed/v1","shards":%s,"agents":%s,"targetOrigin":"%s","tokenReference":"secret://PERFLAB_DISTRIBUTED_TOKEN","partialAllowed":%s}' \
+    "${distributed_shards}" "$(jqd -cn '$ARGS.positional' --args "${distributed_agent_list[@]}")" \
+    "$(json_escape "${distributed_target_origin}")" \
+    "$([[ "${PERFLAB_DISTRIBUTED_PARTIAL:-0}" == "1" ]] && echo true || echo false)")"
+fi
 continuous_profiling_json=false; [[ "${continuous_profiling:-0}" == "1" ]] && continuous_profiling_json=true
 profiling_keep_tiering_json=false
 [[ "${continuous_profiling:-0}" == "1" && "${profiling_keep_tiering:-0}" == "1" ]] && profiling_keep_tiering_json=true
-printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","mode":"measure","target":"%s","remoteTelemetry":%s,"continuousProfiling":%s,"profilingKeepTiering":%s,"profilingPolicy":"%s","profilingTypes":"%s","traceSampler":"%s","traceSamplerArg":"%s","profilingPreflight":"analysis/profiling-preflight.json","workload":{"loadGenerator":"%s","baseUrl":"%s","readyUrl":"%s","method":"%s","path":"%s","body":"%s","datasetIdentity":"%s","durationSeconds":%s,"requestedDurationSeconds":%s,"connections":%s,"profile":"%s"},"startedAt":"%s","startedEpoch":%s,"source":{"gitRevision":"%s"}%s%s}\n' \
+printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","mode":"measure","target":"%s","remoteTelemetry":%s,"continuousProfiling":%s,"profilingKeepTiering":%s,"profilingPolicy":"%s","profilingPolicySource":"%s","profilingTypes":"%s","traceSampler":"%s","traceSamplerArg":"%s","profilingPreflight":"analysis/profiling-preflight.json","workload":{"loadGenerator":"%s","baseUrl":"%s","readyUrl":"%s","method":"%s","path":"%s","body":"%s","datasetIdentity":"%s","durationSeconds":%s,"requestedDurationSeconds":%s,"connections":%s,"profile":"%s"},"startedAt":"%s","startedEpoch":%s,"source":{"gitRevision":"%s"}%s%s%s%s}\n' \
   "$(json_escape "${package_run_id}")" "$(json_escape "${telemetry_run_id}")" "$(json_escape "${scenario_id}")" "$(json_escape "${target_mode}")" "${remote_telemetry_json}" "${continuous_profiling_json}" "${profiling_keep_tiering_json}" \
-  "$(json_escape "${PERFLAB_PROFILING_POLICY}")" "$(json_escape "${PERFLAB_PROFILING_TYPES}")" \
+  "$(json_escape "${PERFLAB_PROFILING_POLICY}")" "$(json_escape "${PERFLAB_PROFILING_POLICY_SOURCE:-default}")" "$(json_escape "${PERFLAB_PROFILING_TYPES}")" \
   "$(json_escape "${PERFLAB_TRACE_SAMPLER:-parentbased_traceidratio}")" "$(json_escape "${PERFLAB_TRACE_SAMPLE_RATIO:-0.25}")" \
   "$(json_escape "${load_generator}")" "$(json_escape "${base_url}")" "$(json_escape "${ready_url}")" "$(json_escape "${method}")" "$(json_escape "${path}")" "$(json_escape "${body}")" "$(json_escape "${dataset_identity}")" \
   "${effective_duration}" "${duration_seconds}" "${connections}" "$(json_escape "${load_profile}")" "$(json_escape "${started_at}")" "${started_epoch}" \
-  "$(json_escape "${git_revision}")" "${suite_field}" "${fault_field}" \
+  "$(json_escape "${git_revision}")" "${suite_field}" "${fault_field}" "${remote_correlation_field}" "${distributed_field}" \
   > "${artifact_dir}/manifest.json"
 
 export PERF_SCENARIO="${perf_scenario}" PERF_RUN_ID="${telemetry_run_id}" PERF_RUN_MODE="measure"
@@ -177,7 +284,7 @@ if [[ "${target_mode}" == "remote" ]]; then
   # staging/production endpoint can deepen an outage. Override deliberately with
   # PERFLAB_REMOTE_ALLOW_UNHEALTHY=1 to load a target expected to be degraded (or when
   # the readiness endpoint itself requires auth this bare check cannot supply).
-  if ! curl -fsS --max-time 10 "${ready_url}" >/dev/null 2>&1; then
+  if ! target_curl -fsS --max-time 10 "${ready_url}" >/dev/null 2>&1; then
     if [[ "${PERFLAB_REMOTE_ALLOW_UNHEALTHY:-0}" == "1" ]]; then
       echo "WARNING: remote readiness check failed at ${ready_url}; PERFLAB_REMOTE_ALLOW_UNHEALTHY=1 set, measuring anyway." >&2
       export PERFLAB_CAPTURE_INCOMPLETE=1
@@ -194,6 +301,10 @@ elif [[ "${target_owned}" != "1" ]]; then
   # to make safe did not. Attach-only is the whole point: measure and diagnose
   # without deploying, resetting or stopping anything.
   echo "Attaching to an existing ${target_kind} for ${scenario_id} (${telemetry_run_id}) -- no deploy, no reset, no teardown."
+  if [[ "${continuous_profiling:-0}" == "1" && "${PERFLAB_PROFILING_TYPES}" != "cpu" ]]; then
+    echo "cannot apply profiling policy ${PERFLAB_PROFILING_POLICY} (types ${PERFLAB_PROFILING_TYPES}) to an unowned target; Pyroscope types are process-lifetime. Attach only with a matching running profiler, or use managed-compose." >&2
+    exit 1
+  fi
   performance_target_preflight "${target_kind}" attach measure || {
     echo "attach-only target refused measurement" >&2
     exit 1
@@ -201,7 +312,7 @@ elif [[ "${target_owned}" != "1" ]]; then
   # We did not start it, so we cannot assume it is up. Fail closed rather than
   # measure a target that is not serving: the numbers would be a readiness
   # failure wearing a latency result.
-  if ! curl -fsS --max-time 10 "${ready_url}" >/dev/null 2>&1; then
+  if ! target_curl -fsS --max-time 10 "${ready_url}" >/dev/null 2>&1; then
     echo "ERROR: ${ready_url} is not ready and this run did not start the target, so it cannot bring it up." >&2
     echo "  Start the process or container yourself, or use PERFLAB_TARGET_KIND=managed-compose to let the harness own it." >&2
     exit 1
@@ -225,8 +336,19 @@ else
   # Free the shared host ports first: other labs bind the same 8080/5432/etc.
   require_target_ownership "start and rebuild the application stack" || exit 1
   stop_conflicting_lab_stacks
-  # shellcheck disable=SC2086
-  compose up -d --build ${app_services}
+  profiling_stamp="${artifacts_root}/.applied-profiling-startup"
+  profiling_key="$(profiling_startup_key)"
+  if [[ "${continuous_profiling:-0}" == "1" ]] && profiling_needs_recreate "$(cat "${profiling_stamp}" 2>/dev/null || true)" "${profiling_key}"; then
+    echo "profiler startup config changed; recreating owned app so Pyroscope types match the selected policy"
+    # shellcheck disable=SC2086
+    compose up -d --build --force-recreate ${app_services}
+  else
+    # shellcheck disable=SC2086
+    compose up -d --build ${app_services}
+  fi
+  if [[ "${continuous_profiling:-0}" == "1" ]]; then
+    printf '%s\n' "${profiling_key}" > "${profiling_stamp}"
+  fi
   wait_for_api
 
   # C-6. Dependency resets so the run is scenario-scoped. Three properties the
@@ -405,28 +527,50 @@ inject_fault() {
   local dep="${PERFLAB_FAULT_DEP}" at="${PERFLAB_FAULT_AT:-5}" dur="${PERFLAB_FAULT_FOR:-5}" kind="${PERFLAB_FAULT_KIND:-pause}"
   sleep "${at}"
   echo "[fault] ${kind} ${dep} for ${dur}s (dependency-failure resilience test)"
-  local inject_ok restore_ok
-  if [[ "${kind}" == "stop" ]]; then
-    compose stop "${dep}" >/dev/null 2>&1 && inject_ok=1 || inject_ok=0; sleep "${dur}"
-    compose start "${dep}" >/dev/null 2>&1 && restore_ok=1 || restore_ok=0
-  else
-    compose pause "${dep}" >/dev/null 2>&1 && inject_ok=1 || inject_ok=0; sleep "${dur}"
-    compose unpause "${dep}" >/dev/null 2>&1 && restore_ok=1 || restore_ok=0
+  local inject_ok=0 restore_ok=0 window_held=0
+  local apply_state="" end_state="" restore_state="" container_id=""
+  local apply_at="" end_at="" restore_at=""
+  case "${kind}" in
+    stop) compose stop "${dep}" >/dev/null 2>&1 || true ;;
+    kill) compose kill "${dep}" >/dev/null 2>&1 || true ;;
+    *) compose pause "${dep}" >/dev/null 2>&1 || true ;;
+  esac
+  apply_state="$(performance_compose_service_state "${dep}")"
+  apply_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  container_id="$(performance_compose_service_id "${dep}")"
+  if performance_fault_state_applied "${kind}" "${apply_state}"; then inject_ok=1; fi
+  sleep "${dur}"
+  end_state="$(performance_compose_service_state "${dep}")"
+  end_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [[ "${inject_ok}" == "1" ]] && performance_fault_state_applied "${kind}" "${end_state}"; then
+    window_held=1
+  elif [[ "${inject_ok}" == "1" ]]; then
+    echo "[fault] WARNING: '${kind} ${dep}' recovered before the ${dur}s window ended (state=${end_state:-empty})." >&2
   fi
-  # A failed inject means the run measured a HEALTHY dependency -- say so loudly,
-  # else the package looks like a resilience test that never actually happened.
-  [[ "${inject_ok}" == "1" ]] || echo "[fault] WARNING: '${kind} ${dep}' did NOT take effect (compose returned non-zero); this run did not inject the fault." >&2
-  # Report restore honestly; the EXIT/INT/TERM trap (restore_fault_dep) is the backstop.
+  case "${kind}" in
+    stop|kill) compose start "${dep}" >/dev/null 2>&1 || true ;;
+    *) compose unpause "${dep}" >/dev/null 2>&1 || true ;;
+  esac
+  restore_state="$(performance_compose_service_state "${dep}")"
+  restore_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if performance_fault_state_restored "${restore_state}"; then restore_ok=1; fi
+  [[ "${inject_ok}" == "1" ]] || echo "[fault] WARNING: '${kind} ${dep}' did NOT take effect; this run did not inject the fault." >&2
   if [[ "${restore_ok}" == "1" ]]; then
     echo "[fault] ${dep} restored"
   else
     echo "[fault] WARNING: could not restore ${dep} inline; the cleanup trap will retry." >&2
   fi
-  # Exit status encodes the outcome for the parent's `wait fault_pid`:
-  #   0 = fault applied AND recovered within the measured window
-  #   1 = fault did NOT apply (measured a healthy dependency)
-  #   2 = applied but the inline restore failed (recovery was not observed in-window)
+  mkdir -p "${artifact_dir}/benchmark"
+  printf '{"action":"%s","service":"%s","containerId":"%s","applied":%s,"windowHeld":%s,"restored":%s,"appliedState":"%s","endState":"%s","restoredState":"%s","appliedAt":"%s","endedAt":"%s","restoredAt":"%s"}\n' \
+    "$(json_escape "${kind}")" "$(json_escape "${dep}")" "$(json_escape "${container_id}")" \
+    "$([[ "${inject_ok}" == "1" ]] && echo true || echo false)" \
+    "$([[ "${window_held}" == "1" ]] && echo true || echo false)" \
+    "$([[ "${restore_ok}" == "1" ]] && echo true || echo false)" \
+    "$(json_escape "${apply_state}")" "$(json_escape "${end_state}")" "$(json_escape "${restore_state}")" \
+    "$(json_escape "${apply_at}")" "$(json_escape "${end_at}")" "$(json_escape "${restore_at}")" \
+    > "${artifact_dir}/benchmark/fault-proof.json"
   if   [[ "${inject_ok}"  != "1" ]]; then return 1
+  elif [[ "${window_held}" != "1" ]]; then return 3
   elif [[ "${restore_ok}" != "1" ]]; then return 2
   else return 0; fi
 }
@@ -459,8 +603,6 @@ if [[ "${load_profile}" == "soak" ]]; then
     echo "soak session already started; generator restart refused" >&2
     exit 1
   fi
-  printf '{"event":"start","generator":"%s","profile":"soak"}\n' "$(json_escape "${load_generator}")" \
-    > "${artifact_dir}/benchmark/session/start.json"
 fi
 midload_pid=""; fault_pid=""
 if [[ "${target_mode}" == "local" ]]; then
@@ -477,18 +619,103 @@ fi
 # environment contextualises a verdict, it never IS the verdict.
 "${harness_core_dir}/capture/capture-environment.sh" "${artifact_dir}" measurement-start >/dev/null 2>&1 || true
 measure_started_epoch="$(date -u +%s)"
+measurement_window_start=""
+measurement_window_end=""
+measurement_window_id=""
+if [[ -n "${PERFLAB_MEASUREMENT_WINDOW_PROBE_PATH:-}" ]]; then
+  # This is the last target-owned identity check before a measured request can
+  # leave the generator. It binds the exact run to the concrete process
+  # generation rather than trusting a stale service-instance series.
+  measurement_window_id="mw-${measure_started_epoch}-${scenario_lower}"
+  measurement_window_start="${artifact_dir}/analysis/measurement-window-start.json"
+  performance_measurement_window_probe "${base_url}" "${telemetry_run_id}" "${measurement_window_id}" start "${measurement_window_start}" || {
+    echo "measurement-window start attestation failed before traffic" >&2
+    exit 1
+  }
+fi
+distributed_measure() {
+  local -a command=(python3 "${harness_core_dir}/distributed/agent.py" controller
+    --agents "${distributed_agents}" --shards "${distributed_shards}"
+    --target-origin "${distributed_target_origin}" --duration-seconds "${effective_duration}"
+    --connections "${connections}" --run-id "${telemetry_run_id}"
+    --artifact-dir "${artifact_dir}")
+  [[ "${PERFLAB_DISTRIBUTED_PARTIAL:-0}" == "1" ]] && command+=(--allow-partial)
+  [[ "${PERFLAB_DISTRIBUTED_ALLOW_INSECURE_LOCAL:-0}" == "1" ]] && command+=(--allow-insecure-local)
+  "${command[@]}"
+}
+distributed_sha256_stream() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 2>/dev/null | awk '{print $NF}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    echo "distributed compatibility capture needs openssl or shasum for SHA-256." >&2
+    return 1
+  fi
+}
+distributed_write_compatibility() {
+  # The closed controller writes aggregate evidence, not the normal local k6
+  # adapter's envelope.  Make the package comparable only after binding it to
+  # the immutable embedded workload and the one generator fingerprint all
+  # admitted agents registered. Never substitute the controller host's k6
+  # version: it did not generate the measured traffic.
+  local aggregate plan fingerprint plan_fingerprint script script_rel workload_hash config_hash topology timeout_seconds partial_loss
+  aggregate="${artifact_dir}/benchmark/distributed-aggregate.json"
+  plan="${artifact_dir}/benchmark/distributed-plan.json"
+  [[ -s "${aggregate}" && -s "${plan}" ]] || {
+    echo "distributed controller did not publish aggregate and plan evidence" >&2
+    return 1
+  }
+  fingerprint="$(jqd -r '.generatorFingerprint // empty' < "${aggregate}")"
+  plan_fingerprint="$(jqd -r '.generatorFingerprint // empty' < "${plan}")"
+  [[ "${fingerprint}" =~ ^sha256:[a-f0-9]{64}$ && "${fingerprint}" == "${plan_fingerprint}" ]] || {
+    echo "distributed controller did not bind one valid k6 fingerprint to the aggregate and plan" >&2
+    return 1
+  }
+  script="${harness_core_dir}/distributed/k6-distributed.js"
+  [[ -f "${script}" ]] || { echo "distributed fixed k6 workload is missing" >&2; return 1; }
+  script_rel="$(relative_to_repo "${script}")"
+  workload_hash="$({ printf '%s\0' "${script_rel}"; cat "${script}"; printf '\0'; } | distributed_sha256_stream)"
+  topology="$(jqd -c '[.shards[] | {id,agentURL,connections,executionSegment}] | sort_by(.id)' < "${plan}")"
+  partial_loss="$(jqd -r '.partialLoss // false' < "${aggregate}")"
+  [[ "${partial_loss}" == "true" || "${partial_loss}" == "false" ]] || {
+    echo "distributed aggregate has an invalid partial-loss declaration" >&2
+    return 1
+  }
+  timeout_seconds=$((effective_duration + 75))
+  config_hash="$({
+    printf 'protocol\0%s\0fingerprint\0%s\0agents\0%s\0connections\0%s\0duration\0%s\0timeout\0%s\0profile\0%s\0scenario\0%s\0' \
+      'perflab-distributed/v1' "${fingerprint}" "${topology}" "${connections}" "${effective_duration}" "${timeout_seconds}s" "${load_profile}" "${scenario_id}"
+    printf 'baseUrl\0%s\0method\0%s\0path\0%s\0network\0%s\0script\0%s\0partialLoss\0%s\0' \
+      "${base_url%/}" "${method}" "${path}" 'distributed-agent' "${script_rel}" "${partial_loss}"
+  } | distributed_sha256_stream)"
+  [[ "${workload_hash}" =~ ^[a-f0-9]{64}$ && "${config_hash}" =~ ^[a-f0-9]{64}$ ]] || {
+    echo "distributed compatibility fingerprint/hash capture failed" >&2
+    return 1
+  }
+  printf '{"generator":"k6","generatorFingerprint":"%s","workloadContentHash":"%s","configurationHash":"%s","networkPath":"distributed-agent","timeout":"%ss","durationSeconds":%s,"connections":%s,"scenario":"%s","profile":"%s","baseUrl":"%s","method":"%s","path":"%s","script":"%s","distributedProtocol":"perflab-distributed/v1","agentCount":%s,"partialLoss":%s}\n' \
+    "$(json_escape "${fingerprint}")" "${workload_hash}" "${config_hash}" "${timeout_seconds}" "${effective_duration}" "${connections}" \
+    "$(json_escape "${scenario_id}")" "$(json_escape "${load_profile}")" "$(json_escape "${base_url%/}")" \
+    "$(json_escape "${method}")" "$(json_escape "${path}")" "$(json_escape "${script_rel}")" "${distributed_shards}" "${partial_loss}" \
+    > "${artifact_dir}/benchmark/compatibility.json"
+}
 load_pid=""
+load_rc=0
 if [[ "${load_profile}" == "soak" ]]; then
   snapshot_interval="${PERFLAB_SOAK_SNAPSHOT_SECONDS:-300}"
   [[ "${snapshot_interval}" =~ ^[1-9][0-9]*$ ]] || { echo "PERFLAB_SOAK_SNAPSHOT_SECONDS must be a positive integer" >&2; exit 1; }
   loadgen_measure "${artifact_dir}" measure & load_pid=$!
+  performance_soak_bind_pid "${artifact_dir}/benchmark/session/start.json" "${load_pid}" "${load_generator}" "${measure_started_epoch}" || exit 1
+  soak_identity="$(performance_soak_identity "${artifact_dir}/benchmark/session/start.json")" || exit 1
+  [[ -n "${soak_identity}" ]] || { echo "soak generator identity was empty" >&2; exit 1; }
   next_snapshot=$((measure_started_epoch + snapshot_interval))
   while kill -0 "${load_pid}" 2>/dev/null; do
     now_epoch="$(date -u +%s)"
-    printf '{"event":"heartbeat","atEpoch":%s,"generatorPid":%s}\n' "${now_epoch}" "${load_pid}" \
+    performance_soak_assert_pid "${artifact_dir}/benchmark/session/start.json" "${load_pid}" || exit 1
+    printf '{"event":"heartbeat","atEpoch":%s,"generatorPid":%s,"generatorIdentity":"%s"}\n' "${now_epoch}" "${load_pid}" "${soak_identity}" \
       >> "${artifact_dir}/benchmark/session/heartbeats.ndjson"
     if (( now_epoch >= next_snapshot )); then
-      printf '{"event":"snapshot","atEpoch":%s,"generatorPid":%s}\n' "${now_epoch}" "${load_pid}" \
+      printf '{"event":"snapshot","atEpoch":%s,"generatorPid":%s,"generatorIdentity":"%s"}\n' "${now_epoch}" "${load_pid}" "${soak_identity}" \
         >> "${artifact_dir}/benchmark/session/snapshots.ndjson"
       next_snapshot=$((now_epoch + snapshot_interval))
     fi
@@ -497,16 +724,45 @@ if [[ "${load_profile}" == "soak" ]]; then
   load_rc=0
   wait "${load_pid}" || load_rc=$?
   load_pid=""
-  (( load_rc == 0 )) || { echo "soak generator exited with status ${load_rc}" >&2; exit "${load_rc}"; }
 else
-  loadgen_measure "${artifact_dir}" measure
+  if [[ "${distributed_enabled}" == "1" ]]; then
+    distributed_measure || load_rc=$?
+  else
+    loadgen_measure "${artifact_dir}" measure || load_rc=$?
+  fi
 fi
 measure_ended_epoch="$(date -u +%s)"
+if [[ -n "${measurement_window_start}" ]]; then
+  measurement_window_end="${artifact_dir}/analysis/measurement-window-end.json"
+  performance_measurement_window_probe "${base_url}" "${telemetry_run_id}" "${measurement_window_id}" end "${measurement_window_end}" || {
+    echo "measurement-window end attestation failed; evidence cannot be scoped to an exact target generation" >&2
+    exit 1
+  }
+  performance_measurement_window_finalize "${measurement_window_start}" "${measurement_window_end}" \
+    "${artifact_dir}/analysis/measurement-window.json" || {
+    echo "measurement-window evidence could not be finalized" >&2
+    exit 1
+  }
+fi
+if (( load_rc != 0 )); then
+  if [[ "${load_profile}" == "soak" ]]; then
+    echo "soak generator exited with status ${load_rc}" >&2
+  else
+    echo "load generator exited with status ${load_rc}" >&2
+  fi
+  exit "${load_rc}"
+fi
+if [[ "${distributed_enabled}" == "1" ]]; then
+  distributed_write_compatibility || {
+    echo "distributed measured evidence did not publish a valid compatibility envelope" >&2
+    exit 1
+  }
+fi
 "${harness_core_dir}/capture/capture-environment.sh" "${artifact_dir}" measurement-end >/dev/null 2>&1 || true
 if [[ "${load_profile}" == "soak" ]]; then
-  printf '{"event":"snapshot","atEpoch":%s,"final":true}\n' "${measure_ended_epoch}" \
+  printf '{"event":"snapshot","atEpoch":%s,"generatorIdentity":"%s","final":true}\n' "${measure_ended_epoch}" "${soak_identity}" \
     > "${artifact_dir}/benchmark/session/snapshot.json"
-  printf '{"event":"stop","generator":"%s"}\n' "$(json_escape "${load_generator}")" \
+  printf '{"event":"stop","generator":"%s","generatorIdentity":"%s"}\n' "$(json_escape "${load_generator}")" "${soak_identity}" \
     > "${artifact_dir}/benchmark/session/stop.json"
 fi
 [[ -n "${midload_pid}" ]] && { wait "${midload_pid}" 2>/dev/null || true; }

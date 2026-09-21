@@ -814,10 +814,11 @@ done
 ```
 
 Start from a measurement created with `--no-runtime`, or copy a clean
-measurement-only package before each command. `stacks` may be added to the
-loop and is captured directly. Set
-`PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=false` only for an environment where that
-endpoint is unavailable; the adapter then records its CPU-trace fallback.
+measurement-only package before each command. `stacks` is a diagnose-mode
+capture: `capture-runtime.sh` recreates an owned app with
+`PERFLAB_CONTINUOUS_PROFILING=0` so `/stacks` can load `ICorProfiler` without
+colliding with Pyroscope. Measurement runs keep the recorded CPU-trace
+fallback. Do not use `dotnet-stack` (`dotnet/diagnostics#5444` is open).
 Process dumps can contain secrets or personal data and should remain restricted.
 
 Ordinary scenarios still collect all passive evidence together. Metrics,
@@ -1149,8 +1150,10 @@ docker compose -f labs/scenariolab/compose.yaml down -v    # full reset (deletes
   labs/<lab>/compose.yaml down -v` before a run whose read scenarios need the
   pristine seed, or their table sizes (and timings) will drift.
 - `gcdump` forces a full collection; don't read it as steady-state heap.
-- A `stacks` request captures text stacks unless the endpoint was explicitly
-  disabled; confirm the effective kind in `runtime/capture.json`.
+- A `stacks` request produces text stacks only after a diagnose-mode recreate
+  with Pyroscope off. Measurement keeps the recorded CPU-trace fallback because
+  `/stacks` injects `ICorProfiler`. Confirm the effective kind in
+  `runtime/capture.json`.
 - `capture-evidence` fails loud if telemetry or a dependency is unreachable, rather
   than emitting a silently empty package.
 

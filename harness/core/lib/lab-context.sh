@@ -11,6 +11,84 @@
 # ---------------------------------------------------------------------------
 project="${PERFLAB_PROJECT:?PERFLAB_PROJECT not set in ${lab_config}}"
 runtime="${PERFLAB_RUNTIME:?PERFLAB_RUNTIME not set in ${lab_config}}"
+# shellcheck disable=SC1091
+source "${harness_root}/core/lib/performance.sh"
+
+# D-P1-1. Named Pyroscope policies are process-lifetime. The catalog may select
+# one per scenario; CLI/env still wins. These helpers are defined before first
+# use because this file is sourced top to bottom.
+profiling_types_for_policy() {
+  case "$1" in
+    cpu) printf 'cpu' ;;
+    cpu-wall) printf 'cpu,wall' ;;
+    memory|soak-memory) printf 'allocation,live-heap' ;;
+    contention) printf 'lock' ;;
+    exceptions) printf 'exception' ;;
+    all-diagnostic) printf 'cpu,wall,allocation,lock,exception,live-heap' ;;
+    *) return 1 ;;
+  esac
+}
+
+profiling_startup_key() {
+  printf '%s|%s|%s|%s' \
+    "${PERFLAB_CONTINUOUS_PROFILING:-0}" \
+    "${PERFLAB_PROFILING_POLICY:-}" \
+    "${PERFLAB_PROFILING_TYPES:-}" \
+    "${PERFLAB_PROFILING_KEEP_TIERING:-0}"
+}
+
+profiling_needs_recreate() {
+  local previous="${1:-}" next="${2:-}"
+  [[ -n "${previous}" && "${previous}" != "${next}" ]]
+}
+
+verify_requested_profiling_types() {
+  local requested_type
+  [[ "${target_mode}" == "remote" && "${continuous_profiling}" == "1" ]] || return 0
+  [[ -n "${profiling_verification_body:-}" ]] || return 0
+  for requested_type in ${PERFLAB_PROFILING_TYPES//,/ }; do
+    if ! printf '%s' "${profiling_verification_body}" | jqd -e --arg t "${requested_type}" '(.activeTypes // []) | index($t) != null' >/dev/null 2>&1; then
+      echo "Remote profiler verification does not list profile type '${requested_type}' as active; it cannot supply that evidence." >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+resolve_profiling_policy() {
+  local scenario_id="${1:-}" catalog_policy=""
+  if [[ -n "${PERFLAB_OPERATOR_PROFILING_POLICY}" || -n "${PERFLAB_OPERATOR_PROFILING_TYPES}" ]]; then
+    export PERFLAB_PROFILING_POLICY="${PERFLAB_OPERATOR_PROFILING_POLICY:-cpu}"
+    if [[ -n "${PERFLAB_OPERATOR_PROFILING_TYPES}" ]]; then
+      export PERFLAB_PROFILING_TYPES="${PERFLAB_OPERATOR_PROFILING_TYPES}"
+    else
+      PERFLAB_PROFILING_TYPES="$(profiling_types_for_policy "${PERFLAB_PROFILING_POLICY}")" \
+        || { echo "unknown PERFLAB_PROFILING_POLICY '${PERFLAB_PROFILING_POLICY}'" >&2; return 1; }
+      export PERFLAB_PROFILING_TYPES
+    fi
+    export PERFLAB_PROFILING_POLICY_SOURCE="operator"
+    verify_requested_profiling_types || return 1
+    return 0
+  fi
+  if [[ -n "${json_catalog:-}" && -f "${json_catalog}" && -n "${scenario_id}" ]]; then
+    catalog_policy="$(jqd -r --arg id "${scenario_id}" \
+      '.scenarios[] | select(.id == $id) | .diagnostics.profilingPolicy // empty' \
+      < "${json_catalog}" 2>/dev/null || true)"
+  fi
+  if [[ -n "${catalog_policy}" ]]; then
+    PERFLAB_PROFILING_TYPES="$(profiling_types_for_policy "${catalog_policy}")" \
+      || { echo "unknown catalog diagnostics.profilingPolicy '${catalog_policy}' for ${scenario_id}" >&2; return 1; }
+    export PERFLAB_PROFILING_POLICY="${catalog_policy}"
+    export PERFLAB_PROFILING_TYPES
+    export PERFLAB_PROFILING_POLICY_SOURCE="catalog"
+    verify_requested_profiling_types || return 1
+    return 0
+  fi
+  export PERFLAB_PROFILING_POLICY="cpu"
+  export PERFLAB_PROFILING_TYPES="cpu"
+  export PERFLAB_PROFILING_POLICY_SOURCE="default"
+  verify_requested_profiling_types || return 1
+}
 
 # Target mode: "local" (default) = the harness OWNS the app under test (Compose
 # lifecycle, dependency resets, dotnet-monitor, run-id-scoped telemetry).
@@ -42,6 +120,7 @@ remote_diag_ack_phrase="i-understand-perturbation"
 remote_write_ack_phrase="i-understand-data-mutation"
 remote_telemetry=0
 remote_diagnostics=0
+remote_correlation=0
 continuous_profiling=0
 case "${PERFLAB_CONTINUOUS_PROFILING:-0}" in
   1|true|yes|on) continuous_profiling=1 ;;
@@ -50,19 +129,22 @@ case "${PERFLAB_CONTINUOUS_PROFILING:-0}" in
 esac
 # Compose interpolates this; normalize aliases so the container sees 0 or 1.
 export PERFLAB_CONTINUOUS_PROFILING="${continuous_profiling}"
+# Capture operator intent BEFORE defaulting. A missing env is how a per-scenario
+# catalog policy can still be selected; defaulting first made every run look like
+# the operator asked for cpu and the catalog field was dead.
+PERFLAB_OPERATOR_PROFILING_POLICY="${PERFLAB_PROFILING_POLICY-}"
+PERFLAB_OPERATOR_PROFILING_TYPES="${PERFLAB_PROFILING_TYPES-}"
 export PERFLAB_PROFILING_POLICY="${PERFLAB_PROFILING_POLICY:-cpu}"
 if [[ -z "${PERFLAB_PROFILING_TYPES:-}" ]]; then
-  case "${PERFLAB_PROFILING_POLICY}" in
-    cpu) PERFLAB_PROFILING_TYPES="cpu" ;;
-    cpu-wall) PERFLAB_PROFILING_TYPES="cpu,wall" ;;
-    memory|soak-memory) PERFLAB_PROFILING_TYPES="allocation,live-heap" ;;
-    contention) PERFLAB_PROFILING_TYPES="lock" ;;
-    exceptions) PERFLAB_PROFILING_TYPES="exception" ;;
-    all-diagnostic) PERFLAB_PROFILING_TYPES="cpu,wall,allocation,lock,exception,live-heap" ;;
-    *) echo "unknown PERFLAB_PROFILING_POLICY '${PERFLAB_PROFILING_POLICY}'" >&2; exit 1 ;;
-  esac
+  PERFLAB_PROFILING_TYPES="$(profiling_types_for_policy "${PERFLAB_PROFILING_POLICY}")" \
+    || { echo "unknown PERFLAB_PROFILING_POLICY '${PERFLAB_PROFILING_POLICY}'" >&2; exit 1; }
 fi
 export PERFLAB_PROFILING_TYPES
+export PERFLAB_PROFILING_POLICY_SOURCE="${PERFLAB_PROFILING_POLICY_SOURCE:-default}"
+if [[ -n "${PERFLAB_OPERATOR_PROFILING_POLICY}" || -n "${PERFLAB_OPERATOR_PROFILING_TYPES}" ]]; then
+  PERFLAB_PROFILING_POLICY_SOURCE="operator"
+  export PERFLAB_PROFILING_POLICY_SOURCE
+fi
 profiling_keep_tiering=0
 case "${PERFLAB_PROFILING_KEEP_TIERING:-0}" in
   1|true|yes|on) profiling_keep_tiering=1 ;;
@@ -82,6 +164,11 @@ if [[ "${target_mode}" == "remote" ]]; then
     0|false|no|off|"") remote_diagnostics=0 ;;
     *) echo "PERFLAB_REMOTE_DIAGNOSTICS must be 1/true or 0/false; received '${PERFLAB_REMOTE_DIAGNOSTICS}'." >&2; exit 1 ;;
   esac
+  case "${PERFLAB_REMOTE_CORRELATION:-0}" in
+    1|true|yes|on) remote_correlation=1 ;;
+    0|false|no|off|"") remote_correlation=0 ;;
+    *) echo "PERFLAB_REMOTE_CORRELATION must be 1/true or 0/false; received '${PERFLAB_REMOTE_CORRELATION}'" >&2; exit 1 ;;
+  esac
   # A remote tier must point at the DEPLOYED environment's backends EXPLICITLY: the
   # observability/diagnostics URLs below otherwise default to localhost, which would
   # silently read a stale LOCAL stack as if it were the remote target. Require the
@@ -94,6 +181,17 @@ if [[ "${target_mode}" == "remote" ]]; then
   if [[ "${remote_diagnostics}" == "1" && -z "${PERFLAB_DIAGNOSTICS_URL:-}" ]]; then
     echo "PERFLAB_REMOTE_DIAGNOSTICS=1 requires PERFLAB_DIAGNOSTICS_URL set to the deployed dotnet-monitor endpoint; a remote target must not inherit the localhost default." >&2
     exit 1
+  fi
+  if [[ "${remote_correlation}" == "1" ]]; then
+    remote_correlation_version="${PERFLAB_REMOTE_CORRELATION_VERSION:-}"
+    remote_correlation_probe_path="${PERFLAB_REMOTE_CORRELATION_PROBE_PATH:-}"
+    remote_correlation_header="${PERFLAB_REMOTE_CORRELATION_HEADER:-}"
+    remote_correlation_response_run_id_field="${PERFLAB_REMOTE_CORRELATION_RESPONSE_RUN_ID_FIELD:-}"
+    remote_correlation_response_version_field="${PERFLAB_REMOTE_CORRELATION_RESPONSE_VERSION_FIELD:-}"
+    remote_correlation_prometheus_label="${PERFLAB_REMOTE_CORRELATION_PROMETHEUS_LABEL:-}"
+    remote_correlation_loki_label="${PERFLAB_REMOTE_CORRELATION_LOKI_LABEL:-}"
+    remote_correlation_tempo_attribute="${PERFLAB_REMOTE_CORRELATION_TEMPO_ATTRIBUTE:-}"
+    performance_remote_correlation_validate || exit 1
   fi
   if [[ "${continuous_profiling}" == "1" ]]; then
     if [[ "${remote_telemetry}" != "1" ]]; then
@@ -123,7 +221,7 @@ if [[ "${target_mode}" == "remote" ]]; then
       *) echo "PERFLAB_PROFILING_VERIFICATION_URL must use HTTPS (HTTP is allowed only for loopback testing); refusing to read a profiler attestation over plaintext." >&2; exit 1 ;;
     esac
     profiling_verification_file="${PERFLAB_PROFILING_VERIFICATION_OUT:-}"
-    profiling_verification_body="$(curl -fsS --max-time 10 --max-filesize 1048576 "${PERFLAB_PROFILING_VERIFICATION_URL}" 2>/dev/null || true)"
+    profiling_verification_body="$(backend_curl -fsS --max-time 10 --max-filesize 1048576 "${PERFLAB_PROFILING_VERIFICATION_URL}" 2>/dev/null || true)"
     if [[ -z "${profiling_verification_body}" ]]; then
       echo "Remote profiler verification endpoint ${PERFLAB_PROFILING_VERIFICATION_URL} returned nothing; cannot confirm the remote profiler is active." >&2
       exit 1
@@ -135,18 +233,20 @@ if [[ "${target_mode}" == "remote" ]]; then
       echo "Remote profiler verification did not report activationProbe=\"active\"; refusing to record profiles as evidence from an unverified agent." >&2
       exit 1
     fi
-    for requested_type in ${PERFLAB_PROFILING_TYPES//,/ }; do
-      if ! printf '%s' "${profiling_verification_body}" | jqd -e --arg t "${requested_type}" '(.activeTypes // []) | index($t) != null' >/dev/null 2>&1; then
-        echo "Remote profiler verification does not list profile type '${requested_type}' as active; it cannot supply that evidence." >&2
-        exit 1
-      fi
-    done
+    verify_requested_profiling_types || exit 1
     if [[ -n "${profiling_verification_file}" ]]; then
       mkdir -p "$(dirname "${profiling_verification_file}")"
       printf '%s\n' "${profiling_verification_body}" > "${profiling_verification_file}"
     fi
     echo "Remote profiler verification accepted for types: ${PERFLAB_PROFILING_TYPES}" >&2
   fi
+fi
+
+if [[ "${target_mode}" != "remote" ]]; then
+  case "${PERFLAB_REMOTE_CORRELATION:-0}" in
+    0|false|no|off|"") : ;;
+    *) echo "PERFLAB_REMOTE_CORRELATION requires PERFLAB_TARGET=remote" >&2; exit 1 ;;
+  esac
 fi
 
 base_url="${PERFLAB_BASE_URL:?PERFLAB_BASE_URL not set}"
@@ -219,6 +319,35 @@ export PERFLAB_PROFILING_VERIFICATION_URL="${PERFLAB_PROFILING_VERIFICATION_URL:
 export PERFLAB_PROFILING_MIN_CORES_THRESHOLD="${PERFLAB_PROFILING_MIN_CORES_THRESHOLD:-}"
 export PERFLAB_PROFILING_SERVICE_QUOTAS="${PERFLAB_PROFILING_SERVICE_QUOTAS:-}"
 export PERFLAB_PROFILING_QUOTA_SOURCE="${PERFLAB_PROFILING_QUOTA_SOURCE:-}"
+
+# D-P1-6. Isolated local Compose stays unauthenticated. Telemetry backends and
+# remote monitors are admitted independently: a backend token must not satisfy
+# a monitor request, and vice versa.
+if [[ "${target_mode}" == "remote" ]]; then
+  require_remote_endpoint_auth() {
+    local name="$1" authorization="$2" ca="$3" cert="$4" key="$5"
+    if [[ -n "${cert}" || -n "${key}" ]]; then
+      if [[ -z "${cert}" || -z "${key}" ]]; then
+        echo "${name} client certificate and key must be set together." >&2
+        exit 1
+      fi
+    fi
+    if [[ -z "${authorization}${ca}${cert}" ]]; then
+      echo "${name} requires a secret-backed Authorization header or declared CA/mTLS configuration (values are never written to artifacts)." >&2
+      exit 1
+    fi
+  }
+  if [[ "${remote_telemetry}" == "1" ]]; then
+    require_remote_endpoint_auth "external telemetry backends" \
+      "${PERFLAB_BACKEND_AUTHORIZATION:-}" "${PERFLAB_BACKEND_CA_FILE:-}" \
+      "${PERFLAB_BACKEND_CLIENT_CERT:-}" "${PERFLAB_BACKEND_CLIENT_KEY:-}"
+  fi
+  if [[ "${remote_diagnostics}" == "1" ]]; then
+    require_remote_endpoint_auth "remote diagnostics" \
+      "${PERFLAB_MONITOR_AUTHORIZATION:-}" "${PERFLAB_MONITOR_CA_FILE:-}" \
+      "${PERFLAB_MONITOR_CLIENT_CERT:-}" "${PERFLAB_MONITOR_CLIENT_KEY:-}"
+  fi
+fi
 
 dependencies="${PERFLAB_DEPENDENCIES:-}"
 artifacts_root="$(resolve_repo_path "${PERFLAB_ARTIFACTS_ROOT:-artifacts}")"

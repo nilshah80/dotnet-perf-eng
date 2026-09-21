@@ -180,6 +180,18 @@
             "preset": {
               "type": "string"
             },
+            "profilingPolicy": {
+              "type": "string",
+              "enum": [
+                "cpu",
+                "cpu-wall",
+                "memory",
+                "contention",
+                "exceptions",
+                "soak-memory",
+                "all-diagnostic"
+              ]
+            },
             "sourceLoadLevel": {
               "type": "string"
             }

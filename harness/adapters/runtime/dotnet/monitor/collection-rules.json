@@ -1,0 +1,35 @@
+{
+  "Egress": {
+    "FileSystem": {
+      "perflabCrashDumps": {
+        "DirectoryPath": "/diag/collection-rule-dumps",
+        "IntermediateDirectoryPath": "/diag/collection-rule-dumps/incomplete"
+      }
+    }
+  },
+  "CollectionRules": {
+    "PerflabCrashDump": {
+      "Trigger": {
+        "Type": "AspNetRequestCount",
+        "Settings": {
+          "RequestCount": 1,
+          "SlidingWindowDuration": "00:00:10"
+        }
+      },
+      "Actions": [
+        {
+          "Name": "perflabTriageDump",
+          "Type": "CollectDump",
+          "Settings": {
+            "Type": "Triage",
+            "Egress": "perflabCrashDumps"
+          }
+        }
+      ],
+      "Limits": {
+        "ActionCount": 1,
+        "ActionCountSlidingWindowDuration": "01:00:00"
+      }
+    }
+  }
+}

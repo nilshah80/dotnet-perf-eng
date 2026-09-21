@@ -11,3 +11,4 @@ P08	memory-pressure	GET	/api/reliability/memory?megabytes=4&holdMs=100		api-a	gc
 P09	tenant-noisy-neighbor	GET	/api/reliability/tenant/noisy?workUnits=2000		api-a	trace	32
 P10	browser-synthetic	GET	/		api-a	trace	1
 P11	exception-pressure	GET	/api/reliability/exceptions?count=500		api-a	trace	8
+P14	distributed-k6-request	GET	/api/reliability/distributed		api-a	trace	2

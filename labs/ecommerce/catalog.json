@@ -460,6 +460,7 @@
           "api"
         ],
         "preset": "cpu-memory",
+        "profilingPolicy": "memory",
         "sourceLoadLevel": "first-failing"
       },
       "sloProfile": "checkout-default"

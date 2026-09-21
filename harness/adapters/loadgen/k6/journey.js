@@ -22,7 +22,8 @@ const wireLatency = new Trend('journey_wire_latency');
 const journeyDuration = new Trend('journey_duration');
 
 function parentTags() {
-  return { label: 'journey::checkout', role: 'parent' };
+  const name = __ENV.PERF_JOURNEY_LABEL || __ENV.PERF_SCENARIO || 'checkout';
+  return { label: `journey::${name}`, role: 'parent' };
 }
 
 function childTags(name) {
@@ -40,17 +41,24 @@ export function beginJourney() {
   return Date.now();
 }
 
-export function recordAttempt(name, response, retry = false) {
+// expected may be a predicate for deliberate protocol transitions such as an
+// expired-token 401. The attempt is still counted, but a known, verified
+// transition must not be mislabeled as a load-generator or server failure.
+export function recordAttempt(name, response, retry = false, expected = null) {
   const tags = childTags(name);
   journeyWireRequests.add(1, tags);
   wireLatency.add(response.timings.duration, tags);
   if (retry) {
     journeyRetries.add(1, tags);
   }
-  if (response.error_code || response.status === 0) {
+  // k6 attaches an HTTP-class error_code to non-2xx responses even when a
+  // complete response arrived. Transport failure is therefore status 0, not
+  // merely a populated error_code; otherwise deliberate 401/403 security
+  // transitions become fake DNS/TLS/connect failures in the evidence.
+  if (response.status === 0) {
     journeyTransportErrors.add(1, tags);
     journeyRequestFailures.add(1, tags);
-  } else if (response.status < 200 || response.status >= 400) {
+  } else if (expected ? !expected(response) : (response.status < 200 || response.status >= 400)) {
     journeyStatusErrors.add(1, tags);
     journeyRequestFailures.add(1, tags);
   }
@@ -60,12 +68,13 @@ export function recordAttempt(name, response, retry = false) {
   return response;
 }
 
-export function recordOperation(name, response, valid = true) {
+export function recordOperation(name, response, valid = true, expected = null) {
   const tags = childTags(name);
   journeyChildOps.add(1, tags);
   operationLatency.add(response.timings.duration, tags);
   return check(response, {
-    [`op ${name} success`]: (r) => r.status >= 200 && r.status < 400 && !!valid,
+    [`op ${name} success`]: (r) =>
+      (expected ? expected(r) : (r.status >= 200 && r.status < 400)) && !!valid,
   }, tags);
 }
 
