@@ -185,6 +185,20 @@
         "min": 6,
         "max": 12
       }
+    },
+    {
+      "id": "mix-browse-and-buy",
+      "type": "mix",
+      "generators": [
+        "k6"
+      ]
+    },
+    {
+      "id": "mix-checkout-journeys",
+      "type": "mix",
+      "generators": [
+        "k6"
+      ]
     }
   ]
 }

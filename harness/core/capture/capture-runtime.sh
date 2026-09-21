@@ -133,6 +133,11 @@ if [[ "${#manifest_fields[@]}" -ne 12 ]]; then
 fi
 scenario_id="${manifest_fields[0]}"
 telemetry_run_id="${manifest_fields[1]}"
+# Keep the source measurement's profiler state separate from the diagnose
+# process state. A stacks request following a profiled measurement uses the
+# trace fallback even when this owned child could be recreated differently:
+# dotnet-monitor's stacks attach is not reliable in that combination.
+source_continuous_profiling="$(jqd -r '(.continuousProfiling // false) | if . then "1" else "0" end' < "${manifest}")"
 if [[ "${continuous_profiling:-0}" == "1" ]]; then
   measured_policy="$(jqd -r '.profilingPolicy // empty' < "${manifest}")"
   measured_types="$(jqd -r '.profilingTypes // empty' < "${manifest}")"
@@ -218,6 +223,12 @@ if [[ "${requested_kind}" == "dump" && "${PERFLAB_DUMP_ACK:-}" != "i-understand-
 fi
 target="$(scenario_value "${scenario_id}" target)"
 
+stacks_requested="0"
+[[ "${requested_kind}" == "stacks" || "${requested_preset}" == "hang" ]] && stacks_requested="1"
+gcdump_requested="0"
+[[ "${requested_kind}" == "gcdump" ]] && gcdump_requested="1"
+[[ "${requested_preset}" == "memory" || "${requested_preset}" == "cpu-memory" ]] && gcdump_requested="1"
+
 export PERF_SCENARIO="${scenario_id}" PERF_RUN_ID="${telemetry_run_id}" PERF_RUN_MODE="diagnose"
 # Bind the diagnostic load to what was MEASURED (recorded in the manifest), not
 # whatever the current lab.config/catalog now resolves. Otherwise a re-diagnosed
@@ -247,8 +258,15 @@ fi
 # operator environment must not arm ICorProfiler on a remote or attach-only
 # target. The flag is set only after a successful owned compose recreate.
 unset PERFLAB_ENABLE_DOTNET_MONITOR_STACKS
+unset PERFLAB_STACKS_FORCE_TRACE
 export target_mode
 export PERFLAB_TARGET_KIND="${PERFLAB_TARGET_KIND:-managed-compose}"
+
+if [[ "${source_continuous_profiling}" == "1" && "${gcdump_requested}" == "1" && \
+      ( "${target_mode}" == "remote" || "${PERFLAB_TARGET_KIND}" != "managed-compose" ) ]]; then
+  echo "Refusing gcdump after continuous profiling: this target is not owned, so it cannot be recreated with PERFLAB_CONTINUOUS_PROFILING=0 to preserve managed type metadata." >&2
+  exit 1
+fi
 
 if [[ "${target_mode}" == "remote" ]]; then
   # Remote diagnostics: the app is NOT owned, so it is NOT recreated. Gated behind
@@ -302,19 +320,34 @@ elif [[ "${PERFLAB_TARGET_KIND:-managed-compose}" != "managed-compose" ]]; then
 else
   echo "Recreating app in diagnose mode for ${scenario_id}..."
   require_target_ownership "recreate the application for a diagnostic capture" || exit 1
-  # D-P0-3. /stacks injects ICorProfiler. Recreate with Pyroscope off so the
-  # monitor call-stack channel can occupy that slot. EventPipe traces still
-  # coexist with Pyroscope; only in-process stacks need the exclusive slot.
-  if [[ "${requested_kind}" == "stacks" || "${requested_preset}" == "hang" ]]; then
+  stacks_trace_fallback=0
+  # dotnet-monitor's /stacks path is unreliable after a continuously profiled
+  # source measurement. Keep the explicit CPU-trace fallback rather than
+  # claiming the call-stack channel is usable merely because this child is
+  # owned. An unprofiled source still uses the working owned /stacks path.
+  if [[ "${stacks_requested}" == "1" && "${source_continuous_profiling}" == "1" ]]; then
+    export PERFLAB_STACKS_FORCE_TRACE=1
+    stacks_trace_fallback=1
+    echo "Diagnose-mode /stacks after continuous profiling: retaining the CPU-trace fallback (dotnet-monitor stacks attach is unreliable)."
+  elif [[ "${stacks_requested}" == "1" ]]; then
     export PERFLAB_CONTINUOUS_PROFILING=0
-    unset PERFLAB_PROFILING_TYPES
+    unset PERFLAB_PROFILING_POLICY PERFLAB_PROFILING_POLICY_SOURCE PERFLAB_PROFILING_TYPES PERFLAB_PROFILING_KEEP_TIERING
     continuous_profiling=0
     echo "Diagnose-mode /stacks: recreating with PERFLAB_CONTINUOUS_PROFILING=0 so ICorProfiler is free."
+  fi
+  # A gcdump taken while the Pyroscope profiler is loaded can keep byte counts
+  # but lose every managed type name. Recreate owned targets with profiling off
+  # before any direct or campaign heap capture.
+  if [[ "${gcdump_requested}" == "1" ]]; then
+    export PERFLAB_CONTINUOUS_PROFILING=0
+    unset PERFLAB_PROFILING_POLICY PERFLAB_PROFILING_POLICY_SOURCE PERFLAB_PROFILING_TYPES PERFLAB_PROFILING_KEEP_TIERING
+    continuous_profiling=0
+    echo "Diagnose-mode gcdump: recreating with PERFLAB_CONTINUOUS_PROFILING=0 to preserve managed type metadata."
   fi
   # shellcheck disable=SC2086
   compose up -d --force-recreate ${app_services}
   wait_for_api
-  if [[ "${requested_kind}" == "stacks" || "${requested_preset}" == "hang" ]]; then
+  if [[ "${stacks_requested}" == "1" && "${stacks_trace_fallback}" == "0" ]]; then
     export PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true
   fi
 fi

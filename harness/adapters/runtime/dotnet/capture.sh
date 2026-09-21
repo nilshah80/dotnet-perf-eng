@@ -46,7 +46,11 @@ dotnet_monitor_stacks_capture_allowed() {
   return 0
 }
 if [[ -z "${campaign_preset}" && "${kind}" == "stacks" ]]; then
-  if [[ "${PERFLAB_ENABLE_DOTNET_MONITOR_STACKS:-false}" != "true" ]]; then
+  if [[ "${PERFLAB_STACKS_FORCE_TRACE:-0}" == "1" ]]; then
+    kind="trace"
+    fallback_reason="dotnet-monitor /stacks is not reliable after continuous profiling; this diagnose capture retains the CPU-trace fallback"
+    echo "Requested stacks for ${target} after continuous profiling; capturing a CPU trace fallback instead."
+  elif [[ "${PERFLAB_ENABLE_DOTNET_MONITOR_STACKS:-false}" != "true" ]]; then
     kind="trace"
     fallback_reason="dotnet-monitor /stacks is disabled during measurement because it injects ICorProfiler, which conflicts with Pyroscope; diagnose-mode recreates an owned app with profiling off"
     echo "Requested stacks for ${target}; capturing a CPU trace fallback instead."

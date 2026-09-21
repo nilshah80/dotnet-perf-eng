@@ -38,6 +38,40 @@ write_capture_normalization() { # source status output reason
     "$(json_escape "${reason}")" > "${directory}/normalization.json"
 }
 
+# A profiler/GC-dump interaction can preserve the byte and count columns while
+# replacing managed types with UNKNOWN 0x…. Treat materially degraded heap
+# metadata as failed normalization: one resolved row cannot make a mostly
+# unnamed type-attributed retention report successful evidence.
+gcdump_report_has_usable_type_metadata() {
+  awk '
+    function numeric(value) {
+      gsub(/,/, "", value)
+      return value ~ /^[0-9]+$/
+    }
+    {
+      if (NF < 3 || !numeric($1) || !numeric($2)) next
+      object_bytes = $1
+      object_count = $2
+      gsub(/,/, "", object_bytes)
+      gsub(/,/, "", object_count)
+      retained = (object_bytes + 0) * (object_count + 0)
+      rows++
+      retained_bytes += retained
+      type = $3
+      for (field = 4; field <= NF; field++) type = type " " $field
+      if (tolower(type) !~ /^unknown[[:space:]]+0x[[:xdigit:]]+([[:space:]]|$)/) {
+        named_rows++
+        named_retained_bytes += retained
+      }
+    }
+    END {
+      if (rows == 0 || named_rows * 100 < rows * 95) exit 1
+      if (retained_bytes > 0 && named_retained_bytes * 100 < retained_bytes * 95) exit 1
+      exit 0
+    }
+  ' "$1"
+}
+
 # NB: every `compose ... run` below redirects stdin from /dev/null. Without it a
 # `docker compose run` inside a `while read` loop fed by `< <(find ...)` consumes the
 # REST of find's output as its own stdin, so the loop runs only ONCE -- which silently
@@ -66,8 +100,15 @@ while IFS= read -r gcdump_file; do
   [[ "${gcdump_file}" == "${runtime_dir}/captures/"* ]] && out="${gcdump_file%/*}/report.txt"
   if compose --profile tools run --rm diagnostics \
     dotnet-gcdump report "/artifacts/${rel}" </dev/null > "${out}"; then
-    [[ "${out}" == "${analysis_out}" ]] || cp "${out}" "${analysis_out}"
-    write_capture_normalization "${gcdump_file}" captured "${out}" ""
+    if gcdump_report_has_usable_type_metadata "${out}"; then
+      [[ "${out}" == "${analysis_out}" ]] || cp "${out}" "${analysis_out}"
+      write_capture_normalization "${gcdump_file}" captured "${out}" ""
+    else
+      rm -f "${out}" "${analysis_out}"
+      echo "GC dump ${gcdump_file} has insufficient named type coverage; refusing a successful-looking heap report." >&2
+      write_capture_normalization "${gcdump_file}" failed "" "GC dump type metadata is unavailable (fewer than 95% of parsed type rows or retained bytes have managed type names)"
+      normalization_failures=$((normalization_failures + 1))
+    fi
   else
     rm -f "${out}"
     echo "Failed to normalize ${gcdump_file}; continuing with other campaign captures." >&2

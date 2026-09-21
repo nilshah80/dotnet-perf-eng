@@ -32,6 +32,10 @@ grep -q 'PERFLAB_CONTINUOUS_PROFILING=0' "${runtime}" \
   || fail "capture-runtime.sh must recreate with Pyroscope off for /stacks"
 grep -q 'unset PERFLAB_ENABLE_DOTNET_MONITOR_STACKS' "${runtime}" \
   || fail "capture-runtime.sh must clear an inherited /stacks flag before remote or attach paths"
+grep -q 'PERFLAB_STACKS_FORCE_TRACE=1' "${runtime}" \
+  || fail "profiled diagnose stacks must force the documented CPU-trace fallback"
+grep -q 'Diagnose-mode gcdump: recreating with PERFLAB_CONTINUOUS_PROFILING=0' "${runtime}" \
+  || fail "gcdump diagnostics must recreate owned targets without Pyroscope"
 recreate_line="$(grep -n 'force-recreate' "${runtime}" | head -n1 | cut -d: -f1)"
 flag_line="$(grep -n 'PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true' "${runtime}" | tail -n1 | cut -d: -f1)"
 [[ -n "${recreate_line}" && -n "${flag_line}" && "${flag_line}" -gt "${recreate_line}" ]] \

@@ -149,6 +149,7 @@ case "${phase}" in
       k6_write_profile_config "${profile}" "${conns}" "${dur}" "${cfg}"
       echo "Load profile: ${profile} (executor recorded in benchmark/k6-profile.json)"
       k6 run --config "${cfg}" \
+        --summary-trend-stats "avg,min,med,max,p(50),p(90),p(95),p(99)" \
         --summary-export "${artifact_dir}/benchmark/${summary}" \
         ${K6_RW_OUT[@]+"${K6_RW_OUT[@]}"} \
         --quiet --no-color "${js}" \

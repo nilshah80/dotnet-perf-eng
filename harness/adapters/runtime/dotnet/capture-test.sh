@@ -25,7 +25,17 @@ compose() {
     printf '{}' > "${PERFLAB_TEST_ARTIFACTS_ROOT}${output#/artifacts}.speedscope.json"
   elif [[ " $* " == *' dotnet-gcdump report '* ]]; then
     if [[ "${PERFLAB_TEST_FAIL_BEFORE_NORMALIZATION:-0}" == '1' && "$*" == *before.gcdump* ]]; then return 1; fi
-    printf 'gcdump report\n'
+    if [[ "${PERFLAB_TEST_UNKNOWN_GCDUMP_TYPES:-0}" == '1' ]]; then
+      printf '24 4 UNKNOWN 0x000000000001\n32 2 UNKNOWN 0x000000000002\n'
+    elif [[ "${PERFLAB_TEST_PARTIAL_UNKNOWN_GCDUMP_TYPES:-0}" == '1' ]]; then
+      for number in {1..19}; do printf '24 4 UNKNOWN 0x%012x\n' "${number}"; done
+      printf '32 2 System.String\n'
+    elif [[ "${PERFLAB_TEST_UNKNOWN_GCDUMP_BYTES:-0}" == '1' ]]; then
+      for number in {1..19}; do printf '1 1 Example.Type%u\n' "${number}"; done
+      printf '1000000 1 UNKNOWN 0x000000000001\n'
+    else
+      printf '24 4 System.String\n'
+    fi
   elif [[ " $* " == *' dotnet-dump analyze '* ]]; then
     printf 'dump report\n'
   fi
@@ -107,6 +117,48 @@ grep -q '"status":"partial"' "${test_root}/normalization-partial/runtime/capture
 grep -q '"status":"captured"' "${test_root}/normalization-partial/runtime/captures/trace/normalization.json"
 grep -q '"status":"captured"' "${test_root}/normalization-partial/runtime/captures/gcdump-after/normalization.json"
 
+cp -R "${test_root}/captured" "${test_root}/normalization-unknown-types"
+find "${test_root}/normalization-unknown-types" -name normalization.json -delete
+set +e
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_ARTIFACTS_ROOT="${test_root}/normalization-unknown-types" \
+PERFLAB_TEST_UNKNOWN_GCDUMP_TYPES=1 \
+  bash "${adapter_dir}/normalize.sh" "${test_root}/normalization-unknown-types" >/dev/null 2>&1
+unknown_types_rc=$?
+set -e
+[[ "${unknown_types_rc}" == 2 ]]
+grep -q '"status":"failed"' "${test_root}/normalization-unknown-types/runtime/captures/gcdump-before/normalization.json"
+grep -q 'type metadata is unavailable' "${test_root}/normalization-unknown-types/runtime/captures/gcdump-before/normalization.json"
+[[ ! -e "${test_root}/normalization-unknown-types/runtime/captures/gcdump-before/report.txt" ]]
+
+cp -R "${test_root}/captured" "${test_root}/normalization-partial-unknown-types"
+find "${test_root}/normalization-partial-unknown-types" -name normalization.json -delete
+set +e
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_ARTIFACTS_ROOT="${test_root}/normalization-partial-unknown-types" \
+PERFLAB_TEST_PARTIAL_UNKNOWN_GCDUMP_TYPES=1 \
+  bash "${adapter_dir}/normalize.sh" "${test_root}/normalization-partial-unknown-types" >/dev/null 2>&1
+partial_unknown_types_rc=$?
+set -e
+[[ "${partial_unknown_types_rc}" == 2 ]]
+grep -q '"status":"failed"' "${test_root}/normalization-partial-unknown-types/runtime/captures/gcdump-before/normalization.json"
+grep -q 'type metadata is unavailable' "${test_root}/normalization-partial-unknown-types/runtime/captures/gcdump-before/normalization.json"
+[[ ! -e "${test_root}/normalization-partial-unknown-types/runtime/captures/gcdump-before/report.txt" ]]
+
+cp -R "${test_root}/captured" "${test_root}/normalization-unknown-type-bytes"
+find "${test_root}/normalization-unknown-type-bytes" -name normalization.json -delete
+set +e
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_ARTIFACTS_ROOT="${test_root}/normalization-unknown-type-bytes" \
+PERFLAB_TEST_UNKNOWN_GCDUMP_BYTES=1 \
+  bash "${adapter_dir}/normalize.sh" "${test_root}/normalization-unknown-type-bytes" >/dev/null 2>&1
+unknown_type_bytes_rc=$?
+set -e
+[[ "${unknown_type_bytes_rc}" == 2 ]]
+grep -q '"status":"failed"' "${test_root}/normalization-unknown-type-bytes/runtime/captures/gcdump-before/normalization.json"
+grep -q 'type metadata is unavailable' "${test_root}/normalization-unknown-type-bytes/runtime/captures/gcdump-before/normalization.json"
+[[ ! -e "${test_root}/normalization-unknown-type-bytes/runtime/captures/gcdump-before/report.txt" ]]
+
 run_case partial 1 2
 grep -q '"status":"partial"' "${test_root}/partial/runtime/campaign.json"
 grep -q '"captureState":"failed"' "${test_root}/partial/runtime/captures/gcdump-before/capture.json"
@@ -173,6 +225,22 @@ grep -q '"requestedDiagnostic":"stacks","effectiveDiagnostic":"trace"' \
   "${conflict_stacks_output}/runtime/capture.json"
 grep -q 'cannot share ICorProfiler with Pyroscope' \
   "${conflict_stacks_output}/runtime/capture.json"
+
+forced_fallback_output="${test_root}/forced-stacks-fallback"
+mkdir -p "${forced_fallback_output}"; : > "${test_root}/forced-stacks-fallback-calls"
+PATH="${test_root}/bin:${PATH}" \
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_CALLS="${test_root}/forced-stacks-fallback-calls" \
+PERFLAB_TEST_GCDUMP_COUNT="${test_root}/forced-stacks-fallback-gcdumps" \
+PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true \
+PERFLAB_CONTINUOUS_PROFILING=0 \
+PERFLAB_STACKS_FORCE_TRACE=1 \
+PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
+  bash "${adapter_dir}/capture.sh" "${forced_fallback_output}" stacks 1 api >/dev/null 2>&1
+[[ -s "${forced_fallback_output}/runtime/api/cpu.nettrace" ]]
+[[ ! -e "${forced_fallback_output}/runtime/api/stacks.txt" ]]
+grep -q 'dotnet-monitor /stacks is not reliable after continuous profiling' \
+  "${forced_fallback_output}/runtime/capture.json"
 
 hang_stacks_output="${test_root}/hang-stacks"
 mkdir -p "${hang_stacks_output}"; : > "${test_root}/hang-stacks-calls"

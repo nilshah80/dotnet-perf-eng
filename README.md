@@ -336,7 +336,9 @@ Profiling and runtime diagnostics have two independent paths:
   are not activated.
 - **Invasive snapshots** from the `dotnet-monitor` sidecar (`.nettrace`, GC dump,
   stacks, process dump, Speedscope). These remain the default diagnose-mode
-  workflow and still work when continuous profiling is enabled.
+  workflow. EventPipe traces coexist with continuous profiling, but `/stacks`
+  falls back to a CPU trace after a profiled measurement and a GC dump is
+  captured only after an owned app is recreated without Pyroscope.
 
 Hold `PERFLAB_CONTINUOUS_PROFILING`, `PERFLAB_PROFILING_POLICY`, the resolved
 types, and `PERFLAB_PROFILING_KEEP_TIERING` constant between baseline and
@@ -815,11 +817,15 @@ done
 
 Start from a measurement created with `--no-runtime`, or copy a clean
 measurement-only package before each command. `stacks` is a diagnose-mode
-capture: `capture-runtime.sh` recreates an owned app with
-`PERFLAB_CONTINUOUS_PROFILING=0` so `/stacks` can load `ICorProfiler` without
-colliding with Pyroscope. Measurement runs keep the recorded CPU-trace
-fallback. Do not use `dotnet-stack` (`dotnet/diagnostics#5444` is open).
-Process dumps can contain secrets or personal data and should remain restricted.
+capture: an unprofiled source run recreates an owned app with
+`PERFLAB_CONTINUOUS_PROFILING=0` so `/stacks` can load `ICorProfiler`. A source
+run with continuous profiling retains the CPU-trace fallback because the
+dotnet-monitor stacks attach is not reliable in that combination. A profiled
+source's `gcdump` similarly requires an owned recreate without Pyroscope; an
+unowned target is refused, and normalization rejects a report whose type names
+are all `UNKNOWN 0x…`. Do not use `dotnet-stack`
+(`dotnet/diagnostics#5444` is open). Process dumps can contain secrets or
+personal data and should remain restricted.
 
 Ordinary scenarios still collect all passive evidence together. Metrics,
 logs, distributed traces, dependency snapshots, process/deployment inventory,
@@ -1149,11 +1155,13 @@ docker compose -f labs/scenariolab/compose.yaml down -v    # full reset (deletes
   **persists in the DB volume across runs** — reset with `docker compose -f
   labs/<lab>/compose.yaml down -v` before a run whose read scenarios need the
   pristine seed, or their table sizes (and timings) will drift.
-- `gcdump` forces a full collection; don't read it as steady-state heap.
-- A `stacks` request produces text stacks only after a diagnose-mode recreate
-  with Pyroscope off. Measurement keeps the recorded CPU-trace fallback because
-  `/stacks` injects `ICorProfiler`. Confirm the effective kind in
-  `runtime/capture.json`.
+- `gcdump` forces a full collection; don't read it as steady-state heap. A
+  profiled source requires an owned recreate without Pyroscope, and a normalized
+  report with only `UNKNOWN 0x…` type names fails rather than masquerading as
+  type-attributed heap evidence.
+- An unprofiled `stacks` request produces text stacks after a diagnose-mode
+  recreate with Pyroscope off. A source run with continuous profiling retains
+  the CPU-trace fallback. Confirm the effective kind in `runtime/capture.json`.
 - `capture-evidence` fails loud if telemetry or a dependency is unreachable, rather
   than emitting a silently empty package.
 
