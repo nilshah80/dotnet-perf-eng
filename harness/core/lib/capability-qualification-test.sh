@@ -29,7 +29,13 @@ done
 # before traffic. That refusal is the qualification, not implementing extras.
 # shellcheck disable=SC1091
 source "${root}/harness/core/lib/performance.sh"
-jqd() { jq "$@"; }
+# Delegates to the host jq so the selector under test is the real one, but it
+# must keep BOTH guards common.sh's jqd applies. jq.exe writes CRLF on Windows,
+# so a value read through a bare override carries a trailing CR that corrupts
+# every later comparison and URL built from it; and MSYS rewrites any argument
+# that looks like a POSIX path, so `--arg path /stacks` reaches jq.exe as
+# C:/Program Files/Git/stacks and the lookup silently misses.
+jqd() { MSYS_NO_PATHCONV=1 jq "$@" | tr -d '\r'; return "${PIPESTATUS[0]}"; }
 performance_profile_preflight closed jmeter || fail "advertised JMeter closed profile was refused"
 if performance_profile_preflight soak jmeter 2>/dev/null; then
   fail "JMeter soak (unadvertised extra) was accepted"

@@ -336,8 +336,12 @@ wait "${cancel_pid}" 2>/dev/null || true
 # An interrupted run does not stop instantly: its cleanup trap still runs. Give
 # the child time to finish writing before any later case truncates the ledger,
 # or the two interleave and the ledger describes neither run.
+# `wait` above has normally reaped the run already; this loop only covers a wait
+# that returned early. It uses `kill -0` on the job's own pid rather than pgrep:
+# pgrep is procps, Git Bash does not ship it, and there the pgrep form exited 127
+# into `|| break`, so the guard silently never ran.
 for _ in $(seq 1 50); do
-  pgrep -P $$ -f run-scenario.sh >/dev/null 2>&1 || break
+  kill -0 "${cancel_pid}" 2>/dev/null || break
   sleep 0.1
 done
 

@@ -634,7 +634,12 @@ if [[ -n "${PERFLAB_MEASUREMENT_WINDOW_PROBE_PATH:-}" ]]; then
   }
 fi
 distributed_measure() {
-  local -a command=(python3 "${harness_core_dir}/distributed/agent.py" controller
+  local python_executable
+  python_executable="$(perflab_python)" || {
+    echo "a working Python 3 interpreter was not found (tried python3, python)" >&2
+    exit 1
+  }
+  local -a command=("${python_executable}" "${harness_core_dir}/distributed/agent.py" controller
     --agents "${distributed_agents}" --shards "${distributed_shards}"
     --target-origin "${distributed_target_origin}" --duration-seconds "${effective_duration}"
     --connections "${connections}" --run-id "${telemetry_run_id}"

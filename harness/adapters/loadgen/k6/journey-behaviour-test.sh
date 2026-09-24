@@ -15,7 +15,9 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 fail() { echo "journey-behaviour-test: $*" >&2; exit 1; }
 command -v k6 >/dev/null || fail "k6 is required to run the journey workload"
-command -v python3 >/dev/null || fail "python3 is required for the stub server"
+# shellcheck source=/dev/null
+. "${repo}/harness/core/lib/python.sh"
+PYTHON="$(perflab_python)" || fail "a working Python 3 interpreter was not found (tried python3, python)"
 
 script="${repo}/labs/ecommerce/loadgen/journey.js"
 [[ -s "${script}" ]] || fail "no journey workload asset at ${script}"
@@ -79,13 +81,18 @@ record="${test_root}/requests.ndjson"
 # Capture the server pid so cleanup can actually kill it. Reading its port
 # through a process substitution left nothing to kill, so every run of this test
 # leaked a listening stub server that outlived the temporary directory.
-JOURNEY_RECORD="${record}" python3 "${test_root}/server.py" > "${test_root}/port" 2>/dev/null &
+JOURNEY_RECORD="${record}" "${PYTHON}" "${test_root}/server.py" > "${test_root}/port" 2>/dev/null &
 server_pid=$!
 for _ in $(seq 1 100); do
   [[ -s "${test_root}/port" ]] && break
   sleep 0.1
 done
+# Python's stdout is a text stream, so on Windows it writes the port as "NNNN\r\n".
+# `read -r` keeps that CR, the base URL becomes "http://127.0.0.1:NNNN\r", every
+# request fails to connect, and the test reports "issued no requests at all"
+# rather than a malformed port.
 read -r port < "${test_root}/port"
+port="${port%$'\r'}"
 [[ -n "${port}" ]] || fail "stub server did not report a port"
 base="http://127.0.0.1:${port}"
 
@@ -101,21 +108,26 @@ k6 run --vus 1 --iterations 1 --quiet --no-color \
 # operations. A workload that hardcoded a credential, or dropped the extracted
 # one, would still complete against a permissive server -- so the stub rejects
 # any request whose bearer token it did not issue.
-login_count="$(python3 -c "
+# The record path is passed as an ARGUMENT, never interpolated into the Python
+# source. MSYS rewrites POSIX paths in argv when it spawns a native Windows
+# binary, but it cannot rewrite one buried in a quoted script body -- Python
+# would then read "/tmp/..." literally, resolve it against the current drive and
+# fail to find the file the stub server actually wrote.
+login_count="$("${PYTHON}" -c "
 import json,sys
-rows=[json.loads(l) for l in open('${record}')]
-print(sum(1 for r in rows if 'login' in r['path']))")"
+rows=[json.loads(l) for l in open(sys.argv[1])]
+print(sum(1 for r in rows if 'login' in r['path']))" "${record}")"
 [[ "${login_count}" -ge 1 ]] || fail "the journey never logged in, so no dynamic value could be extracted"
 
-authed="$(python3 -c "
-import json
-rows=[json.loads(l) for l in open('${record}')]
+authed="$("${PYTHON}" -c "
+import json,sys
+rows=[json.loads(l) for l in open(sys.argv[1])]
 after=[r for r in rows if 'login' not in r['path']]
-print(sum(1 for r in after if r['auth'].startswith('Bearer tok-')))")"
-total_after="$(python3 -c "
-import json
-rows=[json.loads(l) for l in open('${record}')]
-print(sum(1 for r in rows if 'login' not in r['path']))")"
+print(sum(1 for r in after if r['auth'].startswith('Bearer tok-')))" "${record}")"
+total_after="$("${PYTHON}" -c "
+import json,sys
+rows=[json.loads(l) for l in open(sys.argv[1])]
+print(sum(1 for r in rows if 'login' not in r['path']))" "${record}")"
 [[ "${total_after}" -ge 1 ]] || fail "the journey performed no operations after login"
 [[ "${authed}" == "${total_after}" ]] \
   || fail "${authed} of ${total_after} post-login requests carried the extracted token; a dynamic value was dropped"
@@ -124,11 +136,11 @@ print(sum(1 for r in rows if 'login' not in r['path']))")"
 # Operations must be paced, not issued back to back: think time is what makes a
 # journey a user rather than a flood, and a journey with none measures a
 # different workload than the one declared.
-gap="$(python3 -c "
-import json
-rows=sorted((json.loads(l) for l in open('${record}')), key=lambda r: r['at'])
+gap="$("${PYTHON}" -c "
+import json,sys
+rows=sorted((json.loads(l) for l in open(sys.argv[1])), key=lambda r: r['at'])
 gaps=[b['at']-a['at'] for a,b in zip(rows, rows[1:])]
-print(f'{max(gaps):.4f}' if gaps else '0')")"
+print(f'{max(gaps):.4f}' if gaps else '0')" "${record}")"
 awk -v g="${gap}" 'BEGIN { exit (g >= 0.02) ? 0 : 1 }' \
   || fail "the largest gap between operations was ${gap}s; the journey issued its steps with no think time"
 

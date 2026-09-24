@@ -16,6 +16,17 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 fail() { echo "catalog-equivalence-test: $*" >&2; exit 1; }
 command -v jq >/dev/null || fail "jq is required"
 
+# This test compares jq output against awk output. jq.exe writes CRLF on Windows
+# while MSYS awk writes LF, and command substitution strips only the TRAILING
+# newline -- so multi-line jq output keeps an embedded CR on every line but the
+# last, and the two id sets never compare equal. The failure is invisible in the
+# message, which prints two sets that look identical. Strip CR at the source.
+#
+# MSYS_NO_PATHCONV is deliberately NOT set here, unlike common.sh's jqd: these
+# calls pass the catalog PATH as a jq argument and rely on MSYS rewriting it
+# into a Windows path that jq.exe can open.
+jq() { command jq "$@" | tr -d '\r'; return "${PIPESTATUS[0]}"; }
+
 checked_labs=0
 for catalog in "${repo}"/labs/*/catalog.json; do
   [[ -f "${catalog}" ]] || continue

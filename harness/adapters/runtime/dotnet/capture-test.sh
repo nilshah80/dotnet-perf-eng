@@ -12,7 +12,13 @@ load_generator=k6
 diagnostics_url=http://monitor
 artifacts_root="${PERFLAB_TEST_ARTIFACTS_ROOT:-}"
 diag_target() { printf 'Fixture.Api'; }
-jqd() { jq "$@"; }
+# Delegates to the host jq so the selector under test is the real one, but it
+# must keep BOTH guards common.sh's jqd applies. jq.exe writes CRLF on Windows,
+# so a value read through a bare override carries a trailing CR that corrupts
+# every later comparison and URL built from it; and MSYS rewrites any argument
+# that looks like a POSIX path, so `--arg path /stacks` reaches jq.exe as
+# C:/Program Files/Git/stacks and the lookup silently misses.
+jqd() { MSYS_NO_PATHCONV=1 jq "$@" | tr -d '\r'; return "${PIPESTATUS[0]}"; }
 json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s}"; }
 loadgen_warmup() { mkdir -p "$1"; printf 'warmup\n' >> "${PERFLAB_TEST_CALLS}"; printf '{}' > "$1/warmup.json"; }
 loadgen_measure() { mkdir -p "$1"; printf 'diagnostic\n' >> "${PERFLAB_TEST_CALLS}"; printf '{}' > "$1/diagnostic.json"; }

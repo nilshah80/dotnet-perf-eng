@@ -19,6 +19,10 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 fail() { echo "capture-evidence-empty-signal-test: $*" >&2; exit 1; }
 
+# shellcheck source=/dev/null
+. "${repo}/harness/core/lib/python.sh"
+PYTHON="$(perflab_python)" || fail "a working Python 3 interpreter was not found (tried python3, python)"
+
 jq_bin="$(command -v jq || true)"; [[ -n "${jq_bin}" ]] || fail "jq is required"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/empty-signal-test.XXXXXX")"
 server_pid=""
@@ -79,10 +83,21 @@ print(server.server_address[1], flush=True)
 server.serve_forever()
 PY
 
-exec 3< <(python3 "${test_root}/backend.py")
-read -r port <&3
+# Started as a plain background job rather than through a process substitution:
+# `$!` is then the pid cleanup needs, so recovering it with pgrep is unnecessary.
+# pgrep is procps and Git Bash does not ship it, so the pgrep form aborted the
+# whole test on Windows before a single assertion ran.
+"${PYTHON}" "${test_root}/backend.py" > "${test_root}/port" 2>/dev/null &
+server_pid=$!
+for _ in $(seq 1 100); do
+  [[ -s "${test_root}/port" ]] && break
+  sleep 0.1
+done
+# Python's stdout is a text stream, so on Windows the port arrives as "NNNN\r\n"
+# and the CR would end up inside the base URL.
+read -r port < "${test_root}/port"
+port="${port%$'\r'}"
 [[ -n "${port}" ]] || fail "fake backend did not report a port"
-server_pid="$(pgrep -f "${test_root}/backend.py" | head -1)"
 base="http://127.0.0.1:${port}"
 curl -fsS --max-time 5 "${base}/api/v1/query?query=up" >/dev/null || fail "fake backend is not answering"
 

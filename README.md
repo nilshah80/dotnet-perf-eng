@@ -425,6 +425,15 @@ so a spike on a latency panel links straight to the Tempo trace that produced it
 
 No host `jq` and no host `wrk` install are required.
 
+**Faster JSON parsing on Windows (opt-in).** Every `jq` call runs in a fresh
+container by default, which costs seconds per call on Docker Desktop for
+Windows. If `jq` is installed on the host, `export PERFLAB_JQ=host` makes the
+harness use it instead — several times faster there. It is opt-in because a host
+`jq` is whatever version you installed rather than the pinned
+`PERFLAB_JQ_IMAGE`; each evidence package records the `jq` that parsed it in
+`source/tool-versions.txt`. `PERFLAB_JQ=docker` (the default) restores the pinned
+container.
+
 Optional: copy `labs/scenariolab/.env.example` → `labs/scenariolab/.env` to
 override compose defaults (dependency passwords, `SEED_SCALE`,
 `PERFLAB_TRACE_SAMPLE_RATIO`). Harness config lives in

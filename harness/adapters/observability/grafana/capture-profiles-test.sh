@@ -7,6 +7,10 @@ trap 'rm -rf "${test_root}"' EXIT
 
 fail() { echo "capture-profiles-test: $*" >&2; exit 1; }
 
+# shellcheck source=/dev/null
+. "$(dirname "${adapter}")/../../../core/lib/python.sh"
+PYTHON="$(perflab_python)" || fail "a working Python 3 interpreter was not found (tried python3, python)"
+
 json_escape() {
   local s="$1"
   s="${s//\\/\\\\}"
@@ -15,7 +19,13 @@ json_escape() {
 }
 
 if command -v jq >/dev/null 2>&1; then
-  jqd() { jq "$@"; }
+  # Delegates to the host jq so the selector under test is the real one, but it
+  # must keep BOTH guards common.sh's jqd applies. jq.exe writes CRLF on Windows,
+  # so a value read through a bare override carries a trailing CR that corrupts
+  # every later comparison and URL built from it; and MSYS rewrites any argument
+  # that looks like a POSIX path, so `--arg path /stacks` reaches jq.exe as
+  # C:/Program Files/Git/stacks and the lookup silently misses.
+  jqd() { MSYS_NO_PATHCONV=1 jq "$@" | tr -d '\r'; return "${PIPESTATUS[0]}"; }
 else
   echo "capture-profiles-test requires jq" >&2
   exit 1
@@ -24,9 +34,9 @@ fi
 # shellcheck disable=SC1091
 source "${adapter}"
 
-populated="$(python3 -c 'import json; names=["total","Unknown-Type.Unknown-Method"]+["Frame%d"%i for i in range(40)]; print(json.dumps({"flamebearer":{"names":names,"levels":[[0,10,2,1]],"numTicks":10},"metadata":{"units":"nanoseconds","sampleRate":100}}))')"
+populated="$("${PYTHON}" -c 'import json; names=["total","Unknown-Type.Unknown-Method"]+["Frame%d"%i for i in range(40)]; print(json.dumps({"flamebearer":{"names":names,"levels":[[0,10,2,1]],"numTicks":10},"metadata":{"units":"nanoseconds","sampleRate":100}}))')"
 empty='{"flamebearer":{"names":[],"levels":[]},"metadata":{"units":"nanoseconds"}}'
-truncated="$(python3 -c 'import json; names=["n%d"%i for i in range(16384)]; print(json.dumps({"flamebearer":{"names":names,"levels":[[0,1,1,0]]},"metadata":{"units":"nanoseconds"}}))')"
+truncated="$("${PYTHON}" -c 'import json; names=["n%d"%i for i in range(16384)]; print(json.dumps({"flamebearer":{"names":names,"levels":[[0,1,1,0]]},"metadata":{"units":"nanoseconds"}}))')"
 malformed='{"not":"a-profile"'
 
 # Fake curl. mode: ok (HTTP 200 + body), down (connection refused), or an HTTP

@@ -25,6 +25,10 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 fail() { echo "bottleneck-rules-test: $*" >&2; exit 1; }
 
+# shellcheck source=/dev/null
+. "${repo}/harness/core/lib/python.sh"
+PYTHON="$(perflab_python)" || fail "a working Python 3 interpreter was not found (tried python3, python)"
+
 jq_bin="$(command -v jq || true)"; [[ -n "${jq_bin}" ]] || fail "jq is required"
 docker_bin="$(command -v docker || true)"; [[ -n "${docker_bin}" ]] || fail "docker is required"
 
@@ -51,7 +55,7 @@ build_run() {
   local name="$1" rps="$2" cores="$3" queue="$4" growth="$5" upwait="${6:-0.002}" upactive="${7:-1}" upconns="${8:-4}"
   local dir="${test_root}/${name}"
   mkdir -p "${dir}/telemetry/metrics" "${dir}/analysis/runtime"
-  python3 - "${dir}" "${rps}" "${cores}" "${queue}" "${growth}" "${upwait}" "${upactive}" "${upconns}" <<'PY'
+  "${PYTHON}" - "${dir}" "${rps}" "${cores}" "${queue}" "${growth}" "${upwait}" "${upactive}" "${upconns}" <<'PY'
 import json, os, sys
 dir_, rps, cores, queue, growth, upwait, upactive, upconns = sys.argv[1:9]
 

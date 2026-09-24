@@ -18,11 +18,15 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/native-attest-test.XXXXXX")"
 trap 'rm -rf "${work}"' EXIT HUP INT TERM
 fail() { echo "attest-test: $*" >&2; exit 1; }
 
+# shellcheck source=/dev/null
+. "${root}/harness/core/lib/python.sh"
+PYTHON="$(perflab_python)" || fail "a working Python 3 interpreter was not found (tried python3, python)"
+
 out="${work}/parity-attestation.json"
 bash "${verify}" "${root}" --attest "${out}" >/dev/null || fail "verification failed on a clean tree"
 [[ -s "${out}" ]] || fail "exporter produced no attestation"
 
-python3 - "$root" "$out" <<'PY'
+"${PYTHON}" - "$root" "$out" <<'PY'
 import hashlib, json, sys
 from pathlib import Path
 

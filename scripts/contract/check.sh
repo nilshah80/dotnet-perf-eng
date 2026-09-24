@@ -3,16 +3,19 @@ set -eu
 root="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 cd "$root"
 
-"$root/scripts/contract/independence.sh"
-python3 "$root/scripts/contract/native-inventory.py" --check "$root"
+. "$root/harness/core/lib/python.sh"
+PYTHON="$(perflab_python)" || { echo "a working Python 3 interpreter was not found (tried python3, python)" >&2; exit 1; }
 
-python3 "$root/scripts/contract/plan-consistency.py"
-python3 "$root/scripts/contract/markdowncheck.py" \
+"$root/scripts/contract/independence.sh"
+"$PYTHON" "$root/scripts/contract/native-inventory.py" --check "$root"
+
+"$PYTHON" "$root/scripts/contract/plan-consistency.py"
+"$PYTHON" "$root/scripts/contract/markdowncheck.py" \
   docs/REAL-WORLD-PERFORMANCE-ENGINEERING-IMPLEMENTATION-PLAN.md \
   contracts/v1/semantics/contract.md
 
 "$root/scripts/contract/verify-lock.sh" "$root"
-python3 - <<'PY'
+"$PYTHON" - <<'PY'
 import hashlib, json
 from pathlib import Path
 root = Path('.')

@@ -6,9 +6,12 @@
 set -euo pipefail
 root="$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)"
 fail() { echo "distributed-merge-test: $*" >&2; exit 1; }
-command -v python3 >/dev/null || fail "python3 is required"
 
-PYTHONDONTWRITEBYTECODE=1 python3 - "${root}/harness/core/distributed/agent.py" <<'PY' || fail "distributed histogram merge regressed"
+# shellcheck source=/dev/null
+. "${root}/harness/core/lib/python.sh"
+PYTHON="$(perflab_python)" || fail "a working Python 3 interpreter was not found (tried python3, python)"
+
+PYTHONDONTWRITEBYTECODE=1 "${PYTHON}" - "${root}/harness/core/distributed/agent.py" <<'PY' || fail "distributed histogram merge regressed"
 import importlib.util
 import pathlib
 import sys

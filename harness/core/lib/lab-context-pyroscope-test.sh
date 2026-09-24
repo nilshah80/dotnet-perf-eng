@@ -4,6 +4,10 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 fail() { echo "lab-context-pyroscope-test: $*" >&2; exit 1; }
 
+# shellcheck source=/dev/null
+. "${repo}/harness/core/lib/python.sh"
+PYTHON="$(perflab_python)" || fail "a working Python 3 interpreter was not found (tried python3, python)"
+
 # Remote + profiling without telemetry opt-in or URL must fail closed.
 if out="$(PERFLAB_LAB=remote-example PERFLAB_CONTINUOUS_PROFILING=1 \
     bash -c 'source "'"${repo}/harness/core/lib/common.sh"'"' 2>&1)"; then
@@ -50,7 +54,7 @@ cat > "${verify_dir}/profiling" <<'JSON'
 JSON
 # An inline server rather than `python3 -m http.server 0`: the module buffers
 # its "Serving HTTP on ... port N" banner, so the port cannot be read reliably.
-python3 - "${verify_dir}" > "${verify_dir}/port" 2>"${verify_dir}/server.log" <<'PYSTUB' &
+"${PYTHON}" - "${verify_dir}" > "${verify_dir}/port" 2>"${verify_dir}/server.log" <<'PYSTUB' &
 import http.server, socketserver, sys, threading
 from pathlib import Path
 

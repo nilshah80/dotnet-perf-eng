@@ -28,7 +28,13 @@ command -v jq >/dev/null || fail "jq is required to exercise the real selector"
 cat > "${test_root}/harness/core/lib/common.sh" <<'EOF'
 load_generator=k6
 diagnostics_url=http://monitor
-jqd() { jq "$@"; }
+# Delegates to the host jq so the selector under test is the real one, but it
+# must keep BOTH guards common.sh's jqd applies. jq.exe writes CRLF on Windows,
+# so a value read through a bare override carries a trailing CR that corrupts
+# every later comparison and URL built from it; and MSYS rewrites any argument
+# that looks like a POSIX path, so `--arg path /stacks` reaches jq.exe as
+# C:/Program Files/Git/stacks and the lookup silently misses.
+jqd() { MSYS_NO_PATHCONV=1 jq "$@" | tr -d '\r'; return "${PIPESTATUS[0]}"; }
 diag_target() { printf 'Fixture.Api'; }
 json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s}"; }
 loadgen_warmup() { mkdir -p "$1"; printf '{}' > "$1/warmup.json"; }
