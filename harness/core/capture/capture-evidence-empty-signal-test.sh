@@ -27,7 +27,7 @@ jq_bin="$(command -v jq || true)"; [[ -n "${jq_bin}" ]] || fail "jq is required"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/empty-signal-test.XXXXXX")"
 server_pid=""
 cleanup() {
-  [[ -n "${server_pid}" ]] && kill "${server_pid}" 2>/dev/null
+  [[ -n "${server_pid}" ]] && { kill "${server_pid}" 2>/dev/null || true; wait "${server_pid}" 2>/dev/null || true; }
   # PERFLAB_TEST_KEEP=1 leaves the fixture behind; a failure here is usually a
   # question about what the backend actually answered.
   [[ "${PERFLAB_TEST_KEEP:-0}" == "1" ]] && { echo "fixture kept at ${test_root}" >&2; return 0; }
@@ -87,14 +87,19 @@ PY
 # `$!` is then the pid cleanup needs, so recovering it with pgrep is unnecessary.
 # pgrep is procps and Git Bash does not ship it, so the pgrep form aborted the
 # whole test on Windows before a single assertion ran.
-"${PYTHON}" "${test_root}/backend.py" > "${test_root}/port" 2>/dev/null &
+"${PYTHON}" "${test_root}/backend.py" > "${test_root}/port" 2> "${test_root}/backend.err" &
 server_pid=$!
 for _ in $(seq 1 100); do
   [[ -s "${test_root}/port" ]] && break
+  kill -0 "${server_pid}" 2>/dev/null || break
   sleep 0.1
 done
 # Python's stdout is a text stream, so on Windows the port arrives as "NNNN\r\n"
 # and the CR would end up inside the base URL.
+if [[ ! -s "${test_root}/port" ]]; then
+  cat "${test_root}/backend.err" >&2
+  fail "fake backend exited or timed out before reporting a port"
+fi
 read -r port < "${test_root}/port"
 port="${port%$'\r'}"
 [[ -n "${port}" ]] || fail "fake backend did not report a port"

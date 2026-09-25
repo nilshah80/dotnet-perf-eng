@@ -27,12 +27,9 @@ repo_root="$(cd "${harness_root}/.." && pwd)"
 # "C:/Program Files/Git/api/..." and the concatenated base URL became host
 # "127.0.0.1:8080C", failing DNS on every request. These variables are URL
 # parts and payloads consumed by the native load generators, not filesystem
-# paths, so exclude them. (No jq CRLF shim is needed anymore: jq runs in Linux
-# via jqd and the harness emits its own JSON with printf.)
-_perflab_msys=0
+# paths, so exclude them. jqd separately normalizes jq output in both modes.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*)
-    _perflab_msys=1
     export MSYS2_ENV_CONV_EXCL='PERF_BASE_URL;PERF_SECONDARY_BASE_URL;PERF_METHOD;PERF_PATH;PERF_BODY;PERF_RUN_ID;PERF_SCENARIO;PERF_RUN_MODE;PERF_HEADERS;PERF_MIX;PERF_ALLOWED_ORIGINS;PERFLAB_CONNECTIONS;PERFLAB_DURATION_SECONDS;PERFLAB_GENERATOR_NETWORK_PATH;PERFLAB_PLUGIN_IMAGE_DIGEST'
     ;;
 esac
@@ -103,13 +100,10 @@ resolve_repo_path() {
 # calls, so the host binary is several times faster there. It is opt-in because a
 # host jq is whatever version is installed rather than the pinned one; the jq
 # that parsed a package is recorded in source/tool-versions.txt in either mode.
-# Under MSYS, host mode keeps both of the Docker path's guards in their host form:
-# -b stops a native jq.exe writing CRLF, and MSYS_NO_PATHCONV stops MSYS rewriting
-# POSIX-looking arguments such as `--arg path /stacks`. That is safe because no
-# jqd call passes a file path -- the container has no mount to read one from, so
-# every call feeds stdin. Elsewhere neither guard applies, and -b must not be
-# passed at all: jq 1.6, still the packaged jq on Debian 12 and Ubuntu 22.04,
-# rejects it as an unknown option.
+# Both modes strip CR from jq output, including native Windows CRLF, without
+# requiring the -b flag added in jq 1.7. Under MSYS, MSYS_NO_PATHCONV stops
+# rewriting POSIX-looking arguments such as `--arg path /stacks`. This is safe
+# because jqd calls feed JSON through stdin rather than passing file paths.
 PERFLAB_JQ_IMAGE="${PERFLAB_JQ_IMAGE:-ghcr.io/jqlang/jq:1.7.1}"
 PERFLAB_JQ="${PERFLAB_JQ:-docker}"
 case "${PERFLAB_JQ}" in
@@ -122,12 +116,8 @@ case "${PERFLAB_JQ}" in
 esac
 jqd() {
   if [[ "${PERFLAB_JQ}" == "host" ]]; then
-    if [[ "${_perflab_msys}" == "1" ]]; then
-      MSYS_NO_PATHCONV=1 command jq -b "$@"
-    else
-      command jq "$@"
-    fi
-    return
+    MSYS_NO_PATHCONV=1 command jq "$@" | tr -d '\r'
+    return "${PIPESTATUS[0]}"
   fi
   MSYS_NO_PATHCONV=1 docker run --rm -i "${PERFLAB_JQ_IMAGE}" "$@" | tr -d '\r'
   return "${PIPESTATUS[0]}"

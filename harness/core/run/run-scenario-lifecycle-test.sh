@@ -18,9 +18,34 @@
 # under test is the shipping run-scenario.sh rather than a reimplementation.
 set -euo pipefail
 
+# Always reset SIGINT once: Bash 3.2 cannot reliably report an inherited ignore
+# through command substitution. MSYS Perl on Windows performs a real exec,
+# preserving the test's lifetime and exit status instead of detaching it.
+if [[ "${LIFECYCLE_RESET_INT:-0}" != 1 ]]; then
+  perl_executable="$(command -v perl)" || { echo 'Perl is required to reset SIGINT for the lifecycle test' >&2; exit 1; }
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) perl_executable=/usr/bin/perl ;; esac
+  export LIFECYCLE_RESET_INT=1
+  exec "$perl_executable" -e '$SIG{INT}="DEFAULT"; exec {$ARGV[0]} @ARGV or die "exec $ARGV[0]: $!\n"' "$BASH" "$0" "$@"
+fi
+
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/run-scenario-lifecycle-test.XXXXXX")"
-trap '[[ "${PERFLAB_TEST_KEEP:-0}" == "1" ]] && echo "fixture kept at ${test_root}" >&2 || rm -rf "${test_root}"' EXIT HUP INT TERM
+cancel_pid=""
+cleanup_test() {
+  if [[ -n "${cancel_pid}" ]]; then
+    kill -KILL -- "-${cancel_pid}" 2>/dev/null || true
+    wait "${cancel_pid}" 2>/dev/null || true
+  fi
+  if [[ "${PERFLAB_TEST_KEEP:-0}" == 1 ]]; then
+    echo "fixture kept at ${test_root}" >&2
+  else
+    rm -rf "${test_root}"
+  fi
+}
+trap cleanup_test EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 fail() { echo "run-scenario-lifecycle-test: $*" >&2; exit 1; }
 command -v jq >/dev/null || fail "jq is required"
 
@@ -36,13 +61,17 @@ calls="${test_root}/calls.log"
 cat > "${test_root}/harness/adapters/loadgen/k6/run.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+# Arm before publishing readiness, so the signal cannot race trap installation.
+trap 'exit 0' INT TERM
 printf 'loadgen:%s\n' "${2:-unknown}" >> "${PERFLAB_TEST_CALLS}"
 mkdir -p "$1/benchmark"
 printf '{"observations":[{"name":"http.requests_per_second","value":100,"unit":"rps"}]}\n' > "$1/benchmark/observations.json"
 printf '{}\n' > "$1/benchmark/k6-summary.json"
 # Simulate a crash DURING warm-up: the dataset is prepared but the run never
 # reaches measurement, which is exactly the window the marker must cover.
-if [[ "${2:-}" == "warmup" && "${PERFLAB_TEST_SLOW_WARMUP:-0}" == "1" ]]; then
+if [[ "${2:-}" == "${LIFECYCLE_SLOW_PHASE:-}" ||
+      ( "${2:-}" == "warmup" && "${PERFLAB_TEST_SLOW_WARMUP:-0}" == "1" ) ]]; then
+  # Success after interruption forces the parent to exit from its own trap.
   sleep 30
 fi
 if [[ "${2:-}" == "warmup" && "${PERFLAB_TEST_FAIL_WARMUP:-0}" == "1" ]]; then
@@ -58,6 +87,10 @@ cat > "${test_root}/harness/core/datafault/managed-reference.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'partition:%s\n' "${3:-create}" >> "${PERFLAB_TEST_CALLS}"
+if [[ "${3:-}" == cleanup && -n "${LIFECYCLE_CLEANUP_DELAY:-}" ]]; then
+  sleep "${LIFECYCLE_CLEANUP_DELAY}"
+  printf 'partition:cleanup-finished\n' >> "${PERFLAB_TEST_CALLS}"
+fi
 EOF
 chmod +x "${test_root}/harness/core/datafault/managed-reference.sh"
 
@@ -98,7 +131,7 @@ if [[ "\${1:-}" == "compose" ]]; then
   shift
   verb=""
   for arg in "\$@"; do
-    case "\${arg}" in up|down|stop|start|restart|rm|ps|exec|run) verb="\${arg}"; break ;; esac
+    case "\${arg}" in up|down|stop|start|pause|unpause|restart|rm|ps|exec|run) verb="\${arg}"; break ;; esac
   done
   printf 'compose:%s\n' "\${verb:-other}" >> "\${PERFLAB_TEST_CALLS}"
   [[ "\${verb}" == "ps" ]] && printf '[]\n'
@@ -314,52 +347,120 @@ jq -e '.resetFailures == 0' "${small_pkg}/data/dataset.json" >/dev/null \
 # Cancellation must preserve what was already captured and restore what the run
 # mutated. A cancelled run that discards its evidence wastes the load it just
 # generated; one that leaves its mutations behind poisons the next run.
-cancel_dir="${test_root}/cancel"
-: > "${calls}"
-env PERFLAB_TEST_SLOW_WARMUP=1 \
-  PATH="${test_root}/bin:${PATH}" \
-  PERFLAB_CONFIG="${lab_config}" \
-  PERFLAB_TEST_CALLS="${calls}" \
-  PERFLAB_ARTIFACTS_ROOT="${test_root}/artifacts" \
-  PERFLAB_WARMUP_SECONDS=0 \
-  PERF_REQUIRES_MANAGED_PARTITION=1 PERF_WRITE_ACK=managed-reference PERF_WRITE_BUDGET=100 \
-  bash "${test_root}/harness/core/run/run-scenario.sh" S01 1 > "${cancel_dir}.out" 2>&1 &
-cancel_pid=$!
-# Interrupt once the run is past preparation and into the load it would be
-# cancelled during.
-for _ in $(seq 1 60); do
-  grep -q 'loadgen:warmup' "${calls}" 2>/dev/null && break
-  sleep 0.5
+for cancel_case in warmup measure timeout normal-cleanup exit-cleanup normal-cleanup-timeout exit-cleanup-timeout; do
+  cancel_phase="${cancel_case}"
+  cancel_signals='INT TERM'
+  cleanup_delay=2
+  fault_dep=''
+  fail_warmup=0
+  ready_pattern="loadgen:${cancel_phase}"
+  case "${cancel_case}" in
+    *cleanup*)
+      cancel_phase=cleanup
+      ready_pattern='partition:cleanup$'
+      # A failing warm-up exercises the EXIT trap; successful measurement
+      # exercises the ordinary cleanup call before evidence capture.
+      [[ "${cancel_case}" != exit-* ]] || fail_warmup=1
+      ;;
+  esac
+  if [[ "${cancel_case}" == measure ]]; then fault_dep=redis; fi
+  if [[ "${cancel_case}" == *timeout ]]; then
+    if [[ "${cancel_case}" == timeout ]]; then
+      cancel_phase=warmup
+      ready_pattern='loadgen:warmup'
+    fi
+    cancel_signals=TERM
+    cleanup_delay=30
+    # Shorten only the fixture copy's production timeout; do not wait 30s to
+    # prove that a stuck cleanup is killed and marked incomplete.
+    cp -p "${test_root}/harness/core/run/run-scenario.sh" "${test_root}/scenario-original"
+    sed 's/^cleanup_timeout_seconds=30$/cleanup_timeout_seconds=2/' \
+      "${test_root}/scenario-original" > "${test_root}/harness/core/run/run-scenario.sh"
+    grep -q '^cleanup_timeout_seconds=2$' "${test_root}/harness/core/run/run-scenario.sh" \
+      || fail 'fixture cleanup timeout was not shortened'
+  fi
+  for cancel_signal in ${cancel_signals}; do
+    cancel_dir="${test_root}/cancel-${cancel_case}-${cancel_signal}"
+    mkdir -p "${cancel_dir}"
+    : > "${calls}"
+    # Keep each case's evidence separate even when run IDs share a timestamp.
+    cat > "${cancel_dir}/caller.sh" <<'CALLER'
+#!/usr/bin/env bash
+rc=0
+bash "$1" S01 1 || rc=$?
+printf 'caller:continued\n' >> "${PERFLAB_TEST_CALLS}"
+exit "${rc}"
+CALLER
+    runner=(bash "${test_root}/harness/core/run/run-scenario.sh" S01 1)
+    if [[ "${cancel_signal}" == INT ]]; then
+      # Model a sweep/repeat caller that normally continues after failed runs.
+      runner=(bash "${cancel_dir}/caller.sh" "${test_root}/harness/core/run/run-scenario.sh")
+    fi
+    set -m
+    env LIFECYCLE_SLOW_PHASE="${cancel_phase}" LIFECYCLE_CLEANUP_DELAY="${cleanup_delay}" \
+      PERFLAB_FAULT_DEP="${fault_dep}" PERFLAB_TEST_FAIL_WARMUP="${fail_warmup}" \
+      PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${lab_config}" \
+      PERFLAB_TEST_CALLS="${calls}" PERFLAB_ARTIFACT_DIR="${cancel_dir}/package" \
+      PERFLAB_WARMUP_SECONDS=0 \
+      PERF_REQUIRES_MANAGED_PARTITION=1 PERF_WRITE_ACK=managed-reference PERF_WRITE_BUDGET=100 \
+      "${runner[@]}" < /dev/null > "${cancel_dir}/out" 2>&1 &
+    cancel_pid=$!
+    set +m
+    for _ in $(seq 1 300); do
+      calls_contain "${ready_pattern}" && break
+      sleep 0.1
+    done
+    if ! calls_contain "${ready_pattern}"; then
+      kill -KILL -- "-${cancel_pid}" 2>/dev/null || true
+      wait "${cancel_pid}" 2>/dev/null || true
+      cancel_pid=""
+      cat "${cancel_dir}/out" >&2
+      fail "run never reached ${cancel_phase} before cancellation"
+    fi
+    kill -"${cancel_signal}" -- "-${cancel_pid}" || fail 'run exited before cancellation'
+    for _ in $(seq 1 100); do
+      calls_contain 'partition:cleanup$' && break
+      sleep 0.1
+    done
+    calls_contain 'partition:cleanup$' || fail 'signal did not start cleanup'
+    sleep 0.1
+    # Interrupt again while the managed cleanup is sleeping. Both its process
+    # and the parent must survive long enough to write the completion marker.
+    kill -"${cancel_signal}" -- "-${cancel_pid}" || fail 'run exited during cleanup'
+    cancel_rc=0
+    wait "${cancel_pid}" 2>/dev/null || cancel_rc=$?
+    cancel_pid=""
+    cleanup_calls="$(grep -c '^partition:cleanup$' "${calls}" || true)"
+    [[ "${cleanup_calls}" == 1 ]] \
+      || fail "${cancel_case}/${cancel_signal}: managed cleanup ran ${cleanup_calls} times, expected once"
+    expected_rc=130
+    [[ "${cancel_signal}" != TERM ]] || expected_rc=143
+    [[ "${cancel_rc}" == "${expected_rc}" ]] || fail "${cancel_case}/${cancel_signal} returned ${cancel_rc}, expected ${expected_rc}"
+    if [[ "${cancel_phase}" == warmup ]] && calls_contain 'loadgen:measure'; then
+      fail "${cancel_signal} continued into measurement after cancellation"
+    fi
+    if calls_contain 'caller:continued'; then fail 'caller continued after Ctrl-C'; fi
+    cancelled_pkg="${cancel_dir}/package"
+    [[ -s "${cancelled_pkg}/manifest.json" ]] || fail 'cancelled run left no manifest'
+    if [[ "${cancel_case}" == *timeout ]]; then
+      [[ -f "${cancelled_pkg}/cleanup-incomplete" ]] || fail 'timed-out cleanup was not marked incomplete'
+      [[ ! -f "${cancelled_pkg}/cleanup-complete" ]] || fail 'timed-out cleanup claimed success'
+      grep -q 'Cleanup command timed out' "${cancel_dir}/out" || fail 'cleanup timeout was not reported'
+      if calls_contain 'partition:cleanup-finished'; then fail 'timed-out cleanup process was left running'; fi
+    else
+      [[ -f "${cancelled_pkg}/cleanup-complete" ]] || fail 'cancelled run did not finish cleanup'
+      [[ ! -f "${cancelled_pkg}/cleanup-incomplete" ]] || fail 'cancelled run reported incomplete cleanup'
+      calls_contain 'partition:cleanup-finished' || fail 'second signal interrupted the cleanup process'
+    fi
+    if [[ "${cancel_phase}" == measure ]]; then
+      calls_contain 'compose:unpause' || fail 'interrupted fault run did not unpause its dependency'
+      calls_contain 'compose:start' || fail 'interrupted fault run did not restart its dependency'
+    fi
+  done
+  if [[ "${cancel_case}" == *timeout ]]; then
+    cp -p "${test_root}/scenario-original" "${test_root}/harness/core/run/run-scenario.sh"
+  fi
 done
-kill -INT "${cancel_pid}" 2>/dev/null || true
-wait "${cancel_pid}" 2>/dev/null || true
-# An interrupted run does not stop instantly: its cleanup trap still runs. Give
-# the child time to finish writing before any later case truncates the ledger,
-# or the two interleave and the ledger describes neither run.
-# `wait` above has normally reaped the run already; this loop only covers a wait
-# that returned early. It uses `kill -0` on the job's own pid rather than pgrep:
-# pgrep is procps, Git Bash does not ship it, and there the pgrep form exited 127
-# into `|| break`, so the guard silently never ran.
-for _ in $(seq 1 50); do
-  kill -0 "${cancel_pid}" 2>/dev/null || break
-  sleep 0.1
-done
-
-cancelled_pkg="$(ls -dt "${test_root}"/artifacts/runs/*/ 2>/dev/null | head -1)"
-[[ -n "${cancelled_pkg}" ]] \
-  || fail "a cancelled run left no evidence package at all; the load it generated is unrecoverable"
-[[ -s "${cancelled_pkg}/manifest.json" ]] \
-  || fail "a cancelled run left no manifest, so the partial evidence cannot be identified"
-# The mutation must actually be RESTORED. Accepting either outcome would pass a
-# run that left its partition behind -- which is the failure the cleanup exists
-# to prevent, not evidence that cleanup ran.
-[[ -f "${cancelled_pkg}/cleanup-complete" ]] \
-  || fail "a cancelled run did not restore the reference data it mutated: $(ls "${cancelled_pkg}" | tr '\n' ' ')"
-[[ ! -f "${cancelled_pkg}/cleanup-incomplete" ]] \
-  || fail "cleanup reported itself incomplete; the partition was left behind"
-# And the cleanup must have actually invoked the restore, not just written a marker.
-calls_contain 'partition:cleanup' \
-  || fail "no cleanup call was made for the partition this run created"
 
 # --- acceptance case 22 (end to end) ----------------------------------------
 # API and worker are separate processes with separate runtimes. A campaign that

@@ -254,16 +254,78 @@ if [[ "${PERF_WORKLOAD_KIND}" == "journey" || "${PERF_MIX_KIND:-}" == "journey" 
   export PERF_REQUIRES_MANAGED_PARTITION=1
 fi
 
+# Cleanup must survive repeated Ctrl-C, but must not hang indefinitely on a
+# stuck backend. Give each external cleanup command its own process group so a
+# second terminal signal cannot kill it, and bound that entire group.
+cleanup_timeout_seconds=30
+cleanup_command() {
+  local pid rc=0 monitor=0 deadline=$((SECONDS + cleanup_timeout_seconds))
+  [[ "$-" != *m* ]] || monitor=1
+  set -m
+  ( "$@" ) </dev/null & pid=$!
+  [[ "${monitor}" == 1 ]] || set +m
+  while kill -0 "${pid}" 2>/dev/null; do
+    if (( SECONDS >= deadline )); then
+      kill -KILL -- "-${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+      echo "Cleanup command timed out after ${cleanup_timeout_seconds}s: $1" >&2
+      return 124
+    fi
+    sleep 0.1
+  done
+  wait "${pid}" || rc=$?
+  return "${rc}"
+}
+
+stop_run_child() {
+  local pid="$1" deadline=$((SECONDS + 5))
+  kill "${pid}" 2>/dev/null || true
+  while kill -0 "${pid}" 2>/dev/null; do
+    if (( SECONDS >= deadline )); then
+      kill -KILL "${pid}" 2>/dev/null || true
+      break
+    fi
+    sleep 0.1
+  done
+  wait "${pid}" 2>/dev/null || true
+}
+
+on_signal() {
+  local signal="$1"
+  if [[ "${partition_cleanup_running}" == 1 ]]; then
+    # Keep the active cleanup supervised until it writes its result. Exiting
+    # here would orphan its process group and abandon the timeout and marker.
+    # Keep the handler installed while an EXIT trap is active; repeated signals
+    # only preserve the first request and cannot interrupt the cleanup worker.
+    [[ -n "${deferred_cleanup_signal}" ]] || deferred_cleanup_signal="${signal}"
+    return 0
+  fi
+  trap '' INT TERM
+  if declare -F restore_fault_dep >/dev/null; then restore_fault_dep; fi
+  cleanup_partition
+  # A real signal death also stops a waiting sweep/repeat caller after Ctrl-C;
+  # merely exiting 130 lets Bash treat the interruption as an ordinary failure.
+  trap - EXIT INT TERM
+  kill -s "${signal}" "$$"
+}
+
 partition_cleanup_required=0
 partition_cleanup_done=0
+partition_cleanup_running=0
+deferred_cleanup_signal=""
 cleanup_partition() {
   [[ "${partition_cleanup_required}" == "1" && "${partition_cleanup_done}" == "0" ]] || return 0
-  partition_cleanup_done=1
-  if bash "${harness_core_dir}/datafault/managed-reference.sh" "${telemetry_run_id}" "${base_url}" cleanup; then
+  partition_cleanup_running=1
+  if cleanup_command bash "${harness_core_dir}/datafault/managed-reference.sh" "${telemetry_run_id}" "${base_url}" cleanup; then
     : > "${artifact_dir}/cleanup-complete"
   else
     : > "${artifact_dir}/cleanup-incomplete"
     export PERFLAB_CAPTURE_INCOMPLETE=1
+  fi
+  partition_cleanup_done=1
+  partition_cleanup_running=0
+  if [[ -n "${deferred_cleanup_signal}" ]]; then
+    on_signal "${deferred_cleanup_signal}"
   fi
   return 0
 }
@@ -449,7 +511,9 @@ else
     # nothing responsible for removing it. Cleanup is idempotent, so arming it
     # early costs nothing when there is nothing yet to remove.
     partition_cleanup_required=1
-    trap cleanup_partition INT TERM EXIT
+    trap cleanup_partition EXIT
+    trap 'on_signal INT' INT
+    trap 'on_signal TERM' TERM
     bash "${harness_core_dir}/datafault/managed-reference.sh" "${telemetry_run_id}" "${base_url}"
     export PERF_PARTITION_READY=1
   fi
@@ -585,12 +649,15 @@ restore_fault_dep() {
   # Kill the background injector (and mid-load sampler) FIRST: on an early exit a
   # still-sleeping injector could otherwise wake and RE-APPLY the fault after we
   # have already restored the dependency.
-  [[ -n "${fault_pid:-}" ]]   && { kill "${fault_pid}"   2>/dev/null || true; wait "${fault_pid}"   2>/dev/null || true; }
-  [[ -n "${midload_pid:-}" ]] && { kill "${midload_pid}" 2>/dev/null || true; wait "${midload_pid}" 2>/dev/null || true; }
-  [[ -n "${load_pid:-}" ]]    && { kill "${load_pid}"    2>/dev/null || true; wait "${load_pid}"    2>/dev/null || true; }
+  [[ -n "${fault_pid:-}" ]]   && { stop_run_child "${fault_pid}"; fault_pid=""; }
+  [[ -n "${midload_pid:-}" ]] && { stop_run_child "${midload_pid}"; midload_pid=""; }
+  [[ -n "${load_pid:-}" ]]    && { stop_run_child "${load_pid}"; load_pid=""; }
   [[ -n "${PERFLAB_FAULT_DEP:-}" ]] || return 0
-  compose unpause "${PERFLAB_FAULT_DEP}" >/dev/null 2>&1 || true
-  compose start "${PERFLAB_FAULT_DEP}" >/dev/null 2>&1 || true
+  cleanup_command compose unpause "${PERFLAB_FAULT_DEP}" >/dev/null 2>&1 || true
+  if ! cleanup_command compose start "${PERFLAB_FAULT_DEP}" >/dev/null 2>&1; then
+    : > "${artifact_dir}/cleanup-incomplete"
+    echo "WARNING: fault dependency cleanup did not complete." >&2
+  fi
 }
 
 # Baseline BEFORE any load: distinguishes "the app slowed down" from "the
@@ -607,7 +674,9 @@ fi
 midload_pid=""; fault_pid=""
 if [[ "${target_mode}" == "local" ]]; then
   if [[ -n "${PERFLAB_FAULT_DEP:-}" || "${partition_cleanup_required}" == "1" ]]; then
-    trap 'restore_fault_dep; cleanup_partition' INT TERM EXIT
+    trap 'restore_fault_dep; cleanup_partition' EXIT
+    trap 'on_signal INT' INT
+    trap 'on_signal TERM' TERM
   fi
   # Mid-load sampling and fault injection both act on OWNED dependencies/compose,
   # so they run only for a local target. A remote target measures the load
@@ -770,8 +839,8 @@ if [[ "${load_profile}" == "soak" ]]; then
   printf '{"event":"stop","generator":"%s","generatorIdentity":"%s"}\n' "$(json_escape "${load_generator}")" "${soak_identity}" \
     > "${artifact_dir}/benchmark/session/stop.json"
 fi
-[[ -n "${midload_pid}" ]] && { wait "${midload_pid}" 2>/dev/null || true; }
-fault_rc=0; [[ -n "${fault_pid}" ]] && { wait "${fault_pid}" 2>/dev/null || fault_rc=$?; }
+[[ -n "${midload_pid}" ]] && { wait "${midload_pid}" 2>/dev/null || true; midload_pid=""; }
+fault_rc=0; [[ -n "${fault_pid}" ]] && { wait "${fault_pid}" 2>/dev/null || fault_rc=$?; fault_pid=""; }
 # Record whether the fault applied AND whether the dependency recovered within the
 # measured window. Either failing makes the resilience package incomplete, so mark
 # it partial rather than let a not-injected or not-recovered run read as a success.

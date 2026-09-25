@@ -52,6 +52,7 @@ PY
 "$root/harness/core/lib/fault-proof-test.sh"
 "$root/harness/core/lib/distributed-merge-test.sh"
 "$root/harness/core/lib/field-parsing-test.sh"
+bash "$root/harness/core/lib/common-jq-test.sh"
 "$root/harness/core/run/run-scenario-lifecycle-test.sh"
 "$root/harness/core/analyze/compare-runs-fingerprint-test.sh"
 "$root/harness/core/analyze/compare-runs-keep-tiering-test.sh"
