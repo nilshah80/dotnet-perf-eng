@@ -635,11 +635,12 @@ fi
       "${PERFLAB_JMETER_IMAGE}" version --json || true
   fi
   claude --version
-  # The jq that parsed this package. The default is the pinned Docker image, but
-  # PERFLAB_JQ=host substitutes whatever jq is installed, so without this line two
-  # packages could differ in parsing with nothing in either one saying why. Only
-  # host mode is probed: the pinned image reference already names the Docker jq,
-  # and running it just to ask costs another container start per package.
+  # The jq that parsed this package. The default is the version-tagged Docker
+  # image, but PERFLAB_JQ=host substitutes whatever jq is installed, so without
+  # this line two packages could differ in parsing with nothing in either one
+  # saying why. Only host mode is probed: the image tag already names the Docker
+  # jq's version, and running it just to ask costs another container start per
+  # package.
   echo "--- jq: ${PERFLAB_JQ:-docker} ---"
   if [[ "${PERFLAB_JQ:-docker}" == "host" ]]; then command -v jq; jqd --version; else echo "${PERFLAB_JQ_IMAGE}"; fi
   echo "--- runtime adapter: ${runtime} ---"

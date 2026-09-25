@@ -71,9 +71,14 @@ resolve_profiling_policy() {
     return 0
   fi
   if [[ -n "${json_catalog:-}" && -f "${json_catalog}" && -n "${scenario_id}" ]]; then
+    # A lookup that FAILS is not "no policy": treating it as one profiled cpu
+    # instead of the catalog's policy, silently. Only an absent field means cpu.
     catalog_policy="$(jqd -r --arg id "${scenario_id}" \
-      '.scenarios[] | select(.id == $id) | .diagnostics.profilingPolicy // empty' \
-      < "${json_catalog}" 2>/dev/null || true)"
+      '(.scenarios // [])[] | select(.id == $id) | .diagnostics.profilingPolicy // empty' \
+      < "${json_catalog}")" || {
+      echo "could not read diagnostics.profilingPolicy for ${scenario_id} from ${json_catalog}" >&2
+      return 1
+    }
   fi
   if [[ -n "${catalog_policy}" ]]; then
     PERFLAB_PROFILING_TYPES="$(profiling_types_for_policy "${catalog_policy}")" \

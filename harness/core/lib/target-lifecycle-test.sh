@@ -10,6 +10,10 @@
 set -euo pipefail
 
 lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The lease signal cases need a SIGINT the lease holder can trap.
+# shellcheck source=/dev/null
+. "${lib_dir}/sigint-reset.sh"
+reset_inherited_sigint "$@"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/target-lifecycle-test.XXXXXX")"
 trap 'rm -rf "${test_root}"' EXIT HUP INT TERM
 fail() { echo "target-lifecycle-test: $*" >&2; exit 1; }
@@ -108,6 +112,46 @@ lease_env -c '
   release_diagnostic_lease
 ' >/dev/null 2>&1
 [[ -d "${foreign_dir}" ]] || fail "release_diagnostic_lease freed a lease held by another process"
+
+# A signal must END a capture that holds the lease, not only free the lease. The
+# old trap released it and let the capture carry on post-processing without it,
+# exiting 0, so a cancelled diagnostic read as a finished one. The holder runs as
+# a job with its own process group, like a terminal job, and is signalled the way
+# Ctrl-C signals one. It is started directly rather than through lease_env: a
+# backgrounded function wrapper would be what receives the signal and exits.
+signal_dir="${test_root}/perflab-diagnostic-lease-svc-api_uid-5"
+for signal in INT TERM; do
+  continued="${test_root}/lease-${signal}-continued"
+  set -m
+  PERFLAB_TARGET_KIND=managed-compose TMPDIR="${test_root}" bash -c '
+    target_mode=local; source "'"${lib_dir}"'/target-lifecycle.sh"
+    acquire_diagnostic_lease "svc-api@uid-5" || exit 9
+    arm_diagnostic_lease_release
+    sleep 30
+    : > "'"${continued}"'"
+  ' </dev/null >/dev/null 2>&1 &
+  holder_pid=$!
+  set +m
+  for _ in $(seq 1 100); do
+    [[ -f "${signal_dir}/pid" ]] && break
+    sleep 0.1
+  done
+  if [[ ! -f "${signal_dir}/pid" ]]; then
+    kill -KILL -- "-${holder_pid}" 2>/dev/null || true
+    fail "the ${signal} lease holder never acquired its lease"
+  fi
+  kill -"${signal}" -- "-${holder_pid}"
+  holder_rc=0
+  wait "${holder_pid}" || holder_rc=$?
+  expected_rc=130
+  [[ "${signal}" == INT ]] || expected_rc=143
+  [[ "${holder_rc}" == "${expected_rc}" ]] \
+    || fail "${signal} ended the lease holder with ${holder_rc}, expected ${expected_rc}"
+  [[ ! -d "${signal_dir}" ]] || fail "${signal} did not release the diagnostic lease"
+  [[ ! -e "${continued}" ]] || fail "the capture kept running after ${signal} released its lease"
+done
+grep -qx 'arm_diagnostic_lease_release' "$(dirname "${lib_dir}")/capture/capture-runtime.sh" \
+  || fail "capture-runtime.sh must arm the signal-safe lease release"
 
 # --- attach-only measurement (the capability, not just the refusal) ---------
 

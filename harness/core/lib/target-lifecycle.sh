@@ -101,3 +101,20 @@ release_diagnostic_lease() {
   fi
   target_lease_dir=""
 }
+
+# Release the lease on every exit, and let INT/TERM end the capture. A trap that
+# only released the lease let the capture carry on post-processing without it
+# and exit 0, so a cancelled diagnostic read as a finished one and could race the
+# next diagnostic that took the lease. The signal is re-raised after the release
+# so a waiting caller (a sweep or campaign loop) stops as well.
+arm_diagnostic_lease_release() {
+  trap release_diagnostic_lease EXIT
+  trap '_diagnostic_lease_on_signal INT' INT
+  trap '_diagnostic_lease_on_signal TERM' TERM
+}
+_diagnostic_lease_on_signal() {
+  trap '' INT TERM
+  release_diagnostic_lease
+  trap - EXIT INT TERM
+  kill -s "$1" "$$"
+}

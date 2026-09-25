@@ -127,6 +127,12 @@ if (( distributed_shards > 1 )); then
     echo "distributed k6 controller is unavailable at ${harness_core_dir}/distributed/agent.py" >&2
     exit 1
   }
+  # Resolved here, before any partition, warm-up or fault is set up: finding no
+  # interpreter at the measure step wasted the setup and left state to clean.
+  distributed_python="$(perflab_python)" || {
+    echo "the distributed k6 controller needs a working Python 3 interpreter (tried python3, python)" >&2
+    exit 1
+  }
   case "${PERFLAB_DISTRIBUTED_PARTIAL:-0}" in 0|1) ;; *)
     echo "PERFLAB_DISTRIBUTED_PARTIAL must be 0 or 1" >&2
     exit 1
@@ -645,6 +651,7 @@ inject_fault() {
 # and stop_conflicting_lab_stacks skips the selected lab. This trap (armed only
 # for a fault run) kills the injector and then best-effort restores on any exit;
 # the restore is a no-op when the dependency is already running.
+compose_quiet() { compose "$@" >/dev/null 2>&1; }
 restore_fault_dep() {
   # Kill the background injector (and mid-load sampler) FIRST: on an early exit a
   # still-sleeping injector could otherwise wake and RE-APPLY the fault after we
@@ -653,8 +660,10 @@ restore_fault_dep() {
   [[ -n "${midload_pid:-}" ]] && { stop_run_child "${midload_pid}"; midload_pid=""; }
   [[ -n "${load_pid:-}" ]]    && { stop_run_child "${load_pid}"; load_pid=""; }
   [[ -n "${PERFLAB_FAULT_DEP:-}" ]] || return 0
-  cleanup_command compose unpause "${PERFLAB_FAULT_DEP}" >/dev/null 2>&1 || true
-  if ! cleanup_command compose start "${PERFLAB_FAULT_DEP}" >/dev/null 2>&1; then
+  # Quiet compose itself (unpause of a dependency that is not paused is noise),
+  # but not cleanup_command, so a timed-out restore still says so.
+  cleanup_command compose_quiet unpause "${PERFLAB_FAULT_DEP}" || true
+  if ! cleanup_command compose_quiet start "${PERFLAB_FAULT_DEP}"; then
     : > "${artifact_dir}/cleanup-incomplete"
     echo "WARNING: fault dependency cleanup did not complete." >&2
   fi
@@ -703,12 +712,7 @@ if [[ -n "${PERFLAB_MEASUREMENT_WINDOW_PROBE_PATH:-}" ]]; then
   }
 fi
 distributed_measure() {
-  local python_executable
-  python_executable="$(perflab_python)" || {
-    echo "a working Python 3 interpreter was not found (tried python3, python)" >&2
-    exit 1
-  }
-  local -a command=("${python_executable}" "${harness_core_dir}/distributed/agent.py" controller
+  local -a command=("${distributed_python}" "${harness_core_dir}/distributed/agent.py" controller
     --agents "${distributed_agents}" --shards "${distributed_shards}"
     --target-origin "${distributed_target_origin}" --duration-seconds "${effective_duration}"
     --connections "${connections}" --run-id "${telemetry_run_id}"

@@ -356,7 +356,7 @@ fi
 # at a time. Keyed on the target identity rather than the run id: two different
 # runs pointed at the same process must still collide.
 acquire_diagnostic_lease "${PERFLAB_LAB:-lab}/${target}/${diagnostics_url}" || exit 1
-trap 'release_diagnostic_lease' EXIT INT TERM
+arm_diagnostic_lease_release
 
 capture="${runtime_adapter_dir}/capture.sh"
 if [[ ! -f "${capture}" ]]; then

@@ -11,10 +11,12 @@ for tool in dotnet curl jq lsof; do
 done
 
 # Use the native product's exact bounded parser/probe implementation, with a
-# host jq shim because this isolated target proof has no Compose dependency.
+# host jq shim because this isolated target proof has no Compose dependency. The
+# shim keeps common.sh's jqd guards: jq.exe writes CRLF on Windows, and MSYS
+# rewrites POSIX-looking arguments such as `--arg path /api/...`.
 # shellcheck disable=SC1091
 source "${root}/harness/core/lib/performance.sh"
-jqd() { jq "$@"; }
+jqd() { MSYS_NO_PATHCONV=1 jq "$@" | tr -d '\r'; return "${PIPESTATUS[0]}"; }
 target_curl() { curl "$@"; }
 export PERFLAB_MEASUREMENT_WINDOW_PROBE_PATH=/api/reliability/window
 

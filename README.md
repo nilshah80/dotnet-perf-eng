@@ -423,16 +423,18 @@ so a spike on a latency panel links straight to the Tempo trace that produced it
 - **`claude` CLI** — only for the optional AI diagnosis phase.
 - Bash (Git Bash on Windows), `curl`, `awk` — standard.
 
-No host `jq` and no host `wrk` install are required.
+Running the harness needs no host `jq` and no host `wrk`. The contract checks
+(`./scripts/contract/check.sh`) do use a host `jq`; see
+[`CONTRIBUTING.md`](CONTRIBUTING.md#prerequisites).
 
 **Faster JSON parsing on Windows (opt-in).** Every `jq` call runs in a fresh
 container by default, which costs seconds per call on Docker Desktop for
 Windows. If `jq` is installed on the host, `export PERFLAB_JQ=host` makes the
 harness use it instead — several times faster there. It is opt-in because a host
-`jq` is whatever version you installed rather than the pinned
+`jq` is whatever version you installed rather than the version-tagged
 `PERFLAB_JQ_IMAGE`; each evidence package records the `jq` that parsed it in
-`source/tool-versions.txt`. `PERFLAB_JQ=docker` (the default) restores the pinned
-container.
+`source/tool-versions.txt`. `PERFLAB_JQ=docker` (the default) restores the
+version-tagged container.
 
 Optional: copy `labs/scenariolab/.env.example` → `labs/scenariolab/.env` to
 override compose defaults (dependency passwords, `SEED_SCALE`,
@@ -1238,7 +1240,8 @@ docker compose -f labs/scenariolab/compose.yaml down -v    # full reset (deletes
 Config is bash, the scenario catalog is TSV (`awk`), JSON the harness emits is
 built with `printf`, and the JSON it must parse (Prometheus/Tempo/Loki, Claude
 output) is parsed by `jq` **inside Docker** (`jqd`). This removes the host jq
-dependency and its Windows CRLF/MSYS pitfalls.
+dependency and its Windows CRLF/MSYS pitfalls. `PERFLAB_JQ=host` opts back into
+a host `jq` for speed; `jqd` then applies the same CR and path-conversion guards.
 
 ## Adding a project or runtime
 

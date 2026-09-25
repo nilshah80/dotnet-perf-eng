@@ -285,7 +285,18 @@ cleanup_load() {
     wait "${counters_pid}" 2>/dev/null || true
   fi
 }
-trap cleanup_load EXIT INT TERM
+# INT/TERM end the capture. Cleaning up and carrying on pulled the next snapshot
+# from a load that had just been killed and recorded the capture as captured.
+# The signal is re-raised so capture-runtime.sh sees a real interruption.
+capture_on_signal() {
+  trap '' INT TERM
+  cleanup_load
+  trap - EXIT INT TERM
+  kill -s "$1" "$$"
+}
+trap cleanup_load EXIT
+trap 'capture_on_signal INT' INT
+trap 'capture_on_signal TERM' TERM
 
 performance_stream_copy_limit() {
   local dest="$1" budget="$2" limit actual

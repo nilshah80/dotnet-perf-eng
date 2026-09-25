@@ -6,15 +6,18 @@ set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 fail() { echo "security-journey-test: $*" >&2; exit 1; }
-for command in dotnet curl jq k6 python3; do
+for command in dotnet curl jq k6; do
   command -v "${command}" >/dev/null || fail "${command} is required"
 done
+# shellcheck source=/dev/null
+. "${root}/harness/core/lib/python.sh"
+PYTHON="$(perflab_python)" || fail "a working Python 3 interpreter was not found (tried python3, python)"
 
 project="${root}/source/dotnet/protocol-reliability/ProtocolReliability.Api.csproj"
 [[ -f "${project}" ]] || fail "Protocol Reliability project is missing"
 dotnet build "${project}" --no-restore --nologo >/dev/null || fail "target build failed"
 
-http_port="$(python3 - <<'PY'
+http_port="$("${PYTHON}" - <<'PY'
 import socket
 sock = socket.socket()
 sock.bind(("127.0.0.1", 0))
@@ -22,7 +25,7 @@ print(sock.getsockname()[1])
 sock.close()
 PY
 )"
-grpc_port="$(python3 - <<'PY'
+grpc_port="$("${PYTHON}" - <<'PY'
 import socket
 sock = socket.socket()
 sock.bind(("127.0.0.1", 0))
@@ -30,6 +33,9 @@ print(sock.getsockname()[1])
 sock.close()
 PY
 )"
+# A native Windows Python writes "NNNN\r\n"; the CR would end up in every URL.
+http_port="${http_port%$'\r'}"
+grpc_port="${grpc_port%$'\r'}"
 work="$(mktemp -d "${TMPDIR:-/tmp}/perflab-security-journey.XXXXXX")"
 app_pid=""
 cleanup() {

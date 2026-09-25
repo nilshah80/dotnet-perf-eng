@@ -75,6 +75,18 @@ fi
 grep -q "unknown catalog diagnostics.profilingPolicy" "${work}/err" \
   || fail "unknown-policy error text: $(cat "${work}/err")"
 
+# --- a failed catalog lookup fails closed ----------------------------------
+# A jq that cannot run (jq 1.6 rejecting -b under Git Bash was the real case)
+# used to read as "no policy", so S04 profiled cpu instead of its catalog memory
+# policy with no warning. The subshell keeps the failing jqd out of later cases.
+if ( json_catalog="${repo}/labs/scenariolab/catalog.json"
+     jqd() { echo "jq: simulated failure" >&2; return 2; }
+     resolve_profiling_policy S04 ) 2>"${work}/err"; then
+  fail "a failed catalog lookup was accepted as a policy"
+fi
+grep -q "could not read diagnostics.profilingPolicy for S04" "${work}/err" \
+  || fail "failed-lookup error text: $(cat "${work}/err")"
+
 # --- recreate is required only when the startup key actually changes ------
 profiling_needs_recreate "" "1|cpu|cpu|0" && fail "first generation must not force-recreate"
 profiling_needs_recreate "1|cpu|cpu|0" "1|cpu|cpu|0" && fail "identical startup key must not recreate"

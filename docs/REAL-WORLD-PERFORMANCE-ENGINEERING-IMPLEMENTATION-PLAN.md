@@ -147,9 +147,9 @@ The bundle and lock use these rules:
    one final LF.
 6. Both repositories pin Markdown, JSON, JTL, JMX, and every other declared
    text-fixture extension to LF and declare diagnostic/archive fixtures binary
-   in `.gitattributes`. CI rejects BOMs, CRLF, a text/binary attribute mismatch,
-   an unclean regenerated lock, an unmapped, extra, or duplicate logical name,
-   and a manifest/lock disagreement.
+   in `.gitattributes`. The local contract check rejects BOMs, CRLF, a
+   text/binary attribute mismatch, an unclean regenerated lock, an unmapped,
+   extra, or duplicate logical name, and a manifest/lock disagreement.
 
 The lock generator must recompute bytes from the index or a clean checkout; it
 must not normalize content while hashing. The same revision with a different
@@ -158,8 +158,8 @@ aggregate digest is a contract violation, not a compatible variant.
 Each repository checks in the same generated `parity-lock.json`, containing the
 expected plan SHA-256, active contract revision, manifest SHA-256, and aggregate
 SHA-256 plus the contract-index SHA-256 and both product compatibility-inventory
-SHA-256 values. Local CI validates its plan/contract bytes and its own inventory
-field, then emits a signed or content-addressed
+SHA-256 values. The local contract check validates its plan/contract bytes and
+its own inventory field, then emits a signed or content-addressed
 `parity-attestation.json`; it never fetches the peer checkout.
 The coordinated parity workflow is the sole authority for cross-repository
 equality. It compares the two exported attestations from independently built
@@ -1292,9 +1292,10 @@ the equivalent checked-in input descriptors and makes each shell parser's
 conformance test prove that its accepted inputs match them.
 
 Each product generates only its repository-local compatibility manifest from
-those descriptors. Local CI validates runtime registration, its manifest, and
-golden parse/manifest tests; it neither renders the other product's subsection
-nor rewrites this joint document. The coordinated documentation job consumes
+those descriptors. The local contract check validates runtime registration, its
+manifest, and golden parse/manifest tests; it neither renders the other
+product's subsection nor rewrites this joint document. The coordinated
+documentation job consumes
 both exported inventories, renders the complete Section 17 once, and applies
 the identical result to both repositories. `parity-lock.json` pins both
 inventory digests and the resulting plan digest. Until that generator lands,
@@ -1784,7 +1785,8 @@ saturation per shard, and never average percentiles.
 - Publish upgrade and rollback procedures.
 - Repeat the authoritative cross-repository plan, manifest, schema, fixture,
   and contract-lock attestation comparison in the coordinated parity workflow;
-  local CI continues to validate only its repository's parity lock.
+  the local contract check continues to validate only its repository's parity
+  lock.
 
 Exit: release checklist and full acceptance matrix pass in both independent
 repositories.
@@ -1870,7 +1872,7 @@ Required end-to-end cases:
     message, or test resolves, imports, downloads, or starts the other product.
 31. The byte-identical manifest defines the same members across different
     physical paths; missing/extra members, byte/order/BOM/attribute/line-ending
-    drift, or manifest/lock disagreement fails local CI.
+    drift, or manifest/lock disagreement fails the local contract check.
 32. JMeter journey duration includes timers/pre/postprocessors while operation
     latency excludes think time.
 33. Logical operations, retries, redirects, embedded resources, protocol
@@ -1910,7 +1912,8 @@ Required end-to-end cases:
     test, including `gate` comparison-context flags, `plugins upgrade`, and every
     `analyze` mode/provider flag.
 49. Adding a registered command, subcommand, flag, positional input, or native
-    environment input without regenerating the inventory fails CI.
+    environment input without regenerating the inventory fails the local
+    contract check.
 50. Compatible stable `v1` request, journey, mix, and protocol candidates are
     evaluated without lossy projection; missing or different required
     dimensions are inconclusive and require a new baseline.
@@ -1922,8 +1925,9 @@ Required end-to-end cases:
     `PERFLAB_JMETER_PROP_*` remain compatibility names only. Native
     `version`/`run-once`/`normalize`, resource-ceiling, JTL, and artifact-contract
     fixtures pass without the PerfLab image or binary.
-53. Local CI validates only local bytes against `parity-lock.json` and exports
-    an attestation without fetching the peer. The release coordinator consumes
+53. The local contract check validates only local bytes against
+    `parity-lock.json` and exports an attestation without fetching the peer. The
+    release coordinator consumes
     both artifacts, renders Section 17, regenerates the plan digest and complete
     lock, emits paired patches, and rejects unequal plan, inventory, manifest,
     contract-index, revision, or aggregate fields.
@@ -2194,7 +2198,7 @@ the rule above that counts as not met, not as an omission.
 | 50 | Compatible stable `v1` candidates compare | A | native `harness/core/analyze/compare-runs-fingerprint-test.sh` |
 | 51 | Unknown or reused contract revision is rejected | A | native `scripts/contract/verify-lock.sh` |
 | 52 | Runtime, JMX, configuration and documentation scans find no leakage | A | native `scripts/contract/independence.sh` |
-| 53 | Local CI validates local bytes and exports an attestation | A | native `scripts/contract/attest-test.sh`; perflab `scripts/contract/coordinate-release/compare-test.sh` |
+| 53 | The local contract check validates local bytes and exports an attestation | A | native `scripts/contract/attest-test.sh`; perflab `scripts/contract/coordinate-release/compare-test.sh` |
 
 **Result: all 39 Gate A cases are mapped.** Every case names a command, and
 the commands run in the contract check, so a case cannot be claimed without a

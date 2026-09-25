@@ -10,10 +10,11 @@ set -euo pipefail
 #   harness_root     = <harness_root>            (the reusable toolkit)
 #   repo_root        = holds harness/, the project tree, and lab.config.sh
 #
-# Design: zero host jq. The descriptor and scenario catalog are bash-native
-# (lab.config.sh + scenarios.tsv), JSON the harness emits is built with printf
-# helpers, and the few places that must parse foreign JSON (telemetry APIs,
-# Claude output) call jq inside Docker via jqd(). Nothing here hardcodes a
+# Design: no host jq by default. The descriptor and scenario catalog are
+# bash-native (lab.config.sh + scenarios.tsv), JSON the harness emits is built
+# with printf helpers, and the few places that must parse foreign JSON
+# (telemetry APIs, Claude output) call jqd(), which runs jq inside Docker unless
+# PERFLAB_JQ=host opts into the host jq. Nothing here hardcodes a
 # service name, port, metric, or source path; those come from the descriptor or
 # an adapter under <harness_root>/adapters.
 # ---------------------------------------------------------------------------
@@ -41,7 +42,8 @@ require_command() {
   fi
 }
 
-# Base dependencies. jq is deliberately NOT one of them -- it runs in Docker.
+# Base dependencies. jq is deliberately NOT one of them -- it runs in Docker by
+# default, and PERFLAB_JQ=host requires the host jq below.
 require_command docker
 require_command curl
 require_command awk
@@ -91,14 +93,14 @@ resolve_repo_path() {
 }
 
 # jqd: the jq for everything the harness must parse. By default it runs inside
-# Docker (no host jq), pinned by PERFLAB_JQ_IMAGE, so every platform parses
-# evidence with the same jq. It must be available before the selected lab context
-# validates its stable-v1 catalog and workload manifest.
+# Docker (no host jq) at the version PERFLAB_JQ_IMAGE names, so every platform
+# parses evidence with the same jq. It must be available before the selected lab
+# context validates its stable-v1 catalog and workload manifest.
 #
 # PERFLAB_JQ=host opts into the host jq instead. Starting a container per call
 # costs seconds on Docker Desktop for Windows and the harness makes hundreds of
 # calls, so the host binary is several times faster there. It is opt-in because a
-# host jq is whatever version is installed rather than the pinned one; the jq
+# host jq is whatever version is installed rather than the image's; the jq
 # that parsed a package is recorded in source/tool-versions.txt in either mode.
 # Both modes strip CR from jq output, including native Windows CRLF, without
 # requiring the -b flag added in jq 1.7. Under MSYS, MSYS_NO_PATHCONV stops

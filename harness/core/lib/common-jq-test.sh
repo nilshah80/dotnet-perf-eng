@@ -33,8 +33,11 @@ export PERFLAB_LAB_OPTIONAL=1
 for platform in Linux MINGW64_NT-10.0; do
   for mode in host docker; do
     : > "${JQ_CALL_LOG}"
-    JQ_TEST_PLATFORM="${platform}" PERFLAB_JQ="${mode}" bash -s -- "${lib}/common.sh" <<'CASE'
+    JQ_TEST_PLATFORM="${platform}" PERFLAB_JQ="${mode}" bash -s -- "${lib}/common.sh" <<'CASE' \
+      || { echo "jqd ${mode}/${platform} case failed" >&2; exit 1; }
 set -euo pipefail
+# Name the assertion that failed; set -e alone exits without saying which.
+trap 'echo "failed: ${BASH_COMMAND}" >&2' ERR
 source "$1"
 [[ "$(jqd -nr --arg path /stacks '$path')" == /stacks ]]
 [[ "$(jqd -nr '"a\rb"')" == ab ]]

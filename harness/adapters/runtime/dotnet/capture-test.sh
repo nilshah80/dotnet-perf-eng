@@ -3,6 +3,10 @@ set -euo pipefail
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 
 adapter_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The cancelled-capture cases need a SIGINT the capture can trap.
+# shellcheck source=/dev/null
+. "${adapter_dir}/../../../core/lib/sigint-reset.sh"
+reset_inherited_sigint "$@"
 test_root="$(mktemp -d)"
 trap 'rm -rf "${test_root}"' EXIT
 mkdir -p "${test_root}/harness/core/lib" "${test_root}/bin"
@@ -21,7 +25,7 @@ diag_target() { printf 'Fixture.Api'; }
 jqd() { MSYS_NO_PATHCONV=1 jq "$@" | tr -d '\r'; return "${PIPESTATUS[0]}"; }
 json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s}"; }
 loadgen_warmup() { mkdir -p "$1"; printf 'warmup\n' >> "${PERFLAB_TEST_CALLS}"; printf '{}' > "$1/warmup.json"; }
-loadgen_measure() { mkdir -p "$1"; printf 'diagnostic\n' >> "${PERFLAB_TEST_CALLS}"; printf '{}' > "$1/diagnostic.json"; }
+loadgen_measure() { mkdir -p "$1"; printf 'diagnostic\n' >> "${PERFLAB_TEST_CALLS}"; [[ -z "${PERFLAB_TEST_SLOW_LOAD:-}" ]] || sleep "${PERFLAB_TEST_SLOW_LOAD}"; printf '{}' > "$1/diagnostic.json"; }
 monitor_curl() { curl "$@"; }
 compose() {
   local previous='' argument output=''
@@ -310,5 +314,44 @@ PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
   bash "${adapter_dir}/capture.sh" "${hostile_hang}" preset:hang 1 api >/dev/null 2>&1
 [[ -s "${hostile_hang}/runtime/captures/trace/cpu.nettrace" ]]
 [[ ! -e "${hostile_hang}/runtime/captures/stacks/stacks.txt" ]]
+
+# A signal during the diagnostic load must end the capture. The old trap only
+# stopped the load and carried on: it pulled the after-snapshot from a load it
+# had just killed, recorded the campaign as captured and exited 0. The capture
+# runs as a job with its own process group and is signalled like a terminal job.
+for signal in INT TERM; do
+  cancelled="${test_root}/cancelled-${signal}"
+  mkdir -p "${cancelled}"; : > "${cancelled}-calls"
+  set -m
+  PATH="${test_root}/bin:${PATH}" \
+  PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+  PERFLAB_TEST_CALLS="${cancelled}-calls" \
+  PERFLAB_TEST_GCDUMP_COUNT="${cancelled}-gcdumps" \
+  PERFLAB_TEST_SLOW_LOAD=30 \
+  PERFLAB_DIAGNOSTIC_RECOVERY_SECONDS=0 \
+  PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES=67108864 \
+  PERFLAB_DIAGNOSTIC_INCLUDE_DUMP=0 \
+  PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
+    bash "${adapter_dir}/capture.sh" "${cancelled}" preset:memory 1 api </dev/null >/dev/null 2>&1 &
+  capture_pid=$!
+  set +m
+  for _ in $(seq 1 100); do
+    grep -q '^diagnostic$' "${cancelled}-calls" && break
+    sleep 0.1
+  done
+  if ! grep -q '^diagnostic$' "${cancelled}-calls"; then
+    kill -KILL -- "-${capture_pid}" 2>/dev/null || true
+    echo "cancelled-${signal}: the diagnostic load never started" >&2; exit 1
+  fi
+  kill -"${signal}" -- "-${capture_pid}"
+  capture_rc=0
+  wait "${capture_pid}" || capture_rc=$?
+  expected_rc=130
+  [[ "${signal}" == INT ]] || expected_rc=143
+  [[ "${capture_rc}" == "${expected_rc}" ]] \
+    || { echo "cancelled-${signal}: exit ${capture_rc}, want ${expected_rc}" >&2; exit 1; }
+  [[ "$(cat "${cancelled}-gcdumps")" == 1 ]] \
+    || { echo "cancelled-${signal}: the capture pulled another snapshot after the signal" >&2; exit 1; }
+done
 
 echo "dotnet runtime campaign adapter tests passed"

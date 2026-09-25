@@ -8,9 +8,12 @@ set -euo pipefail
 root="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 project="${root}/source/dotnet/protocol-reliability/ProtocolReliability.Api.csproj"
 agent="${root}/harness/core/distributed/agent.py"
-for tool in dotnet python3 k6 curl jq lsof rg; do
+for tool in dotnet k6 curl jq lsof rg; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "distributed-proof-test: ${tool} is required" >&2; exit 1; }
 done
+# shellcheck source=/dev/null
+. "${root}/harness/core/lib/python.sh"
+PYTHON="$(perflab_python)" || { echo "distributed-proof-test: a working Python 3 interpreter was not found (tried python3, python)" >&2; exit 1; }
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/protocol-distributed.XXXXXX")"
 app_pid=""
@@ -63,10 +66,10 @@ curl -fsS --max-time 2 "${target}/health/ready" >/dev/null || {
 # This fixture-only token stays in process environment / Authorization headers.
 # The controller evidence records only secret://PERFLAB_DISTRIBUTED_TOKEN.
 export PERFLAB_DISTRIBUTED_TOKEN=distributed-proof-token
-python3 "${agent}" agent --root "${root}" --listen "127.0.0.1:$((port + 1))" \
+"${PYTHON}" "${agent}" agent --root "${root}" --listen "127.0.0.1:$((port + 1))" \
   --agent-id fixture-agent-a --allow-origin "${target}" >"${work}/agent-a.log" 2>&1 &
 agent_a_pid="$!"
-python3 "${agent}" agent --root "${root}" --listen "127.0.0.1:$((port + 2))" \
+"${PYTHON}" "${agent}" agent --root "${root}" --listen "127.0.0.1:$((port + 2))" \
   --agent-id fixture-agent-b --allow-origin "${target}" >"${work}/agent-b.log" 2>&1 &
 agent_b_pid="$!"
 for _ in $(seq 1 30); do
@@ -80,7 +83,7 @@ grep -q 'distributed-agent-ready' "${work}/agent-a.log" && grep -q 'distributed-
   exit 1
 }
 
-python3 "${agent}" controller --allow-insecure-local --agents "${agent_a},${agent_b}" --shards 2 \
+"${PYTHON}" "${agent}" controller --allow-insecure-local --agents "${agent_a},${agent_b}" --shards 2 \
   --target-origin "${target}" --duration-seconds 3 --connections 2 --run-id distributed-proof \
   --artifact-dir "${work}/complete" >"${work}/complete.out"
 jq -e '
@@ -157,7 +160,7 @@ fi
 
 # A lost agent must abort the whole merge by default. No successful shard is
 # relabeled as a complete distributed result.
-if python3 "${agent}" controller --allow-insecure-local --agents "${agent_a},${missing}" --shards 2 \
+if "${PYTHON}" "${agent}" controller --allow-insecure-local --agents "${agent_a},${missing}" --shards 2 \
     --target-origin "${target}" --duration-seconds 1 --connections 2 --run-id distributed-closed \
     --artifact-dir "${work}/closed" >"${work}/closed.out" 2>&1; then
   echo "distributed-proof-test: missing agent did not fail closed" >&2
@@ -171,7 +174,7 @@ jq -e '.status == "failed-closed" and (.lostAgents | length == 1) and .aggregate
 }
 
 # Partial aggregation is an explicit opt-in and remains visibly partial.
-python3 "${agent}" controller --allow-insecure-local --allow-partial --agents "${agent_a},${missing}" --shards 2 \
+"${PYTHON}" "${agent}" controller --allow-insecure-local --allow-partial --agents "${agent_a},${missing}" --shards 2 \
   --target-origin "${target}" --duration-seconds 1 --connections 2 --run-id distributed-partial \
   --artifact-dir "${work}/partial" >"${work}/partial.out"
 jq -e '.status == "partial" and .partialLoss == true and (.lostAgents | length == 1) and (.aggregate.requests > 0)' \

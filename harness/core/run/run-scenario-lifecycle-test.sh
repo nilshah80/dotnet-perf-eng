@@ -18,15 +18,10 @@
 # under test is the shipping run-scenario.sh rather than a reimplementation.
 set -euo pipefail
 
-# Always reset SIGINT once: Bash 3.2 cannot reliably report an inherited ignore
-# through command substitution. MSYS Perl on Windows performs a real exec,
-# preserving the test's lifetime and exit status instead of detaching it.
-if [[ "${LIFECYCLE_RESET_INT:-0}" != 1 ]]; then
-  perl_executable="$(command -v perl)" || { echo 'Perl is required to reset SIGINT for the lifecycle test' >&2; exit 1; }
-  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) perl_executable=/usr/bin/perl ;; esac
-  export LIFECYCLE_RESET_INT=1
-  exec "$perl_executable" -e '$SIG{INT}="DEFAULT"; exec {$ARGV[0]} @ARGV or die "exec $ARGV[0]: $!\n"' "$BASH" "$0" "$@"
-fi
+# The cancellation cases need a SIGINT the run under test can trap.
+# shellcheck source=/dev/null
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/sigint-reset.sh"
+reset_inherited_sigint "$@"
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/run-scenario-lifecycle-test.XXXXXX")"
