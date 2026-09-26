@@ -555,6 +555,10 @@ else
   fi
 fi
 
+# perflab-baggage-v1 (D-P1-8): does the target honour request baggage? Never
+# fatal; capture-evidence scopes by phase only when the proof says so.
+performance_baggage_probe "${base_url}" "${telemetry_run_id}" "${artifact_dir}/analysis/baggage-contract.json" || true
+
 echo "Warming up for ${PERFLAB_WARMUP_SECONDS:-10} seconds with ${load_generator}..."
 loadgen_warmup "${artifact_dir}"
 

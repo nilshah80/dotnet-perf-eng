@@ -177,6 +177,32 @@ else
   trace_run_id_pred=""
 fi
 
+# perflab-baggage-v1 (D-P1-8). The probe before traffic recorded whether the
+# target stamps each request's phase and run on its request span, its
+# request-duration metric (phase only) and its log scope, and whether this
+# generator sends them. Only then do the queries select the measured phase;
+# otherwise run, service and window scoping stand alone.
+baggage_state="not-probed"; phase_scoped=0
+baggage_proof="${artifact_dir}/analysis/baggage-contract.json"
+if [[ -s "${baggage_proof}" ]]; then
+  read_fields 2 < <(jqd -r '[(.state // "unknown"), (if .phaseScoped == true then "1" else "0" end)] | .[]' < "${baggage_proof}") || exit 1
+  baggage_state="${TSV_FIELDS[0]}"; phase_scoped="${TSV_FIELDS[1]}"
+fi
+prom_phase_selector=""; trace_phase_pred=""; log_phase_filter=""
+if [[ "${phase_scoped}" == "1" ]]; then
+  prom_phase_selector=',perf_phase="measure"'
+  trace_phase_pred=' && span.perf.phase = "measure"'
+  log_phase_filter=' | perf_phase="measure"'
+fi
+# A remote target without the v1 run-id contract but with verified baggage
+# carries the run on its request spans and log scope, so traces and logs become
+# run-isolated. Its metrics keep job and window scoping plus the phase label.
+baggage_run_scoped=0
+if [[ "${target_mode}" == "remote" && "${remote_correlation}" != "1" && "${baggage_state}" == "verified" ]]; then
+  baggage_run_scoped=1
+  trace_run_id_pred=" && span.perf.run.id = \"${telemetry_run_id}\""
+fi
+
 if [[ "${capture_telemetry}" == "1" ]]; then
 mkdir -p "${artifact_dir}/telemetry/metrics" "${artifact_dir}/telemetry/traces/details" \
          "${artifact_dir}/telemetry/logs"
@@ -377,6 +403,7 @@ if [[ -f "${metrics_map}" ]]; then
     q="${m_promql//\$JOB/${prom_job_regex}}"
     q="${q//\$RUN_ID/${telemetry_run_id}}"
     q="${q//\$SERVICE_INSTANCE/${service_instance_regex}}"
+    q="${q//\$PHASE/${prom_phase_selector}}"
     role_start="${start_epoch}"
     if [[ "${q}" == *'$RATE_WINDOW'* ]]; then
       q="${q//\$RATE_WINDOW/${rate_window_seconds}s}"
@@ -395,7 +422,7 @@ fi
 # Tempo traces, scoped by service.name + the run-id resource attribute. Tempo's
 # search API has no portable cursor, so bounded time slices are recursively split
 # when saturated. This expands the searchable population without one huge request.
-trace_query="{ resource.service.name =~ \"${service_name_regex}\"${trace_run_id_pred} }"
+trace_query="{ resource.service.name =~ \"${service_name_regex}\"${trace_run_id_pred}${trace_phase_pred} }"
 trace_search_file="${artifact_dir}/telemetry/traces/search.json"
 trace_pages_dir="${artifact_dir}/telemetry/traces/search-pages"
 trace_population_file="${artifact_dir}/telemetry/traces/population.ndjson"
@@ -524,7 +551,10 @@ if [[ "${correlated_run}" == "1" ]]; then
   log_label="${run_id_label}"
   [[ "${target_mode}" == "remote" ]] && log_label="${remote_correlation_loki_label}"
   log_query+=" | ${log_label}=\"${telemetry_run_id}\""
+elif [[ "${baggage_run_scoped}" == "1" ]]; then
+  log_query+=" | perf_run_id=\"${telemetry_run_id}\""
 fi
+log_query+="${log_phase_filter}"
 log_file="${artifact_dir}/telemetry/logs/query-range.json"
 log_pages_dir="${artifact_dir}/telemetry/logs/pages"
 mkdir -p "${log_pages_dir}"
@@ -658,6 +688,10 @@ if [[ "${continuous_profiling}" == "1" && "${target_mode}" == "local" ]]; then
 fi
 pyroscope_capture_profiles
 [[ "${profiles_incomplete:-0}" == "1" ]] && capture_incomplete=1
+# Span-to-profile correlation (D-P1-3): best-effort, never marks incomplete.
+# shellcheck disable=SC1091
+source "${harness_root}/adapters/observability/grafana/capture-span-profiles.sh"
+pyroscope_capture_span_profiles
 
 # Dependency snapshots + the app's own socket table + compose ps + runtime extras
 # all shell into OWNED containers (compose exec / snapshot.sh / docker), so they
@@ -777,7 +811,7 @@ fi
 if [[ "${capture_telemetry}" == "1" && "${PERF_PROTOCOL:-}" != "browser-synthetic" ]]; then
   eff_window=$(( end_epoch - start_epoch )); (( eff_window < 1 )) && eff_window=1
   eff_si="${service_instance_regex:-.+}"
-  eff_reqrate="sum(rate(http_server_request_duration_seconds_count{service_instance_id=~\"${eff_si}\",http_route!~\"/health.*|\"}[${eff_window}s]))"
+  eff_reqrate="sum(rate(http_server_request_duration_seconds_count{service_instance_id=~\"${eff_si}\",http_route!~\"/health.*|\"${prom_phase_selector}}[${eff_window}s]))"
   prom_scalar() { # <observation-name> <promql>
     # These derived observations were the one query family with no provenance
     # line: an absent efficiency fact could not be told apart from a query that

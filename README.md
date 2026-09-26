@@ -1238,6 +1238,55 @@ docker compose -f labs/scenariolab/compose.yaml down -v    # full reset (deletes
 - `capture-evidence` fails loud if telemetry or a dependency is unreachable, rather
   than emitting a silently empty package.
 
+## Telemetry injection: request baggage and span profiles
+
+Two Gate C signals need code inside the target process, and a real project
+often cannot change its application. Neither needs to: the lab compose files
+inject a harness-owned assembly at deploy time, the way the Pyroscope profiler
+is already injected.
+
+- **Delivery.** The `telemetry-injection` service (built from
+  `harness/adapters/runtime/dotnet/injection`) copies
+  `PerfLab.DotNet.Injection.dll` into a volume. Each .NET service mounts it
+  read-only and sets `DOTNET_STARTUP_HOOKS` and
+  `ASPNETCORE_HOSTINGSTARTUPASSEMBLIES`. On Kubernetes the same is an init
+  container plus two environment variables. `PERFLAB_TELEMETRY_INJECTION=0`
+  sets both empty, which the runtime treats as no hook. The assembly targets
+  .NET 10.
+- **Request baggage (`perflab-baggage-v1`, D-P1-8).** Every generator sends
+  `baggage: perf.run.id=<run>,perf.phase=<warmup|measure|diagnostic>`: k6
+  through `harness/adapters/loadgen/k6/baggage.js`, wrk through `wrk.lua`, and
+  JMeter through each plan's header manager. A value the application would
+  reject is not sent. The injected middleware stamps the run and phase on the
+  request span and the log scope, adds the phase (never the run id) to
+  `http.server.request.duration`, and answers `GET /perf/baggage`.
+- **Probe, then scope.** Before warm-up, `run-scenario.sh` probes that path and
+  writes `analysis/baggage-contract.json`. Scoping needs a verified echo and a
+  generator that sends baggage; a real browser's page requests do not. With
+  both, capture adds `perf_phase="measure"` to the request-duration metric and
+  the efficiency request rate, `span.perf.phase = "measure"` to the Tempo
+  search, and `| perf_phase="measure"` to the Loki query. Runtime metrics carry
+  no phase label and stay unscoped. A remote target without the
+  `perflab-run-id-v1` contract but with verified baggage also becomes
+  run-isolated for traces and logs. The probe never fails a run: without it,
+  run, service and window scoping stand alone.
+- **Span profiles (D-P1-3).** With `PERFLAB_CONTINUOUS_PROFILING=1`, the startup
+  hook runs the Pyroscope span processor's own hooks from an
+  `ActivityListener`. Each local root span then carries `pyroscope.profile.id`,
+  and its CPU samples carry the same id. Capture asks Pyroscope's span-profile
+  API for the CPU profile of exactly the spans of the captured median, p95,
+  p99 and slowest traces (`span-<service>-cpu.json`), over a window widened by
+  60 s because Pyroscope stamps an upload at the start of its period.
+  `telemetry/profiles/span-profiles.json` summarises the result.
+  It is best-effort and never makes a package incomplete. CPU
+  profiles only, and x64 only: pyroscope-dotnet's managed span API refuses
+  other architectures, so on an Arm64 host (Apple Silicon) the listener is not
+  registered and `span-profiles.json` records `missing` with that reason.
+- **Limits.** The phase reaches work a request hands to a queue only when the
+  application forwards the header. ScenarioLab's worker does not, so its spans
+  keep window scoping. A continuation that resumes on another thread can leave
+  some CPU samples outside its span, exactly as with the in-process processor.
+
 ## Continuous profiling troubleshooting
 
 - **Backend ready but empty.** `/ready` on port 4040 can succeed before the .NET

@@ -84,6 +84,15 @@ vars.put("perf.path", joinGeneratorPath(uri.getRawPath() ?: "", scenario))
 vars.put("perf.method", method)
 vars.put("perf.body", System.getenv("PERF_BODY") ?: "")
 vars.put("perf.runId", System.getenv("PERF_RUN_ID") ?: "")
+// perflab-baggage-v1 (D-P1-8): the request's run and phase as W3C baggage, so the
+// application stamps them on its spans, logs and request metrics. A value the
+// application would reject is not sent.
+def baggageRunId = vars.get("perf.runId")
+def baggagePhase = props.get("perf.phase") ?: (System.getenv("PERF_PHASE") ?: "")
+def baggageMembers = []
+if (baggageRunId ==~ /[A-Za-z0-9._:-]{1,128}/) { baggageMembers << "perf.run.id=" + baggageRunId }
+if (["warmup", "measure", "diagnostic"].contains(baggagePhase)) { baggageMembers << "perf.phase=" + baggagePhase }
+vars.put("perf.baggage", baggageMembers.join(","))
 def headersRaw = System.getenv("PERF_HEADERS")
 vars.put("perf.authorization", "")
 if (headersRaw != null && !headersRaw.trim().isEmpty()) {
@@ -100,6 +109,10 @@ if (headersRaw != null && !headersRaw.trim().isEmpty()) {
         <hashTree/>
         <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="PerfLab Headers" enabled="true">
           <collectionProp name="HeaderManager.headers">
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">baggage</stringProp>
+              <stringProp name="Header.value">${perf.baggage}</stringProp>
+            </elementProp>
             <elementProp name="" elementType="Header">
               <stringProp name="Header.name">Accept</stringProp>
               <stringProp name="Header.value">application/json</stringProp>

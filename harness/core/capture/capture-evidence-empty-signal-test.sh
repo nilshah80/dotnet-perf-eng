@@ -253,4 +253,27 @@ jq -e 'select(.backend == "loki" and .page == 1)
    < "${queries}" | grep -q . \
   || fail "Loki page records do not carry cursor bounds and retry history"
 
+# 9. Phase scoping (D-P1-8) follows the pre-traffic baggage proof and nothing
+#    else. Without a verified proof no query names perf_phase; with one, the
+#    request-duration metric, the Tempo search and the Loki query select the
+#    measured phase -- and the runtime metrics, which never carry that label,
+#    stay unscoped rather than going empty.
+jq -e 'select(.query | tostring | test("perf_phase|perf\\.phase"))' < "${queries}" | grep -q . \
+  && fail "a run without a baggage proof selected a phase"
+scoped="${test_root}/phase-scoped"
+write_package "${scoped}"
+mkdir -p "${scoped}/analysis"
+printf '{"schemaVersion":"baggage-contract-v1","version":"perflab-baggage-v1","state":"verified","phaseScoped":true}\n' \
+  > "${scoped}/analysis/baggage-contract.json"
+run_capture "${scoped}" Warning
+scoped_queries="${scoped}/telemetry/queries.ndjson"
+jq -e 'select(.artifact == "telemetry/metrics/request_duration.json") | .query | contains("perf_phase=\"measure\"")' \
+   < "${scoped_queries}" | grep -q true || fail "the request-duration query did not select the measured phase"
+jq -e 'select(.backend == "tempo") | .query | contains("span.perf.phase = \"measure\"")' \
+   < "${scoped_queries}" | grep -q true || fail "the Tempo search did not select the measured phase"
+jq -e 'select(.backend == "loki") | .query | contains("| perf_phase=\"measure\"")' \
+   < "${scoped_queries}" | grep -q true || fail "the Loki query did not select the measured phase"
+jq -e 'select(.artifact == "telemetry/metrics/process_cpu.json") | .query | contains("perf_phase")' \
+   < "${scoped_queries}" | grep -q true && fail "a runtime metric was phase-scoped; it carries no phase label"
+
 echo "capture-evidence empty-signal tests passed"

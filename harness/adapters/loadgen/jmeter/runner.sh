@@ -488,6 +488,8 @@ run_once_command() {
   append_property "${PERFLAB_JMETER_PROP_DURATION_SECONDS:-perf.duration_seconds}" "${PERFLAB_DURATION_SECONDS:-}"
   append_property "${PERFLAB_JMETER_PROP_RUN_ID:-perf.run_id}" "${PERF_RUN_ID:-}"
   append_property "${PERFLAB_JMETER_PROP_SCENARIO:-perf.scenario}" "${PERF_SCENARIO:-}"
+  # The plan sends this phase as request baggage (perflab-baggage-v1, D-P1-8).
+  append_property "perf.phase" "${phase}"
   local profile="${PERFLAB_PROFILE:-steady}" target_rps target_per_minute
   case "${profile}" in
     open|arrival|capacity|knee)

@@ -134,6 +134,16 @@ case "${PERFLAB_CONTINUOUS_PROFILING:-0}" in
 esac
 # Compose interpolates this; normalize aliases so the container sees 0 or 1.
 export PERFLAB_CONTINUOUS_PROFILING="${continuous_profiling}"
+# Deploy-time telemetry injection into owned .NET services (D-P1-3, D-P1-8):
+# the lab compose file mounts the startup-hook assembly and sets
+# DOTNET_STARTUP_HOOKS and ASPNETCORE_HOSTINGSTARTUPASSEMBLIES from these. On
+# by default; 0 sets both empty, which the runtime treats as no hook, and the
+# baggage probe then reports the contract as not advertised.
+case "${PERFLAB_TELEMETRY_INJECTION:-1}" in
+  1|true|yes|on) ;;
+  0|false|no|off) export PERFLAB_INJECTION_STARTUP_HOOK="" PERFLAB_INJECTION_HOSTING_STARTUP="" ;;
+  *) echo "PERFLAB_TELEMETRY_INJECTION must be 1/true or 0/false; received '${PERFLAB_TELEMETRY_INJECTION}'." >&2; exit 1 ;;
+esac
 # Capture operator intent BEFORE defaulting. A missing env is how a per-scenario
 # catalog policy can still be selected; defaulting first made every run look like
 # the operator asked for cpu and the catalog field was dead.

@@ -12,6 +12,8 @@ source "${HARNESS_ROOT}/core/lib/common.sh"   # json_escape, compose_network, in
 
 artifact_dir="${1:?run.sh <artifact-dir> <phase>}"
 phase="${2:?phase required (warmup|measure|diagnostic)}"
+# wrk.lua sends this phase as request baggage (perflab-baggage-v1, D-P1-8).
+export PERF_PHASE="${phase}"
 mkdir -p "${artifact_dir}/benchmark"
 
 if [[ "${PERF_WORKLOAD_KIND:-request}" == "journey" || "${PERF_WORKLOAD_KIND:-request}" == "mix" ]]; then
@@ -57,7 +59,7 @@ else
   fi
   wrk_run() {
     MSYS_NO_PATHCONV=1 docker run --rm "${network_args[@]}" \
-      -e PERF_METHOD -e PERF_PATH -e PERF_BODY -e PERF_RUN_ID -e PERF_HEADERS \
+      -e PERF_METHOD -e PERF_PATH -e PERF_BODY -e PERF_RUN_ID -e PERF_PHASE -e PERF_HEADERS \
       -v "${script_dir}:/lab:ro" \
       "${wrk_image}" "$@"
   }

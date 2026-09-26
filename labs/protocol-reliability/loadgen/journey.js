@@ -12,6 +12,7 @@ import {
   recordOperation,
   requirePartition,
 } from '../../../harness/adapters/loadgen/k6/journey.js';
+import { withPerfBaggage } from '../../../harness/adapters/loadgen/k6/baggage.js';
 
 const baseUrl = (__ENV.PERF_BASE_URL || __ENV.BASE_URL || 'http://127.0.0.1:18080').replace(/\/$/, '');
 const runId = __ENV.PERF_RUN_ID || 'k6-security-journey';
@@ -27,11 +28,11 @@ export const options = {
 
 function request(operation, method, path, body, headers, expected) {
   const response = http.request(method, `${baseUrl}${path}`, body, {
-    headers: {
+    headers: withPerfBaggage({
       'Content-Type': 'application/json',
       'X-Perf-Run-Id': runId,
       ...headers,
-    },
+    }, runId),
     tags: { name: `operation::${operation}` },
   });
   recordAttempt(operation, response, false, expected);

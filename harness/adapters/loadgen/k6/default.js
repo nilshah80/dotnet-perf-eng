@@ -1,6 +1,7 @@
 import http from 'k6/http';
 import { Counter, Trend } from 'k6/metrics';
 import { mixEnabled, pickRequest } from './mix.js';
+import { withPerfBaggage } from './baggage.js';
 
 // Shared DEFAULT k6 workload: one stateless request per iteration, driven
 // entirely by the PERF_* env contract. It is the k6 counterpart of the shared
@@ -44,10 +45,10 @@ export const options = {
 };
 
 const params = {
-  headers: {
+  headers: withPerfBaggage({
     Accept: 'application/json',
     'X-Perf-Run-Id': runId,
-  },
+  }, runId),
 };
 
 if (method === 'POST' || method === 'PUT' || method === 'PATCH') {

@@ -32,6 +32,7 @@ PY
 "$root/harness/adapters/loadgen/k6/journey-normalization-test.sh"
 "$root/harness/adapters/loadgen/k6/journey-behaviour-test.sh"
 "$root/harness/adapters/loadgen/k6/profile-shape-test.sh"
+"$root/harness/adapters/loadgen/k6/baggage-test.sh"
 
 # Behaviour that the release claims and that a reader cannot verify by eye: each
 # of these pins a rule that was once wrong in a way no one noticed, so the test
@@ -41,6 +42,8 @@ PY
 "$root/harness/adapters/runtime/dotnet/stacks-staging-test.sh"
 "$root/harness/adapters/runtime/dotnet/collection-rules-test.sh"
 "$root/harness/adapters/runtime/dotnet/capture-test.sh"
+"$root/harness/adapters/runtime/dotnet/injection/injection-test.sh"
+"$root/harness/adapters/observability/grafana/capture-span-profiles-test.sh"
 "$root/harness/core/lib/target-lifecycle-test.sh"
 "$root/harness/core/lib/lab-context-pyroscope-test.sh"
 "$root/harness/core/lib/catalog-equivalence-test.sh"
@@ -48,6 +51,7 @@ PY
 "$root/harness/core/lib/capability-qualification-test.sh"
 "$root/harness/core/lib/backend-auth-test.sh"
 "$root/harness/core/lib/remote-correlation-test.sh"
+"$root/harness/core/lib/baggage-contract-test.sh"
 "$root/harness/core/lib/soak-session-test.sh"
 "$root/harness/core/lib/fault-proof-test.sh"
 "$root/harness/core/lib/distributed-merge-test.sh"

@@ -1,6 +1,7 @@
 import http from 'k6/http';
 import { Counter, Trend } from 'k6/metrics';
 import { mixEnabled, pickRequest } from '../../../harness/adapters/loadgen/k6/mix.js';
+import { withPerfBaggage } from '../../../harness/adapters/loadgen/k6/baggage.js';
 
 // eCommerce k6 workload. The endpoints are JWT-protected, so this per-lab script
 // authenticates ONCE in setup() and sends the bearer token on every request.
@@ -64,11 +65,11 @@ export default function (data) {
   if (mixEnabled) { const r = pickRequest(); m = r.method; p = r.path; b = r.body; }
   const sendsBody = m === 'POST' || m === 'PUT' || m === 'PATCH';
   const params = {
-    headers: {
+    headers: withPerfBaggage({
       Accept: 'application/json',
       'X-Perf-Run-Id': runId,
       Authorization: `Bearer ${data.token}`,
-    },
+    }, runId),
   };
   if (sendsBody) {
     params.headers['Content-Type'] = 'application/json';

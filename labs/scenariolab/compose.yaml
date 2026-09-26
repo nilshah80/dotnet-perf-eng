@@ -117,6 +117,15 @@ services:
     # container limits inside the Docker VM's 8 GiB budget.
     mem_limit: 4g
 
+  # Deploy-time telemetry injection (D-P1-3, D-P1-8): stages the startup-hook
+  # assembly in a volume the .NET services mount read-only. The application is
+  # not changed or rebuilt; see harness/adapters/runtime/dotnet/injection.
+  telemetry-injection:
+    build:
+      context: ../../harness/adapters/runtime/dotnet/injection
+    volumes:
+      - telemetry-injection:/mnt/injection
+
   diagnostic-permissions:
     image: alpine:3.22
     user: "0:0"
@@ -209,13 +218,19 @@ services:
       COMPlus_DbgEnableMiniDump: ${PERFLAB_DBG_ENABLE_MINIDUMP:-0}
       DOTNET_DbgMiniDumpType: "3"
       DOTNET_DbgMiniDumpName: /diag/crash-dumps/coredump.%p
+      # Telemetry injection; the harness sets both empty to opt out.
+      DOTNET_STARTUP_HOOKS: ${PERFLAB_INJECTION_STARTUP_HOOK-/opt/perflab/injection/PerfLab.DotNet.Injection.dll}
+      ASPNETCORE_HOSTINGSTARTUPASSEMBLIES: ${PERFLAB_INJECTION_HOSTING_STARTUP-PerfLab.DotNet.Injection}
       DOTNET_gcServer: "1"
       DOTNET_GCHeapHardLimitPercent: "50"
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
       - diagnostic-ipc:/diag
+      - telemetry-injection:/opt/perflab/injection:ro
     depends_on:
+      telemetry-injection:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -270,11 +285,17 @@ services:
       COMPlus_DbgEnableMiniDump: ${PERFLAB_DBG_ENABLE_MINIDUMP:-0}
       DOTNET_DbgMiniDumpType: "3"
       DOTNET_DbgMiniDumpName: /diag/crash-dumps/coredump.%p
+      # Telemetry injection; the harness sets both empty to opt out.
+      DOTNET_STARTUP_HOOKS: ${PERFLAB_INJECTION_STARTUP_HOOK-/opt/perflab/injection/PerfLab.DotNet.Injection.dll}
+      ASPNETCORE_HOSTINGSTARTUPASSEMBLIES: ${PERFLAB_INJECTION_HOSTING_STARTUP-PerfLab.DotNet.Injection}
       DOTNET_gcServer: "1"
       DOTNET_GCHeapHardLimitPercent: "60"
     volumes:
       - diagnostic-ipc:/diag
+      - telemetry-injection:/opt/perflab/injection:ro
     depends_on:
+      telemetry-injection:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       rabbitmq:
@@ -341,6 +362,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  telemetry-injection:
   postgres-data:
   redis-data:
   rabbitmq-data:

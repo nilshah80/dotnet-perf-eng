@@ -4,6 +4,7 @@ import grpc from 'k6/net/grpc';
 import ws from 'k6/ws';
 import { check } from 'k6';
 import { Counter } from 'k6/metrics';
+import { withPerfBaggage } from '../../../harness/adapters/loadgen/k6/baggage.js';
 const actualStatusErrors = new Counter('perflab_http_non_2xx_3xx');
 const actualTransportErrors = new Counter('perflab_http_transport_errors');
 function recordHttpOutcome(response) {
@@ -102,7 +103,7 @@ function signalR() {
 
 function messaging() {
   const response = http.post(`${baseUrl}/api/reliability/messages?tenant=protocol`, null, {
-    headers: { 'X-Perf-Run-Id': runId },
+    headers: withPerfBaggage({ 'X-Perf-Run-Id': runId }, runId),
   });
   recordHttpOutcome(response);
   const ok = check(response, {

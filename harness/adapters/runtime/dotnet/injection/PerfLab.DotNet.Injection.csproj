@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Deploy-time telemetry injection for a .NET target (D-P1-3, D-P1-8). Nothing
+    in the application changes: DOTNET_STARTUP_HOOKS loads this assembly before
+    Main, and ASPNETCORE_HOSTINGSTARTUPASSEMBLIES adds its middleware to an
+    ASP.NET Core pipeline. The lab's compose file delivers it through a volume,
+    as a platform would through an init container.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>PerfLab.DotNet.Injection</AssemblyName>
+    <RootNamespace>PerfLab.DotNet.Injection</RootNamespace>
+    <!-- The startup hook resolves its dependencies from its own directory. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <!-- Pyroscope matches the pinned pyroscope-dotnet native profiler. -->
+    <PackageReference Include="Pyroscope" Version="1.5.1" />
+    <PackageReference Include="Pyroscope.OpenTelemetry" Version="0.5.1" />
+  </ItemGroup>
+</Project>

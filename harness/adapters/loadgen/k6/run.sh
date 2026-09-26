@@ -10,6 +10,8 @@ source "${HARNESS_ROOT}/core/lib/common.sh"   # jqd, loadgen_script
 
 artifact_dir="${1:?run.sh <artifact-dir> <phase>}"
 phase="${2:?phase required (warmup|measure|diagnostic)}"
+# baggage.js stamps this phase on every request (perflab-baggage-v1, D-P1-8).
+export PERF_PHASE="${phase}"
 mkdir -p "${artifact_dir}/benchmark"
 # The workload script is the lab's own k6.js if it ships one, else the shared
 # default.js. run.sh (this file, the measurement + evidence contract) is always

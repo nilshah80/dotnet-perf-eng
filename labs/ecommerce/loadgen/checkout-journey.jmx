@@ -52,6 +52,15 @@ if (port < 0) {
 }
 vars.put("perf.port", String.valueOf(port))
 vars.put("perf.runId", props.get("perf.run_id") ?: (System.getenv("PERF_RUN_ID") ?: ""))
+// perflab-baggage-v1 (D-P1-8): the request's run and phase as W3C baggage, so the
+// application stamps them on its spans, logs and request metrics. A value the
+// application would reject is not sent.
+def baggageRunId = vars.get("perf.runId")
+def baggagePhase = props.get("perf.phase") ?: (System.getenv("PERF_PHASE") ?: "")
+def baggageMembers = []
+if (baggageRunId ==~ /[A-Za-z0-9._:-]{1,128}/) { baggageMembers << "perf.run.id=" + baggageRunId }
+if (["warmup", "measure", "diagnostic"].contains(baggagePhase)) { baggageMembers << "perf.phase=" + baggagePhase }
+vars.put("perf.baggage", baggageMembers.join(","))
 vars.put("perf.loginUser", props.get("perf.login_user") ?: (System.getenv("PERF_LOGIN_USER") ?: "user1"))
 vars.put("perf.loginPassword", props.get("perf.login_password") ?: (System.getenv("PERF_LOGIN_PASSWORD") ?: "Password123!"))
 def kind = props.get("perf.workload_kind") ?: (System.getenv("PERF_WORKLOAD_KIND") ?: "journey")
@@ -78,6 +87,10 @@ if (sampler != null && "op::login".equals(sampler.getName())) {
             <elementProp name="" elementType="Header">
               <stringProp name="Header.name">X-Perf-Run-Id</stringProp>
               <stringProp name="Header.value">${perf.runId}</stringProp>
+            </elementProp>
+            <elementProp name="" elementType="Header">
+              <stringProp name="Header.name">baggage</stringProp>
+              <stringProp name="Header.value">${perf.baggage}</stringProp>
             </elementProp>
           </collectionProp>
         </HeaderManager>

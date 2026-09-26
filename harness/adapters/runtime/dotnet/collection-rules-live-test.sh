@@ -88,6 +88,22 @@ printf "%s" "$count"
 }
 [[ "$(source_count)" == "0" ]] || fail "rule egress was not empty before its trigger"
 
+# The monitor attaches when the runtime starts, before Kestrel listens. The
+# deploy-time telemetry injection widened that gap enough that the one
+# permitted request reached Docker's port proxy first and came back empty.
+# Wait for the listening socket inside the container instead: that is not an
+# ASP.NET request, so the rule's single trigger is still the request below.
+listening=0
+for _ in $(seq 1 60); do
+  if compose exec -T api-a sh -c 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null' |
+      awk '$2 ~ /:1F90$/ && $4 == "0A" { found = 1 } END { exit !found }'; then
+    listening=1
+    break
+  fi
+  sleep 1
+done
+[[ "${listening}" == "1" ]] || { compose logs api-a >&2; fail "api-a never listened on 8080"; }
+
 # This is the one application request permitted by the configured
 # AspNetRequestCount trigger. Polling afterward talks only to monitor.
 curl -fsS --max-time 10 "${api}/api/reliability/status" >/dev/null

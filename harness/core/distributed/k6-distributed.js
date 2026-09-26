@@ -25,12 +25,19 @@ const overflow = new Counter('perflab_distributed_latency_bucket_overflow');
 
 export const options = { discardResponseBodies: true };
 
+// perflab-baggage-v1 (D-P1-8), inlined: this workload is a single closed file.
+// A shard always runs the measured phase.
+const perfBaggage = /^[A-Za-z0-9._:-]{1,128}$/.test(runId || '')
+  ? { baggage: `perf.run.id=${runId},perf.phase=measure` }
+  : {};
+
 export default function () {
   const path = `/api/reliability/distributed/${encodeURIComponent(partition)}/${encodeURIComponent(shardId)}/${__VU}/${__ITER}`;
   const response = http.get(`${origin}${path}`, {
     headers: {
       'X-Perf-Run-Id': runId,
       'X-Perf-Data-Partition': partition,
+      ...perfBaggage,
     },
     tags: { name: 'operation::distributed-request' },
   });

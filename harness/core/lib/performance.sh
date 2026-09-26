@@ -281,6 +281,62 @@ performance_remote_correlation_probe() {
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${proof_file}"
 }
 
+# perflab-baggage-v1 (D-P1-8). A target advertises the contract by echoing the
+# request's W3C baggage from its probe path; for a .NET lab the deploy-time
+# injection answers it (harness/adapters/runtime/dotnet/injection), so nothing
+# in the application changes. The probe never fails a run: a target that does
+# not answer keeps run, service and window scoping. Phase scoping also needs a
+# generator that sends the baggage: a real browser's page requests do not.
+# performance_baggage_probe <base-url> <run-id> <proof-file>
+performance_baggage_probe() {
+  local base="$1" run_id="$2" proof_file="$3"
+  local probe_path="/perf/baggage" version="perflab-baggage-v1"
+  local state="not-advertised" reason="" scoped=false scope_reason="" scheme remainder authority url response code
+  if [[ ! "${run_id}" =~ ^[A-Za-z0-9._:-]{1,128}$ ]]; then
+    reason="run id is not a bounded identifier"
+  else
+    case "${base}" in
+      http://*|https://*)
+        scheme="${base%%://*}"; remainder="${base#*://}"; authority="${remainder%%/*}"
+        if [[ -z "${authority}" || "${authority}" == *'@'* || "${authority}" == *'?'* || "${authority}" == *'#'* ]]; then
+          reason="target URL has no valid origin"
+        else
+          url="${scheme}://${authority}${probe_path}"
+          response="$(mktemp "${TMPDIR:-/tmp}/perflab-baggage-probe.XXXXXX")" || return 1
+          code="$(target_curl -sS --max-time 5 --max-filesize 65536 -o "${response}" -w '%{http_code}' \
+            -H "baggage: perf.run.id=${run_id},perf.phase=measure" "${url}" 2>/dev/null || true)"
+          if [[ "${code}" == "200" ]] && jqd -e --arg run "${run_id}" --arg version "${version}" \
+              'type == "object" and .contractVersion == $version and .runId == $run and .phase == "measure"' \
+              < "${response}" >/dev/null 2>&1; then
+            state="verified"
+          elif [[ "${code}" == "200" ]]; then
+            state="refused"; reason="the probe answered without echoing the run, the phase and ${version}"
+          else
+            reason="the probe answered HTTP ${code:-000}"
+          fi
+          rm -f "${response}"
+        fi
+        ;;
+      *) reason="target URL is not absolute HTTP(S)" ;;
+    esac
+  fi
+  if [[ "${state}" == "verified" ]]; then
+    case "${load_generator:-}:${PERF_PROTOCOL:-}" in
+      *:browser-synthetic) scope_reason="browser page requests carry no baggage" ;;
+      k6:*|wrk:*|jmeter:*) scoped=true ;;
+      *) scope_reason="generator ${load_generator:-unknown} does not send baggage" ;;
+    esac
+  else
+    scope_reason="the target did not verify ${version}"
+  fi
+  mkdir -p "$(dirname "${proof_file}")"
+  printf '{"schemaVersion":"baggage-contract-v1","version":"%s","state":"%s","reason":"%s","probePath":"%s","runId":"%s","phaseScoped":%s,"phaseScopeReason":"%s","checkedAt":"%s"}\n' \
+    "${version}" "${state}" "$(json_escape "${reason}")" "${probe_path}" \
+    "$(json_escape "${run_id}")" "${scoped}" "$(json_escape "${scope_reason}")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    > "${proof_file}"
+  echo "baggage contract ${version}: ${state}${reason:+ (${reason})}; phase-scoped queries: ${scoped}" >&2
+}
+
 # A measurement-window attestation is target-owned evidence for the concrete
 # process generation that served a run at the load boundary. It is deliberately
 # separate from remote-correlation: correlation proves the run tag; this probe

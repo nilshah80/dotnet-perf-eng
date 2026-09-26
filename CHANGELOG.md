@@ -12,6 +12,15 @@ No version has been tagged yet. The entries below describe the state of `main`.
 
 ### Added
 
+- Deploy-time telemetry injection for .NET targets, with no application
+  change: a startup-hook assembly that the lab compose files stage through an
+  init container. It carries the `perflab-baggage-v1` request contract
+  (D-P1-8): every generator sends the run and phase as W3C baggage, the
+  application's request span, log scope and request-duration metric carry
+  them, and capture selects the measured phase only after a pre-traffic probe
+  verifies the target echoes it. It also links spans to CPU profiles (D-P1-3):
+  each local root span carries `pyroscope.profile.id`, and capture keeps the
+  flame graph of exactly the captured slow traces' spans.
 - A ports-and-adapters harness core driving measurement, evidence capture,
   normalization and a read-only AI diagnosis phase.
 - A .NET 10 reference project — a synthetic commerce API plus an order worker —

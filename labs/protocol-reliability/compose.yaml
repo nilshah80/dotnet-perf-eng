@@ -19,6 +19,9 @@ x-api: &api
     COMPlus_DbgEnableMiniDump: ${PERFLAB_DBG_ENABLE_MINIDUMP:-0}
     DOTNET_DbgMiniDumpType: "3"
     DOTNET_DbgMiniDumpName: /diag/crash-dumps/coredump.%p
+    # Telemetry injection; the harness sets both empty to opt out.
+    DOTNET_STARTUP_HOOKS: ${PERFLAB_INJECTION_STARTUP_HOOK-/opt/perflab/injection/PerfLab.DotNet.Injection.dll}
+    ASPNETCORE_HOSTINGSTARTUPASSEMBLIES: ${PERFLAB_INJECTION_HOSTING_STARTUP-PerfLab.DotNet.Injection}
     PYROSCOPE_SERVER_ADDRESS: http://lgtm:4040
     OTEL_EXPORTER_OTLP_ENDPOINT: http://lgtm:4317
     OTEL_METRIC_EXPORT_INTERVAL: "5000"
@@ -51,6 +54,15 @@ services:
       - "127.0.0.1:19090:9090"
     volumes:
       - lgtm-data:/data
+
+  # Deploy-time telemetry injection (D-P1-3, D-P1-8): stages the startup-hook
+  # assembly in a volume the .NET services mount read-only. The application is
+  # not changed or rebuilt; see harness/adapters/runtime/dotnet/injection.
+  telemetry-injection:
+    build:
+      context: ../../harness/adapters/runtime/dotnet/injection
+    volumes:
+      - telemetry-injection:/mnt/injection
 
   diagnostic-permissions:
     image: alpine:3.22
@@ -116,7 +128,10 @@ services:
       DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
     volumes:
       - diagnostic-ipc:/diag
+      - telemetry-injection:/opt/perflab/injection:ro
     depends_on:
+      telemetry-injection:
+        condition: service_completed_successfully
       lgtm:
         condition: service_started
       dotnet-monitor:
@@ -134,7 +149,10 @@ services:
       DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
     volumes:
       - diagnostic-ipc-b:/diag
+      - telemetry-injection:/opt/perflab/injection:ro
     depends_on:
+      telemetry-injection:
+        condition: service_completed_successfully
       lgtm:
         condition: service_started
       dotnet-monitor-b:
@@ -163,6 +181,7 @@ services:
       - ../../artifacts:/artifacts
 
 volumes:
+  telemetry-injection:
   lgtm-data:
   diagnostic-ipc:
   diagnostic-ipc-b:

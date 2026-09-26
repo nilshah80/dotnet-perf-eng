@@ -168,7 +168,8 @@
       "files": [
         "labs/ecommerce/loadgen/journey.js",
         "labs/ecommerce/loadgen/checkout-journey.jmx",
-        "harness/adapters/loadgen/k6/journey.js"
+        "harness/adapters/loadgen/k6/journey.js",
+        "harness/adapters/loadgen/k6/baggage.js"
       ],
       "operations": [
         "login",

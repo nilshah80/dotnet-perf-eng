@@ -46,7 +46,9 @@ PERFLAB_METRIC_ROLES=(
   'working_set|range|dotnet_process_memory_working_set_bytes{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
   'gc_heap|range|dotnet_gc_last_collection_heap_size_bytes{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
   'thread_pool_queue|range|dotnet_thread_pool_queue_length_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
-  'request_duration|range|http_server_request_duration_seconds_count{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
+  # $PHASE selects the measured phase when the target verified perflab-baggage-v1
+  # (D-P1-8); only the request-duration metric carries that label.
+  'request_duration|range|http_server_request_duration_seconds_count{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"$PHASE}'
   'gc_allocation_rate|range|rate(dotnet_gc_heap_allocated_bytes_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[$RATE_WINDOW])'
   'gc_committed|range|dotnet_gc_last_collection_memory_committed_size_bytes{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
   'gc_collections|range|dotnet_gc_collections_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'

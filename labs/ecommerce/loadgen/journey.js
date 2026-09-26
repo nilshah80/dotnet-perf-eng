@@ -9,6 +9,7 @@ import {
   recordOperation,
   requirePartition,
 } from '../../../harness/adapters/loadgen/k6/journey.js';
+import { withPerfBaggage } from '../../../harness/adapters/loadgen/k6/baggage.js';
 
 // Ecommerce checkout journey (login, browse, create, pay, poll, verify).
 // Independently written for this lab. Auth, extraction, think time, and
@@ -32,7 +33,7 @@ function headers(token) {
   if (token) {
     value.Authorization = `Bearer ${token}`;
   }
-  return { headers: value, tags: {} };
+  return { headers: withPerfBaggage(value, runId), tags: {} };
 }
 
 function tagged(params, op) {

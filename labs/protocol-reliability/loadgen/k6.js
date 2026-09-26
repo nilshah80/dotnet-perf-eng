@@ -9,6 +9,7 @@ function recordHttpOutcome(response) {
 }
 
 import { expectedStatuses, setResponseCallback } from 'k6/http';
+import { withPerfBaggage } from '../../../harness/adapters/loadgen/k6/baggage.js';
 
 const baseUrl = __ENV.PERF_BASE_URL || 'http://127.0.0.1:18080';
 const method = (__ENV.PERF_METHOD || 'GET').toUpperCase();
@@ -28,7 +29,7 @@ export const options = {
 
 export default function () {
   const response = http.request(method, `${baseUrl}${path}`, body || null, {
-    headers: { 'X-Perf-Run-Id': runId },
+    headers: withPerfBaggage({ 'X-Perf-Run-Id': runId }, runId),
     tags: { name: `operation::${__ENV.PERF_SCENARIO || 'P00'}` },
   });
   recordHttpOutcome(response);

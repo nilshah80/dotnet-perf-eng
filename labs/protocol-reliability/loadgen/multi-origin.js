@@ -13,6 +13,7 @@ import {
   recordAttempt,
   recordOperation,
 } from '../../../harness/adapters/loadgen/k6/journey.js';
+import { withPerfBaggage } from '../../../harness/adapters/loadgen/k6/baggage.js';
 
 const primaryRequests = new Counter('multi_origin_primary_requests');
 const secondaryRequests = new Counter('multi_origin_secondary_requests');
@@ -80,7 +81,7 @@ const secondaryChurnURL = allowedRoute(allowedOrigins, secondaryOrigin,
 
 function request(operation, url) {
   const response = http.get(url, {
-    headers: { 'X-Perf-Run-Id': runId },
+    headers: withPerfBaggage({ 'X-Perf-Run-Id': runId }, runId),
     tags: { name: `operation::${operation}` },
   });
   recordAttempt(operation, response, false, value => value.status === 200);
