@@ -762,7 +762,7 @@ json="$(awk \
        else notes[++nn]=sprintf("error_rate=%.3f -- the system is failing requests (see the gate)%s.", errate+0, (bi>0 ? "; the verdict names the resource that fails them" : ""));
      }
      if (has(dropped) && dropped+0>0) notes[++nn]=sprintf("%d dropped iteration(s) -- scheduled load was not delivered; inspect generator capacity, connection/setup time and target pressure before identifying the limit.", dropped+0);
-     if (tpq_sat && cpu_sat) notes[++nn]="thread-pool queue AND CPU are both saturated -- the queue is most likely CPU starvation, not sync-over-async blocking.";
+     if (tpq_sat && cpu_sat && !tp_blocked && !up_sat) notes[++nn]="thread-pool queue AND CPU are both saturated -- the queue is most likely CPU starvation, not sync-over-async blocking.";
      if (tp_blocked && cpu_sat) notes[++nn]=sprintf("the thread pool grew to %.0f threads on %s core(s) beside the saturated CPU: some work also blocks pool threads synchronously; stacks show the blocking call.", threadpeak+0, sprintf("%.3g",cpucount+0));
      # Only when nothing else explains the queue. A saturated upstream pool
      # already accounts for parked threads, and emitting both notes tells the

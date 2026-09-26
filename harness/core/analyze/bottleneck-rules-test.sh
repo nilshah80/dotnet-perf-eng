@@ -590,6 +590,17 @@ jq '.data.result[0].values |= map(.[1] = "5")' "${dir}/telemetry/metrics/thread_
 classify "${dir}"
 [[ "$(verdict "${report}")" != "threadpool-starved" ]] || fail "five threads on one core were called blocked"
 
+# Blocked pool threads beside a saturated CPU keep their own note; the queue is
+# not also called plain CPU starvation, which would contradict it.
+report="$(build_run blocked-cpu 50 1.0 20 "")"; dir="$(dirname "$(dirname "${report}")")"
+for f in thread_count:140 cpu_count:1; do
+  jq --arg v "${f#*:}" '.data.result[0].values |= map(.[1] = $v)' "${dir}/telemetry/metrics/${f%%:*}.json" > "${dir}/m.json" \
+    && mv "${dir}/m.json" "${dir}/telemetry/metrics/${f%%:*}.json"
+done
+classify "${dir}"
+notes "${report}" | grep -q "some work also blocks pool threads synchronously" || fail "blocked threads beside the CPU were not noted: $(notes "${report}")"
+! notes "${report}" | grep -q "most likely CPU starvation" || fail "the blocked pool was also called CPU starvation"
+
 # S07: a query per item of a list (N+1), each on its own leased connection.
 report="$(build_run amplified 50 0.5 0 "")"; dir="$(dirname "$(dirname "${report}")")"
 mkdir -p "${dir}/dependencies"
