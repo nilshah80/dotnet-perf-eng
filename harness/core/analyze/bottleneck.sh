@@ -823,7 +823,13 @@ json="$(awk \
      if (has(rbconns) && has(reqtotal) && reqtotal+0>0 && rbconns+0>=100 && (rbconns+0)/(reqtotal+0)>=0.5) notes[++nn]=sprintf("%d RabbitMQ connections and %d channels opened for %d requests (%.2f per request): the client opens a connection per publish instead of reusing one connection and its channels.", rbconns+0, rbchan+0, reqtotal+0, (rbconns+0)/(reqtotal+0));
      if (span_dom && verdict != "dependency-bound-" span_kind) notes[++nn]=sprintf("%s, though %s ranks higher.", span_cover(), verdict);
      # Dependency amplification (S13: 100 sequential Redis reads per request).
-     if (depsys != "" && span_per_req >= AMPLIFY) notes[++nn]=sprintf("dependency amplification: each request makes ~%.0f %s calls%s -- calls issued one after another add their round trips; batch or pipeline them, or fetch the data once.", span_per_req, span_target, (dep_ms_req>=0 ? sprintf(" (%.1f ms per request in their spans)", dep_ms_req) : ""));
+     # Redis counts every key lookup itself, so its count per request is the
+     # authority; spans are sampled and the application exporter drops them when
+     # it cannot keep up (S13: span metrics saw 18-63 of the 100 lookups).
+     lookups_req = (cache_ops>=0 && has(reqtotal) && reqtotal+0>0) ? cache_ops/(reqtotal+0) : -1;
+     if (lookups_req >= AMPLIFY) notes[++nn]=sprintf("dependency amplification: Redis served ~%.0f key lookups per request (%d for %d requests) -- lookups issued one after another add their round trips; fetch them in one call (MGET or pipelining), or cache the assembled value.", lookups_req, cache_ops, reqtotal+0);
+     else if (depsys != "" && span_per_req >= AMPLIFY) notes[++nn]=sprintf("dependency amplification: each request makes ~%.0f %s calls%s -- calls issued one after another add their round trips; batch or pipeline them, or fetch the data once.", span_per_req, span_target, (dep_ms_req>=0 ? sprintf(" (%.1f ms per request in their spans)", dep_ms_req) : ""));
+     if (depsys == "redis" && span_per_req>=0 && lookups_req>=1 && span_per_req < 0.8*lookups_req) notes[++nn]=sprintf("span metrics saw ~%.0f Redis calls per request against the ~%.0f key lookups per request Redis served: spans were lost before Tempo (the application span exporter drops spans when it cannot keep up), so the Redis share of server time (%.0f%%) is a lower bound.", span_per_req, lookups_req, dshare*100);
      if (exc_per_req>=EXC_NOTE) notes[++nn]=sprintf("exception pressure: ~%.0f exceptions per request (peak %.0f/s, mostly %s) -- every throw captures a stack trace and unwinds; the exceptions profile names the throwing call site.", exc_per_req, excpeak+0, (ENVIRON["BN_EXC_TYPE"]=="" ? "of an unknown type" : ENVIRON["BN_EXC_TYPE"]));
      if (nsatres>=2) notes[++nn]=sprintf("%d resources saturated at once (%s); primary bottleneck(s): %s. Address them together, not just the top-scored one; see resources.* for each.", nsatres, satreslist, primlist);
 

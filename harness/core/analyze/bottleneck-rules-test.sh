@@ -558,6 +558,21 @@ jq -e '.verdict != "cpu-bound" and .verdict != "wait-bound" and .resources.cpu.u
        and any(.notes[]; test("measured window \\(12 s\\) is shorter than the 20 s rate window"))' "${report}" >/dev/null \
   || fail "rates reaching before a short window were classified: $(jq -c '{verdict,notes}' "${report}")"
 
+# S13: Redis counts its own lookups (100 per request) while span metrics saw a
+# fraction of them: the lookups are the amplification, the spans are marked lost.
+report="$(build_run redis-lookups 1125 7.8 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+mkdir -p "${dir}/dependencies"
+printf 'keyspace_hits:6828700\r\nkeyspace_misses:0\r\n' > "${dir}/dependencies/redis-info.txt"
+observe "${dir}" http.requests.total 68287
+spans "${dir}" dependency_time 50 SPAN_KIND_CLIENT:db_system=redis:8
+spans "${dir}" dependency_calls 259 SPAN_KIND_CLIENT:db_system=redis:4768
+classify "${dir}"
+for expected in "dependency amplification: Redis served ~100 key lookups per request (6828700 for 68287 requests)" \
+    "span metrics saw ~18 Redis calls per request against the ~100 key lookups per request Redis served: spans were lost before Tempo"; do
+  notes "${report}" | grep -qF "${expected}" || fail "missing Redis lookup note '${expected}': $(notes "${report}")"
+done
+! notes "${report}" | grep -q "each request makes ~18 redis calls" || fail "the sampled span count was stated beside the Redis lookups"
+
 # S02: a pool grown far past the cores at low CPU is threads blocked on work
 # (sync over async); the queue may only spike once the pool has grown.
 report="$(build_run blocked 294 0.48 0 "")"; dir="$(dirname "$(dirname "${report}")")"
