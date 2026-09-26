@@ -410,8 +410,8 @@ grep -q 'HTTP 500: Unable to collect call stacks: profiler is not loaded' "${tes
 [[ ! -e "${problem_output}/runtime/api/stacks.txt" ]] \
   || { echo 'stacks-problem: the error body was kept as stacks.txt' >&2; exit 1; }
 # /stacks is read-only, so a server error is retried before the capture fails.
-[[ "$(grep -c 'monitor_curl:.*/stacks' "${test_root}/stacks-problem-calls")" == 3 ]] \
-  || { echo "stacks-problem: a persistent 500 was not retried three times: $(cat "${test_root}/stacks-problem-calls")" >&2; exit 1; }
+[[ "$(grep -c 'monitor_curl:.*/stacks' "${test_root}/stacks-problem-calls")" == 6 ]] \
+  || { echo "stacks-problem: a persistent 500 was not retried six times: $(cat "${test_root}/stacks-problem-calls")" >&2; exit 1; }
 
 # S03: one empty HTTP 500, then the stacks: the capture succeeds.
 flaky_output="${test_root}/stacks-flaky"
@@ -426,6 +426,8 @@ PATH="${test_root}/bin:${PATH}" \
   || { echo "stacks-flaky: a transient 500 failed the capture: $(cat "${test_root}/stacks-flaky.err")" >&2; exit 1; }
 grep -q 'Fixture.Api!Program.Main' "${flaky_output}/runtime/api/stacks.txt" \
   || { echo 'stacks-flaky: the retried stacks were not kept' >&2; exit 1; }
+grep -q 'captured on attempt 2 of 6' "${test_root}/stacks-flaky.err" \
+  || { echo "stacks-flaky: the attempt that succeeded was not reported: $(cat "${test_root}/stacks-flaky.err")" >&2; exit 1; }
 ! grep -q 'No such file' "${test_root}/stacks-flaky.err" \
   || { echo "stacks-flaky: the empty error body was read as a file: $(cat "${test_root}/stacks-flaky.err")" >&2; exit 1; }
 

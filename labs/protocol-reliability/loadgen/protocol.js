@@ -45,8 +45,13 @@ function grpcPing() {
   client.close();
 }
 
+// The WebSocket upgrade carries the run's baggage like every HTTP request: with
+// the baggage contract verified, the server's metrics are selected by phase, and
+// an untagged upgrade left P02 and P03 out of them entirely.
+const socketParams = () => ({ headers: withPerfBaggage({ 'X-Perf-Run-Id': runId }, runId) });
+
 function rawWebSocket() {
-  const response = ws.connect(`${websocketUrl}/ws`, {}, socket => {
+  const response = ws.connect(`${websocketUrl}/ws`, socketParams(), socket => {
     socket.on('open', () => socket.send(`${runId}|${__VU}|${__ITER}`));
     socket.on('message', message => {
       const ok = check(message, { 'WebSocket echo correlated': value => value.includes(runId) });
@@ -71,7 +76,7 @@ function rawWebSocket() {
 // gateway, and the gateway balances requests across both replicas.
 function signalR() {
   let completed = false;
-  ws.connect(`${websocketUrl}/signalr`, {}, socket => {
+  ws.connect(`${websocketUrl}/signalr`, socketParams(), socket => {
     socket.on('open', () => socket.send('{"protocol":"json","version":1}\u001e'));
     let invoked = false;
     socket.on('message', message => {

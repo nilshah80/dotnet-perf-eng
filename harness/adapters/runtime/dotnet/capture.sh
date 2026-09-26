@@ -433,17 +433,19 @@ diagnostic_download_budget() { # dest-file
 # ProblemDetails title/detail: `curl -f` used to discard that body, so a /stacks
 # 500 was recorded only as "request failed" and its cause was unrecoverable.
 # /stacks is a read-only request that dotnet-monitor intermittently answers with
-# an empty HTTP 500 (S03), so a server error there is retried; the other kinds
-# start sessions or freeze the process and are never repeated. A final server
-# error on a local target keeps the monitor's log lines beside the failure.
+# an empty HTTP 500 (S03: its profiler channel to the app refused, errno 99,
+# seconds after the diagnose-mode recreate), so a server error there is retried
+# for up to 25 s; the other kinds start sessions or freeze the process and are
+# never repeated. A final server error on a local target keeps the monitor's
+# log lines beside the failure.
 try_pull() {
   local dest="$1" attempt attempts=1 rc
-  [[ "${dest##*/}" == "stacks.txt" ]] && attempts=3
+  [[ "${dest##*/}" == "stacks.txt" ]] && attempts=6
   for (( attempt = 1; attempt <= attempts; attempt++ )); do
     rc=0; try_pull_once "$@" || rc=$?
-    (( rc == 0 )) && return 0
+    (( rc == 0 )) && { (( attempt > 1 )) && echo "dotnet-monitor ${dest##*/}: captured on attempt ${attempt} of ${attempts}." >&2; return 0; }
     grep -q '^HTTP 5' "${dest}.failure" 2>/dev/null || return "${rc}"
-    (( attempt < attempts )) && { echo "dotnet-monitor ${dest##*/}: $(cat "${dest}.failure"); retrying (${attempt}/${attempts})." >&2; sleep 2; }
+    (( attempt < attempts )) && { echo "dotnet-monitor ${dest##*/}: $(cat "${dest}.failure"); retrying (${attempt}/${attempts})." >&2; sleep 5; }
   done
   keep_monitor_log "${dest}"
   return "${rc}"
@@ -457,7 +459,8 @@ keep_monitor_log() { # dest-file -- the recent log of the local container publis
   container="$(docker ps --filter "publish=${port}" --format '{{.Names}}' 2>/dev/null | head -1)"
   [[ -n "${container}" ]] || return 0
   docker logs --since 2m "${container}" 2>&1 | tail -n 200 > "${dest}.monitor.log" || true
-  [[ -s "${dest}.monitor.log" ]] && printf ' (monitor log: %s)' "${dest##*/}.monitor.log" >> "${dest}.failure"
+  [[ -s "${dest}.monitor.log" ]] || return 0
+  printf '%s (monitor log: %s)\n' "$(tr -d '\n' < "${dest}.failure")" "${dest##*/}.monitor.log" > "${dest}.failure.tmp" && mv "${dest}.failure.tmp" "${dest}.failure"
 }
 
 try_pull_once() {

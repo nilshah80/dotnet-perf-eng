@@ -740,10 +740,15 @@ json="$(awk \
      # Requests the generator counted failed that the application never recorded:
      # they failed on the path between them (P02: a connection per iteration
      # through a container port forwarder), so no application capacity is shown.
+     # Only when the count of the application covers the requests the generator saw
+     # succeed: a request metric that misses the traffic (P02 WebSocket upgrades
+     # without baggage in a phase-selected query: 0 recorded, 9% succeeded)
+     # says nothing about the failures.
      failed = (has(sttotal) ? (stclient+0)+(stshed+0)+(stserver+0) : -1);
      reached = (has(sttotal) && ratenote=="") ? sttotal+0 : -1;
      unreached = (reached>=0 && has(reqtotal)) ? (reqtotal+0) - reached : -1;
-     path_fail = (unreached>=0 && has(errate) && errate+0>=0.5 && unreached>=0.5*(reqtotal+0) && failed < 0.1*(reqtotal+0)*(errate+0));
+     succeeded = (has(reqtotal) && has(errate)) ? (reqtotal+0)*(1-(errate+0)) : -1;
+     path_fail = (unreached>=0 && errate+0>=0.5 && unreached>=0.5*(reqtotal+0) && reached>=0.5*succeeded && failed < 0.1*(reqtotal+0)*(errate+0));
      if (path_fail) conf="low";
      if (verdict=="threadpool-starved" && !tp_blocked && !has(tpqpersistence)) conf="low";
 
@@ -763,7 +768,7 @@ json="$(awk \
      # already accounts for parked threads, and emitting both notes tells the
      # reader to look for blocking calls AND for the pool limit that is the real
      # cause -- two contradictory instructions from one report.
-     if (tpq_sat && !cpu_sat && !up_sat) notes[++nn]="thread-pool backlog is high while CPU is not saturated; inspect time-aligned stacks for blocked work before attributing it to sync-over-async.";
+     if (tpq_sat && !cpu_sat && !up_sat && !tp_blocked) notes[++nn]="thread-pool backlog is high while CPU is not saturated; inspect time-aligned stacks for blocked work before attributing it to sync-over-async.";
      if (verdict=="dependency-bound-db" && dbp_sat) notes[++nn]="most request time is DB AND the pool is saturated -- the DB dependency is the bottleneck via pool exhaustion.";
      if (verdict=="no-clear-bottleneck" && any) notes[++nn]="no captured resource crossed a saturation gate; this alone does not establish headroom or successful delivery.";
      # Retention is reported, never ranked: a leak is a stability defect, not a

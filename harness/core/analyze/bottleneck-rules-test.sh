@@ -570,6 +570,7 @@ classify "${dir}"
 jq -e '.verdict == "threadpool-starved" and .confidence == "high" and (.reason | test("grew to 140 threads on 1 core"))
        and .resources.threadPool.blockedThreads == true and (.saturatedResources | index("threadPool"))' "${report}" >/dev/null \
   || fail "blocked pool threads were not named: $(jq -c '{verdict,confidence,reason}' "${report}")"
+! notes "${report}" | grep -q "inspect time-aligned stacks for blocked work" || fail "the generic backlog note repeated the blocked-thread reason"
 jq '.data.result[0].values |= map(.[1] = "5")' "${dir}/telemetry/metrics/thread_count.json" > "${dir}/m.json" && mv "${dir}/m.json" "${dir}/telemetry/metrics/thread_count.json"
 classify "${dir}"
 [[ "$(verdict "${report}")" != "threadpool-starved" ]] || fail "five threads on one core were called blocked"
@@ -687,6 +688,12 @@ printf '{"status":"success","data":{"resultType":"matrix","result":[{"metric":{"
 classify "${dir}"
 jq -e '.confidence == "low" and any(.notes[]; test("34209 of 36009 requests never reached the application \\(it recorded 1800\\)"))' "${report}" >/dev/null \
   || fail "failures before the application were not attributed: $(jq -c '{confidence,notes}' "${report}")"
+# A request metric that recorded none of the traffic (P02 WebSocket upgrades
+# without baggage) cannot attribute the failures.
+printf '{"status":"success","data":{"resultType":"matrix","result":[{"metric":{"__name__":"http_server_request_duration_seconds_count","http_response_status_code":"200"},"values":[[1700000000,"0"],[1700000060,"3"]]}]}}\n' \
+  > "${dir}/telemetry/metrics/request_duration.json"
+classify "${dir}"
+! notes "${report}" | grep -q "never reached the application" || fail "a request metric that missed the traffic attributed the failures: $(notes "${report}")"
 
 # A fault inside the window explains the errors; nothing reads OVERLOADED.
 report="$(build_run faulted 1400 0.5 0 "")"; dir="$(dirname "$(dirname "${report}")")"
