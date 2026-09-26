@@ -91,13 +91,21 @@ diff_one() { # <baseline-report> <candidate-report> [header]
     return 0
   fi
 
-  # Totals + percent.
+  # Totals + percent from the report's "GC Heap bytes" line: the per-object
+  # column is one object's size, so bytes*count underestimates a bucket of
+  # mixed sizes (2,012 planted 64 KiB arrays itemised at 16,408 B read a 50 MB
+  # heap that was 149 MB). The row estimate is the fallback.
   local btot ctot
-  btot="$(awk '{b=$1;c=$2; gsub(/,/,"",b); gsub(/,/,"",c); if (b ~ /^[0-9]+$/ && c ~ /^[0-9]+$/ && NF>=3) s+=b*c} END{print s+0}' "${base}")"
-  ctot="$(awk '{b=$1;c=$2; gsub(/,/,"",b); gsub(/,/,"",c); if (b ~ /^[0-9]+$/ && c ~ /^[0-9]+$/ && NF>=3) s+=b*c} END{print s+0}' "${cand}")"
+  heap_total() {
+    awk '/GC Heap bytes[ ]*$/ { t=$1; gsub(/,/,"",t); if (t ~ /^[0-9]+$/) { heap=t } }
+      { b=$1;c=$2; gsub(/,/,"",b); gsub(/,/,"",c); if (b ~ /^[0-9]+$/ && c ~ /^[0-9]+$/ && NF>=3) s+=b*c }
+      END { print (heap != "" ? heap : s+0) }' "$1"
+  }
+  btot="$(heap_total "${base}")"
+  ctot="$(heap_total "${cand}")"
   awk -v bt="${btot}" -v ct="${ctot}" "${_human_awk}"'
     BEGIN{ d=ct-bt; pct=(bt>0? d/bt*100 : 0);
-      printf "# Differential managed heap (retained bytes per type)\n";
+      printf "# Differential managed heap (GC heap bytes; per-type bytes are bucket estimates)\n";
       printf "#   baseline : %d B\n", bt;
       printf "#   candidate: %d B\n", ct;
       printf "#   total delta: %s  (%+.1f%%)\n\n", human(d), pct }'
