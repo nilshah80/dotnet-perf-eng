@@ -5,9 +5,8 @@
 set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
-project="${root}/source/dotnet/protocol-reliability/ProtocolReliability.Api.csproj"
 require() { command -v "$1" >/dev/null 2>&1 || { echo "edge-security-test: $1 is required" >&2; exit 1; }; }
-require dotnet; require openssl; require curl; require jq; require awk
+require docker; require dotnet; require openssl; require curl; require jq; require awk
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/protocol-edge.XXXXXX")"
 app_pid=""
@@ -57,7 +56,7 @@ openssl x509 -req -days 1 -sha256 -copy_extensions copy \
   -in "${work}/client.csr" -CA "${work}/ca.crt" -CAkey "${work}/ca.key" -CAcreateserial \
   -out "${work}/client.crt" >/dev/null 2>&1
 
-dotnet build "${project}" --no-restore --nologo >/dev/null
+app_dll="$("${root}/labs/protocol-reliability/build-target.sh" "${work}/app")"
 PERFLAB_HTTP_PORT="${http_port}" \
 PERFLAB_GRPC_PORT="${grpc_port}" \
 PERFLAB_HTTPS_PORT="${https_port}" \
@@ -66,7 +65,7 @@ PERFLAB_TLS_CERT_PASSWORD=perflab-test \
 PERFLAB_TLS_REQUIRE_CLIENT_CERT=1 \
 PERFLAB_TLS_CLIENT_CA_PATH="${work}/ca.crt" \
 PERF_RUN_ID=edge-security-proof \
-  dotnet "${root}/source/dotnet/protocol-reliability/bin/Debug/net10.0/ProtocolReliability.Api.dll" \
+  dotnet "${app_dll}" --contentRoot "${work}/app" \
   >"${work}/app.log" 2>&1 &
 app_pid="$!"
 

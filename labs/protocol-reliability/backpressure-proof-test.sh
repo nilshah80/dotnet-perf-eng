@@ -4,9 +4,8 @@
 # failure. The same declared k6 workload is used for both conditions.
 set -euo pipefail
 root="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
-project="${root}/source/dotnet/protocol-reliability/ProtocolReliability.Api.csproj"
 script="${root}/labs/protocol-reliability/loadgen/k6.js"
-for tool in dotnet k6 curl jq lsof; do command -v "${tool}" >/dev/null 2>&1 || { echo "backpressure-proof-test: ${tool} is required" >&2; exit 1; }; done
+for tool in docker dotnet k6 curl jq lsof; do command -v "${tool}" >/dev/null 2>&1 || { echo "backpressure-proof-test: ${tool} is required" >&2; exit 1; }; done
 work="$(mktemp -d "${TMPDIR:-/tmp}/protocol-backpressure.XXXXXX")"
 app_pid=""
 cleanup() {
@@ -24,9 +23,9 @@ for candidate in $(seq 18600 18639); do
 done
 [[ -n "${port}" ]] || { echo "backpressure-proof-test: no free test port" >&2; exit 1; }
 
-dotnet build "${project}" --no-restore --nologo >/dev/null
+app_dll="$("${root}/labs/protocol-reliability/build-target.sh" "${work}/app")"
 PERFLAB_HTTP_PORT="${port}" PERFLAB_GRPC_PORT="$((port + 100))" QUEUE_CAPACITY=4 PERF_RUN_ID=backpressure-proof \
-  dotnet "${root}/source/dotnet/protocol-reliability/bin/Debug/net10.0/ProtocolReliability.Api.dll" >"${work}/app.log" 2>&1 &
+  dotnet "${app_dll}" --contentRoot "${work}/app" >"${work}/app.log" 2>&1 &
 app_pid="$!"
 for _ in $(seq 1 30); do
   if curl -fsS --max-time 2 "http://127.0.0.1:${port}/health/ready" >/dev/null 2>&1; then break; fi

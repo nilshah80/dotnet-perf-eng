@@ -6,9 +6,8 @@
 set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
-project="${root}/source/dotnet/protocol-reliability/ProtocolReliability.Api.csproj"
 agent="${root}/harness/core/distributed/agent.py"
-for tool in dotnet k6 curl jq lsof rg; do
+for tool in docker dotnet k6 curl jq lsof rg; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "distributed-proof-test: ${tool} is required" >&2; exit 1; }
 done
 # shellcheck source=/dev/null
@@ -48,10 +47,9 @@ agent_a="http://127.0.0.1:$((port + 1))"
 agent_b="http://127.0.0.1:$((port + 2))"
 missing="http://127.0.0.1:$((port + 3))"
 
-dotnet build "${project}" --no-restore --nologo >/dev/null
-app_dll="${root}/source/dotnet/protocol-reliability/bin/Debug/net10.0/ProtocolReliability.Api.dll"
+app_dll="$("${root}/labs/protocol-reliability/build-target.sh" "${work}/app")"
 PERFLAB_HTTP_PORT="${port}" PERFLAB_GRPC_PORT="$((port + 100))" INSTANCE_ID=distributed-proof-target \
-  dotnet "${app_dll}" >"${work}/target.log" 2>&1 &
+  dotnet "${app_dll}" --contentRoot "${work}/app" >"${work}/target.log" 2>&1 &
 app_pid="$!"
 for _ in $(seq 1 30); do
   curl -fsS --max-time 2 "${target}/health/ready" >/dev/null 2>&1 && break

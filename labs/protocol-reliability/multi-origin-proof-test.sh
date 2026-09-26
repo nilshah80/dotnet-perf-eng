@@ -5,9 +5,8 @@
 set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
-project="${root}/source/dotnet/protocol-reliability/ProtocolReliability.Api.csproj"
 script="${root}/labs/protocol-reliability/loadgen/multi-origin.js"
-for tool in dotnet k6 curl jq lsof; do
+for tool in docker dotnet k6 curl jq lsof; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "multi-origin-proof-test: ${tool} is required" >&2; exit 1; }
 done
 
@@ -43,19 +42,18 @@ done
 secondary_port=$((primary_port + 1))
 sink_port=$((primary_port + 2))
 
-dotnet build "${project}" --no-restore --nologo >/dev/null
-app_dll="${root}/source/dotnet/protocol-reliability/bin/Debug/net10.0/ProtocolReliability.Api.dll"
+app_dll="$("${root}/labs/protocol-reliability/build-target.sh" "${work}/app")"
 
 PERFLAB_HTTP_PORT="${primary_port}" \
 PERFLAB_HTTP_SECONDARY_PORT="${secondary_port}" \
 PERFLAB_GRPC_PORT="$((primary_port + 100))" \
 INSTANCE_ID=multi-origin-allowed \
-  dotnet "${app_dll}" >"${work}/allowed.log" 2>&1 &
+  dotnet "${app_dll}" --contentRoot "${work}/app" >"${work}/allowed.log" 2>&1 &
 app_pid="$!"
 PERFLAB_HTTP_PORT="${sink_port}" \
 PERFLAB_GRPC_PORT="$((primary_port + 102))" \
 INSTANCE_ID=multi-origin-unallowed-sink \
-  dotnet "${app_dll}" >"${work}/sink.log" 2>&1 &
+  dotnet "${app_dll}" --contentRoot "${work}/app" >"${work}/sink.log" 2>&1 &
 sink_pid="$!"
 
 wait_ready() {

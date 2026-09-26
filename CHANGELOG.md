@@ -47,6 +47,12 @@ No version has been tagged yet. The entries below describe the state of `main`.
 
 ### Fixed
 
+- The live Gate B tests build the Protocol Reliability target with its
+  Dockerfile's Release publish stage into their own temp directory. They ran
+  `dotnet build --no-restore` in the source tree, so they depended on restore
+  state a previous build had left there, wrote `bin/` and `obj/` into the
+  application folder, ran Debug builds, and needed a host `protoc` that
+  Grpc.Tools does not ship for Arm64 macOS.
 - A process dump no longer stays in the evidence package. ScenarioLab's S03 and
   S04 dumps carried the lab's database connection string into
   `runtime/captures/dump/process.dmp`, which acceptance case 26's scan found.

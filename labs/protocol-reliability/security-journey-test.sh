@@ -6,16 +6,13 @@ set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
 fail() { echo "security-journey-test: $*" >&2; exit 1; }
-for command in dotnet curl jq k6; do
+for command in docker dotnet curl jq k6; do
   command -v "${command}" >/dev/null || fail "${command} is required"
 done
 # shellcheck source=/dev/null
 . "${root}/harness/core/lib/python.sh"
 PYTHON="$(perflab_python)" || fail "a working Python 3 interpreter was not found (tried python3, python)"
 
-project="${root}/source/dotnet/protocol-reliability/ProtocolReliability.Api.csproj"
-[[ -f "${project}" ]] || fail "Protocol Reliability project is missing"
-dotnet build "${project}" --no-restore --nologo >/dev/null || fail "target build failed"
 
 http_port="$("${PYTHON}" - <<'PY'
 import socket
@@ -50,9 +47,10 @@ cleanup() {
   fi
 }
 trap cleanup EXIT HUP INT TERM
+app_dll="$("${root}/labs/protocol-reliability/build-target.sh" "${work}/app")" || fail "target build failed"
 
 PERFLAB_HTTP_PORT="${http_port}" PERFLAB_GRPC_PORT="${grpc_port}" \
-  dotnet run --project "${project}" --no-build --no-restore >"${work}/target.log" 2>&1 &
+  dotnet "${app_dll}" --contentRoot "${work}/app" >"${work}/target.log" 2>&1 &
 app_pid=$!
 base="http://127.0.0.1:${http_port}"
 for _ in $(seq 1 100); do

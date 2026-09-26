@@ -5,8 +5,7 @@
 set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
-project="${root}/source/dotnet/protocol-reliability/ProtocolReliability.Api.csproj"
-for tool in dotnet curl jq lsof; do
+for tool in docker dotnet curl jq lsof; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "measurement-window-proof-test: ${tool} is required" >&2; exit 1; }
 done
 
@@ -43,12 +42,11 @@ done
 [[ -n "${port}" ]] || { echo "measurement-window-proof-test: no free test port" >&2; exit 1; }
 base="http://127.0.0.1:${port}"
 
-dotnet build "${project}" --no-restore --nologo >/dev/null
-app_dll="${root}/source/dotnet/protocol-reliability/bin/Debug/net10.0/ProtocolReliability.Api.dll"
+app_dll="$("${root}/labs/protocol-reliability/build-target.sh" "${work}/app")"
 start_app() {
   local instance="$1"
   PERFLAB_HTTP_PORT="${port}" PERFLAB_GRPC_PORT="$((port + 100))" INSTANCE_ID="${instance}" \
-    dotnet "${app_dll}" >"${work}/${instance}.log" 2>&1 &
+    dotnet "${app_dll}" --contentRoot "${work}/app" >"${work}/${instance}.log" 2>&1 &
   app_pid="$!"
   for _ in $(seq 1 30); do
     curl -fsS --max-time 2 "${base}/health/ready" >/dev/null 2>&1 && return 0
