@@ -27,6 +27,22 @@ sha256_stream() {
   fi
 }
 
+# k6 exports setup()'s return value as .setup_data. Ecommerce's setup() returns
+# its login token, so every ecommerce package retained a live bearer JWT
+# (acceptance case 26). Nothing reads it; a summary that cannot be rewritten
+# fails the phase rather than keep the token.
+strip_setup_data() {
+  local file="$1"
+  [[ -s "${file}" ]] || return 0
+  if jqd 'del(.setup_data)' < "${file}" > "${file}.tmp" && [[ -s "${file}.tmp" ]]; then
+    mv "${file}.tmp" "${file}"
+  else
+    rm -f "${file}.tmp" "${file}"
+    echo "k6 summary ${file} could not be stripped of setup_data; removed it." >&2
+    return 1
+  fi
+}
+
 # The compatibility envelope of a MEASURED package is immutable evidence. A
 # diagnostic replay that runs inside a measured package (isolated non-campaign
 # diagnostics) publishes its own envelope beside it instead of overwriting it;
@@ -38,10 +54,36 @@ compatibility_target() {
   fi
   printf '%s' "${target}"
 }
+# The entry script, then every local module it imports (transitively), sorted.
+# Every lab script imports mix.js or journey.js, and hashing the entry alone
+# kept one identity across a mix.js change that moved browse-and-buy's
+# order-create share from 3.72% to 4.71%; compare-runs then called the heavier
+# workload a 15% CPU regression. A script without local imports hashes as before.
+workload_files() {
+  local pending=("$1") seen=("$1") file dir spec target module_dir known entry
+  while [[ ${#pending[@]} -gt 0 ]]; do
+    file="${pending[0]}"; pending=("${pending[@]:1}")
+    dir="$(dirname "${file}")"
+    while IFS= read -r spec; do
+      module_dir="$(cd "${dir}/$(dirname "${spec}")" 2>/dev/null && pwd)" || continue
+      target="${module_dir}/$(basename "${spec}")"
+      [[ -f "${target}" ]] || continue
+      known=0
+      for entry in "${seen[@]}"; do [[ "${entry}" == "${target}" ]] && known=1; done
+      [[ "${known}" == 0 ]] || continue
+      seen+=("${target}"); pending+=("${target}")
+    done < <(grep -oE "(from|import)[[:space:]]*['\"]\.\.?/[^'\"]+['\"]" "${file}" | sed -E "s/^(from|import)[[:space:]]*['\"]//; s/['\"]$//")
+  done
+  printf '%s\n' "${seen[0]}"
+  [[ ${#seen[@]} -gt 1 ]] && printf '%s\n' "${seen[@]:1}" | LC_ALL=C sort
+  return 0
+}
 write_compatibility() {
   local script_rel workload_hash fingerprint base network timeout_seconds config_hash header_names
   script_rel="$(relative_to_repo "${js}")"
-  workload_hash="$({ printf '%s\0' "${script_rel}"; cat "${js}"; printf '\0'; } | sha256_stream)"
+  workload_hash="$(while IFS= read -r file; do
+      printf '%s\0' "$(relative_to_repo "${file}")"; cat "${file}"; printf '\0'
+    done < <(workload_files "${js}") | sha256_stream)"
   fingerprint="$(k6 version 2>&1 | tr -d '\r' | awk 'NF { if (seen++) printf " | "; printf "%s", $0 }')"
   base="${PERF_BASE_URL%/}"
   network="${PERFLAB_GENERATOR_NETWORK_PATH:-host}"
@@ -123,6 +165,7 @@ case "${phase}" in
         --quiet --no-color "${js}" \
         > "${artifact_dir}/benchmark/k6-warmup.txt"
     fi
+    strip_setup_data "${artifact_dir}/benchmark/k6-warmup.json"
     ;;
   measure | diagnostic)
     conns="${PERFLAB_CONNECTIONS:?PERFLAB_CONNECTIONS not set}"
@@ -142,6 +185,7 @@ case "${phase}" in
     K6_RW_OUT=()
     [[ "${phase}" == "measure" ]] && k6_enable_prom_rw
 
+    generator_rc=0
     if [[ "${phase}" == "measure" && ( "${profile}" != "steady" || "${PERF_PROTOCOL:-}" == "browser-synthetic" ) ]]; then
       # shellcheck disable=SC1091
       source "${HARNESS_ROOT}/adapters/loadgen/k6/profiles.sh"
@@ -153,18 +197,19 @@ case "${phase}" in
         --summary-export "${artifact_dir}/benchmark/${summary}" \
         ${K6_RW_OUT[@]+"${K6_RW_OUT[@]}"} \
         --quiet --no-color "${js}" \
-        > "${artifact_dir}/benchmark/${txt}"
+        > "${artifact_dir}/benchmark/${txt}" || generator_rc=$?
     else
       k6 run --vus "${conns}" --duration "${dur}s" \
         --summary-trend-stats "avg,min,med,max,p(50),p(90),p(95),p(99)" \
         --summary-export "${artifact_dir}/benchmark/${summary}" \
         ${K6_RW_OUT[@]+"${K6_RW_OUT[@]}"} \
         --quiet --no-color "${js}" \
-        > "${artifact_dir}/benchmark/${txt}"
+        > "${artifact_dir}/benchmark/${txt}" || generator_rc=$?
     fi
+    strip_setup_data "${artifact_dir}/benchmark/${summary}"
 
     write_compatibility
-    [[ "${phase}" == "measure" ]] || exit 0
+    [[ "${phase}" == "measure" ]] || exit "${generator_rc}"
     sfile="${artifact_dir}/benchmark/${summary}"
     if [[ ! -s "${sfile}" ]]; then
       echo "k6 summary export not found or empty: ${sfile}" >&2
@@ -188,10 +233,10 @@ case "${phase}" in
        elif $is_protocol then ($m.grpc_req_duration // $m.ws_session_duration // $m.browser_http_req_duration // $m.iteration_duration)
        else ($m.perflab_primary_request_latency // $m.http_req_duration) end) as $latency |
       (if $starts > 0 then ($m.journey_status_errors.count // 0)
-       elif $is_protocol then ($m.protocol_failures.count // $m.browser_http_req_failed.passes // 0)
+       elif $is_protocol then ($m.perflab_http_non_2xx_3xx.count // $m.protocol_failures.count // $m.browser_http_req_failed.passes // 0)
        else ($m.perflab_http_non_2xx_3xx.count // 0) end) as $status_errors |
       (if $starts > 0 then ($m.journey_transport_errors.count // 0)
-       elif $is_protocol then 0
+       elif $is_protocol then ($m.perflab_http_transport_errors.count // 0)
        else ($m.perflab_http_transport_errors.count // 0) end) as $transport_errors |
       [
         {name:"http.requests_per_second",value:$rate,unit:"request/s",source:"benchmark/k6-summary.json"},
@@ -213,8 +258,25 @@ case "${phase}" in
         {name:"journey.retries",value:($m.journey_retries.count // 0),unit:"request",source:"benchmark/k6-summary.json"},
         {name:"journey.request_amplification",value:(($m.journey_wire_requests.count // 0) / (if $starts > 0 then $starts else 1 end)),unit:"request/iteration",source:"benchmark/k6-summary.json"},
         {name:"journey.duration.p95",value:($m.journey_duration["p(95)"] // 0),unit:"ms",source:"benchmark/k6-summary.json"}
-      ]' < "${sfile}" > "${artifact_dir}/benchmark/observations.json"
-    if ! jqd -e 'any(.[]; .name == "http.latency.p95" and (.value | type) == "number")' \
+      ] | if $protocol == "browser-synthetic" then
+        (($m.browser_http_req_failed.passes // 0) + ($m.browser_http_req_failed.fails // 0)) as $browser_requests |
+        (($m.iterations.count // 0) / (if ($m.iterations.rate // 0) > 0 then $m.iterations.rate else 1 end)) as $elapsed |
+        map(select((.name | startswith("http.")) and .name != "http.transport_errors") |
+          .name = ("browser." + .name) |
+          if .name == "browser.http.requests.total" then .value = $browser_requests
+          elif .name == "browser.http.requests_per_second" then .value = (if $elapsed > 0 then $browser_requests / $elapsed else 0 end)
+          elif .name == "browser.http.responses.non_2xx_3xx" then .name = "browser.http.requests.failed"
+          elif .name == "browser.http.error_rate" then .value = (if $browser_requests > 0 then ($m.browser_http_req_failed.passes // 0) / $browser_requests else 0 end)
+          else . end) + [
+          {name:"browser.visits.total",value:($m.iterations.count // 0),unit:"visit",source:"benchmark/k6-summary.json"},
+          {name:"browser.visits_per_second",value:($m.iterations.rate // 0),unit:"visit/s",source:"benchmark/k6-summary.json"},
+          {name:"browser.visit.duration.p95",value:$m.iteration_duration["p(95)"],unit:"ms",source:"benchmark/k6-summary.json"},
+          {name:"browser.checks.failed",value:($m.checks.fails // 0),unit:"check",source:"benchmark/k6-summary.json"},
+          {name:"browser.web_vital.fcp.p95",value:$m.browser_web_vital_fcp["p(95)"],unit:"ms",source:"benchmark/k6-summary.json"},
+          {name:"browser.web_vital.lcp.p95",value:$m.browser_web_vital_lcp["p(95)"],unit:"ms",source:"benchmark/k6-summary.json"}
+        ] | map(select(.value != null))
+      else . end' < "${sfile}" > "${artifact_dir}/benchmark/observations.json"
+    if ! jqd -e 'any(.[]; (.name == "http.latency.p95" or .name == "browser.http.latency.p95") and (.value | type) == "number")' \
         < "${artifact_dir}/benchmark/observations.json" >/dev/null; then
       echo "k6 summary is missing the required numeric p95 latency" >&2
       exit 1
@@ -231,6 +293,7 @@ case "${phase}" in
       echo "k6 journey evidence is incomplete or cannot be reconciled" >&2
       exit 1
     fi
+    exit "${generator_rc}"
     ;;
   *)
     echo "Unknown phase '${phase}' (use warmup|measure|diagnostic)." >&2

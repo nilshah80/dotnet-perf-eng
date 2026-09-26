@@ -14,6 +14,9 @@ HARNESS_ROOT="${PERFLAB_HARNESS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../..
 source "${HARNESS_ROOT}/core/lib/common.sh"
 # shellcheck disable=SC1091
 source "${HARNESS_ROOT}/adapters/runtime/dotnet/capability.sh"
+# The real retention helper, never a fixture: a dump must leave the package.
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../core/lib" && pwd)/sensitive-evidence.sh"
 
 artifact_dir="${1:?capture.sh <artifact-dir> <kind> <duration> <target-service>}"
 requested_kind="${2:?diagnostic kind required}"
@@ -30,6 +33,8 @@ if [[ -z "${assembly_name}" ]]; then
   echo "No PERFLAB_DIAG_TARGETS mapping for app service '${target}'." >&2
   exit 1
 fi
+
+diagnostics_url="$(diag_endpoint "${target}")"
 
 # D-P0-3. /stacks injects ICorProfiler. Pyroscope already occupies that slot
 # on a measured process, so the measurement default is the recorded CPU-trace
@@ -77,6 +82,16 @@ if [[ -z "${campaign_preset}" ]]; then
     "$(json_escape "${requested_kind}")" "$(json_escape "${kind}")" "${duration_seconds}" \
     "$(json_escape "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" "${fb_field}" > "${capture_json}"
 fi
+
+# Even a capability or identity refusal must leave a terminal capture state.
+finalize_failed_capture() {
+  local rc="$1"
+  [[ -s "${capture_json}" ]] || return 0
+  if jqd -e '.status == "running"' < "${capture_json}" >/dev/null 2>&1; then
+    jqd --argjson code "${rc}" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"       '.status="failed" | .exitCode=$code | .finishedAt=$at' < "${capture_json}" > "${capture_json}.tmp"       && mv "${capture_json}.tmp" "${capture_json}"
+  fi
+}
+trap 'rc=$?; finalize_failed_capture "${rc}"' EXIT
 
 processes_file="${artifact_dir}/runtime/processes-diagnostic.json"
 monitor_curl -fsS "${diagnostics_url}/processes" > "${processes_file}"
@@ -237,6 +252,75 @@ mv "${identity_tmp}" "${target_identity_file}"
 # profiler, or requesting a dump. A missing endpoint/capability is a refusal,
 # never a late capture error after the target was perturbed.
 capability_kinds=()
+# Runtime counters. EventCounters come from the runtime's own System.Runtime
+# source, so this needs NO application change -- only a subscriber. We use
+# dotnet-monitor's /livemetrics rather than `dotnet-counters` on purpose: the
+# tools container mounts neither /diag nor the app PID namespace, and the
+# runtime connects to its diagnostic ports at STARTUP, so a counters listener
+# started mid-run would never receive a connection. /livemetrics rides the
+# sidecar's existing connection, needs no compose change, and cannot wedge the
+# app's boot path. Best-effort: a failure is recorded, never fatal, because the
+# trace/gcdump is the primary artifact of this phase.
+# Runs in a BACKGROUND subshell, so it reports through a state file rather than
+# a variable: a subshell's assignments never reach the parent.
+counters_status_file="${artifact_dir}/runtime/.counters-state"
+capture_counters() { # capture_counters <out-dir> <seconds>
+  # /livemetrics returns RFC 7464 application/json-seq: each record is preceded
+  # by an ASCII RS (0x1E), so this is neither a JSON document nor newline-
+  # delimited JSON. The extension says so, and the parse below uses jq --seq --
+  # without it even a well-formed capture fails to parse.
+  #
+  # monitor_curl, not curl: it carries the Authorization header, the CA and the
+  # client certificate that every other monitor call already presents. A bare
+  # curl here answered 401 (or failed the TLS handshake) on every protected
+  # monitor while the primary trace still completed as captured, so the missing
+  # counters were only a limitation line nobody read.
+  local dest="$1/counters.json-seq" seconds="$2" http="" records=0
+  http="$(monitor_curl -sS --max-time $((seconds + 30)) -o "${dest}.tmp" -w '%{http_code}' --get \
+    --data-urlencode "uid=${runtime_uid}" --data-urlencode "durationSeconds=${seconds}" \
+    "${diagnostics_url}/livemetrics" 2>/dev/null || true)"
+  case "${http}" in
+    2[0-9][0-9])
+      # A 2xx with an empty or unparseable body is NOT a capture. Every record is
+      # PARSED rather than pattern-matched: a substring test would accept
+      # malformed JSON that merely contains the text "name", and would count
+      # lines instead of records. jq slurps the newline-delimited sequence and
+      # fails outright on malformed content, so records stays 0 and the capture
+      # is marked missing -- the same absent-as-healthy trap the log and metric
+      # states now close.
+      # --seq is needed to PARSE the input, but jq also emits an RS (0x1E) before
+      # its own output, so the result arrives as $'\x1e186'. Strip it before the
+      # numeric guard: without this the guard rejects every valid capture and
+      # marks it missing -- inverting the failure this validation exists to catch.
+      #
+      # jq is deliberately lenient here, and so are we: RFC 7464 defines a
+      # truncated record as skippable, which is the point of the format for a
+      # streamed response. A stream cut short still yields the records that did
+      # arrive, so the count is "records that parsed", not "the stream was
+      # pristine". Zero parsed records is the condition that means no evidence.
+      records="$(jqd --seq -s '[.[] | select(type == "object" and has("name"))] | length' < "${dest}.tmp" 2>/dev/null | tr -d '\036' || echo 0)"
+      [[ "${records}" =~ ^[0-9]+$ ]] || records=0
+      if [[ "${records}" -gt 0 ]]; then
+        mv "${dest}.tmp" "${dest}"
+        printf 'captured\t%s\t\n' "${records}" > "${counters_status_file}"
+      else
+        rm -f "${dest}.tmp"
+        printf 'missing\t0\tdotnet-monitor /livemetrics returned HTTP %s with no counter records\n' "${http}" > "${counters_status_file}"
+      fi
+      ;;
+    ""|000)      rm -f "${dest}.tmp"; printf 'failed\t0\tdotnet-monitor /livemetrics unreachable\n' > "${counters_status_file}" ;;
+    *)           rm -f "${dest}.tmp"; printf 'failed\t0\tdotnet-monitor /livemetrics returned HTTP %s\n' "${http}" > "${counters_status_file}" ;;
+  esac
+}
+read_counters_state() {
+  if [[ -s "${counters_status_file}" ]]; then
+    if read_fields 3 < <(tr '\t' '\n' < "${counters_status_file}"); then
+      counters_state="${TSV_FIELDS[0]}"; counters_records="${TSV_FIELDS[1]}"; counters_reason="${TSV_FIELDS[2]}"
+    fi
+    rm -f "${counters_status_file}"
+  fi
+}
+
 if [[ -n "${campaign_preset}" ]]; then
   case "${campaign_preset}" in
     cpu) capability_kinds=(trace) ;;
@@ -294,7 +378,7 @@ capture_on_signal() {
   trap - EXIT INT TERM
   kill -s "$1" "$$"
 }
-trap cleanup_load EXIT
+trap 'rc=$?; cleanup_load; finalize_failed_capture "${rc}"' EXIT
 trap 'capture_on_signal INT' INT
 trap 'capture_on_signal TERM' TERM
 
@@ -407,15 +491,22 @@ if [[ -n "${campaign_preset}" ]]; then
     "$(json_escape "${load_generator}")" "$(json_escape "${campaign_preset}")" "$(json_escape "${campaign_preset}")" \
     "${duration_seconds}" "${recovery_seconds}" "${budget_bytes}" "$(json_escape "${campaign_started}")" > "${campaign_json}"
 
-  write_campaign_capture() { # id sequence requested effective state start end reason artifact
-    local stage_id="$1" sequence="$2" requested="$3" effective="$4" state="$5" started="$6" completed="$7" reason="$8" artifact="${9:-}"
+  write_campaign_capture() { # id sequence requested effective state start end reason artifact [extra-json-fields]
+    local stage_id="$1" sequence="$2" requested="$3" effective="$4" state="$5" started="$6" completed="$7" reason="$8" artifact="${9:-}" extra="${10:-}"
     local stage_dir="${captures_root}/${stage_id}" artifacts='[]'
     mkdir -p "${stage_dir}"
     [[ -n "${artifact}" ]] && artifacts="[\"$(json_escape "${artifact}")\"]"
-    printf '{"id":"%s","sequence":%s,"requestedDiagnostic":"%s","effectiveDiagnostic":"%s","captureState":"%s","startedAt":"%s","completedAt":"%s","reason":"%s","artifactPaths":%s,"gateEligible":false}\n' \
+    printf '{"id":"%s","sequence":%s,"requestedDiagnostic":"%s","effectiveDiagnostic":"%s","captureState":"%s","startedAt":"%s","completedAt":"%s","reason":"%s","artifactPaths":%s,"gateEligible":false%s}\n' \
       "$(json_escape "${stage_id}")" "${sequence}" "$(json_escape "${requested}")" "$(json_escape "${effective}")" \
-      "$(json_escape "${state}")" "$(json_escape "${started}")" "$(json_escape "${completed}")" "$(json_escape "${reason}")" "${artifacts}" \
+      "$(json_escape "${state}")" "$(json_escape "${started}")" "$(json_escape "${completed}")" "$(json_escape "${reason}")" "${artifacts}" "${extra}" \
       > "${stage_dir}/capture.json"
+  }
+
+  # The counters object a trace stage records next to its nettrace. Same shape
+  # as the single-kind capture, so a reader parses one format for both paths.
+  counters_json_field() {
+    printf ',"counters":{"captureState":"%s","reason":"%s","records":%s,"source":"dotnet-monitor /livemetrics","format":"application/json-seq"}' \
+      "$(json_escape "${counters_state}")" "$(json_escape "${counters_reason}")" "${counters_records:-0}"
   }
 
   campaign_snapshot() { # id sequence requested filename endpoint [curl args...]
@@ -425,6 +516,10 @@ if [[ -n "${campaign_preset}" ]]; then
     started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     relative="runtime/captures/${stage_id}/${filename}"
     if try_pull "${stage_dir}/${filename}" --get --data-urlencode "uid=${runtime_uid}" "$@" "${diagnostics_url}/${endpoint}"; then
+      if [[ "${filename}" == *.dmp ]]; then
+        retain_sensitive_file "${stage_dir}/${filename}" process-memory || exit 1
+        relative="${relative}.retained.json"
+      fi
       completed="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       write_campaign_capture "${stage_id}" "${sequence}" "${requested}" "${requested}" captured "${started}" "${completed}" "" "${relative}"
       campaign_successes=$((campaign_successes + 1))
@@ -436,12 +531,26 @@ if [[ -n "${campaign_preset}" ]]; then
     fi
   }
 
-  campaign_trace() { # sequence
-    local sequence="$1" stage_dir="${captures_root}/trace" started completed trace_ok=0 load_ok=0 reason=""
+  campaign_trace() { # sequence [mid-load-hook]
+    local sequence="$1" mid_load_hook="${2:-}" stage_dir="${captures_root}/trace" started completed trace_ok=0 load_ok=0 reason="" counters_pid="" trace_pid=""
     mkdir -p "${stage_dir}"
     started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     run_load & load_pid=$!
-    if try_pull "${stage_dir}/cpu.nettrace" --get --data-urlencode "uid=${runtime_uid}" \
+    # Live runtime counters ride the same window as the trace, exactly as the
+    # single-kind path does. A campaign used to skip them entirely, so a preset
+    # run had no CPU/GC/thread-pool series unless someone read the raw nettrace.
+    counters_state="not-applicable"; counters_reason=""; counters_records=0
+    capture_counters "${stage_dir}" "${duration_seconds}" & counters_pid=$!
+    if [[ -n "${mid_load_hook}" ]]; then
+      # A load-induced hang (a convoy, a starved pool) exists only while the load
+      # runs; a snapshot after the load finishes shows a recovered process. Take
+      # the hook's snapshots at the middle of the load, inside the trace window.
+      try_pull "${stage_dir}/cpu.nettrace" --get --data-urlencode "uid=${runtime_uid}" \
+        --data-urlencode "durationSeconds=${duration_seconds}" --data-urlencode "profile=cpu" "${diagnostics_url}/trace" & trace_pid=$!
+      sleep "$(( duration_seconds / 2 > 0 ? duration_seconds / 2 : 1 ))"
+      "${mid_load_hook}"
+      if wait "${trace_pid}"; then trace_ok=1; else reason="dotnet-monitor trace request failed"; fi
+    elif try_pull "${stage_dir}/cpu.nettrace" --get --data-urlencode "uid=${runtime_uid}" \
       --data-urlencode "durationSeconds=${duration_seconds}" --data-urlencode "profile=cpu" "${diagnostics_url}/trace"; then
       trace_ok=1
     else
@@ -454,15 +563,20 @@ if [[ -n "${campaign_preset}" ]]; then
       reason="${reason:+${reason}; }${campaign_load_reason}"
     fi
     load_pid=""
+    wait "${counters_pid}" 2>/dev/null || true; counters_pid=""
+    read_counters_state
+    if [[ "${counters_state}" == "failed" || "${counters_state}" == "missing" ]]; then
+      reason="${reason:+${reason}; }runtime counters unavailable: ${counters_reason}"
+    fi
     completed="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     if (( trace_ok == 1 )); then
-      write_campaign_capture trace "${sequence}" trace trace captured "${started}" "${completed}" "${reason}" "runtime/captures/trace/cpu.nettrace"
+      write_campaign_capture trace "${sequence}" trace trace captured "${started}" "${completed}" "${reason}" "runtime/captures/trace/cpu.nettrace" "$(counters_json_field)"
       campaign_successes=$((campaign_successes + 1))
       if (( load_ok == 0 )); then
         campaign_failures=$((campaign_failures + 1))
       fi
     else
-      write_campaign_capture trace "${sequence}" trace trace failed "${started}" "${completed}" "${reason}" "$([[ ${trace_ok} == 1 ]] && printf runtime/captures/trace/cpu.nettrace)"
+      write_campaign_capture trace "${sequence}" trace trace failed "${started}" "${completed}" "${reason}" "$([[ ${trace_ok} == 1 ]] && printf runtime/captures/trace/cpu.nettrace)" "$(counters_json_field)"
       campaign_failures=$((campaign_failures + 1))
     fi
   }
@@ -496,15 +610,17 @@ if [[ -n "${campaign_preset}" ]]; then
       campaign_snapshot gcdump-after 3 gcdump after.gcdump gcdump
       ;;
     hang)
-      campaign_trace 1
-      next_seq=2
-      if dotnet_monitor_stacks_capture_allowed; then
-        campaign_snapshot stacks "${next_seq}" stacks stacks.txt stacks
-        next_seq=$((next_seq + 1))
-      fi
-      if [[ "${include_dump}" == "1" ]]; then
-        campaign_snapshot dump "${next_seq}" dump process.dmp dump --data-urlencode "type=WithHeap"
-      fi
+      hang_snapshots() {
+        local next_seq=2
+        if dotnet_monitor_stacks_capture_allowed; then
+          campaign_snapshot stacks "${next_seq}" stacks stacks.txt stacks
+          next_seq=$((next_seq + 1))
+        fi
+        if [[ "${include_dump}" == "1" ]]; then
+          campaign_snapshot dump "${next_seq}" dump process.dmp dump --data-urlencode "type=WithHeap"
+        fi
+      }
+      campaign_trace 1 hang_snapshots
       ;;
     dump)
       campaign_snapshot dump 1 dump process.dmp dump --data-urlencode "type=WithHeap"
@@ -568,68 +684,6 @@ if [[ -n "${campaign_preset}" ]]; then
   if [[ "${campaign_state}" == "captured" ]]; then exit 0; else exit 2; fi
 fi
 
-# Runtime counters. EventCounters come from the runtime's own System.Runtime
-# source, so this needs NO application change -- only a subscriber. We use
-# dotnet-monitor's /livemetrics rather than `dotnet-counters` on purpose: the
-# tools container mounts neither /diag nor the app PID namespace, and the
-# runtime connects to its diagnostic ports at STARTUP, so a counters listener
-# started mid-run would never receive a connection. /livemetrics rides the
-# sidecar's existing connection, needs no compose change, and cannot wedge the
-# app's boot path. Best-effort: a failure is recorded, never fatal, because the
-# trace/gcdump is the primary artifact of this phase.
-# Runs in a BACKGROUND subshell, so it reports through a state file rather than
-# a variable: a subshell's assignments never reach the parent.
-counters_status_file="${artifact_dir}/runtime/.counters-state"
-capture_counters() { # capture_counters <out-dir> <seconds>
-  # /livemetrics returns RFC 7464 application/json-seq: each record is preceded
-  # by an ASCII RS (0x1E), so this is neither a JSON document nor newline-
-  # delimited JSON. The extension says so, and the parse below uses jq --seq --
-  # without it even a well-formed capture fails to parse.
-  local dest="$1/counters.json-seq" seconds="$2" http="" records=0
-  http="$(curl -sS --max-time $((seconds + 30)) -o "${dest}.tmp" -w '%{http_code}' --get \
-    --data-urlencode "uid=${runtime_uid}" --data-urlencode "durationSeconds=${seconds}" \
-    "${diagnostics_url}/livemetrics" 2>/dev/null || true)"
-  case "${http}" in
-    2[0-9][0-9])
-      # A 2xx with an empty or unparseable body is NOT a capture. Every record is
-      # PARSED rather than pattern-matched: a substring test would accept
-      # malformed JSON that merely contains the text "name", and would count
-      # lines instead of records. jq slurps the newline-delimited sequence and
-      # fails outright on malformed content, so records stays 0 and the capture
-      # is marked missing -- the same absent-as-healthy trap the log and metric
-      # states now close.
-      # --seq is needed to PARSE the input, but jq also emits an RS (0x1E) before
-      # its own output, so the result arrives as $'\x1e186'. Strip it before the
-      # numeric guard: without this the guard rejects every valid capture and
-      # marks it missing -- inverting the failure this validation exists to catch.
-      #
-      # jq is deliberately lenient here, and so are we: RFC 7464 defines a
-      # truncated record as skippable, which is the point of the format for a
-      # streamed response. A stream cut short still yields the records that did
-      # arrive, so the count is "records that parsed", not "the stream was
-      # pristine". Zero parsed records is the condition that means no evidence.
-      records="$(jqd --seq -s '[.[] | select(type == "object" and has("name"))] | length' < "${dest}.tmp" 2>/dev/null | tr -d '\036' || echo 0)"
-      [[ "${records}" =~ ^[0-9]+$ ]] || records=0
-      if [[ "${records}" -gt 0 ]]; then
-        mv "${dest}.tmp" "${dest}"
-        printf 'captured\t%s\t\n' "${records}" > "${counters_status_file}"
-      else
-        rm -f "${dest}.tmp"
-        printf 'missing\t0\tdotnet-monitor /livemetrics returned HTTP %s with no counter records\n' "${http}" > "${counters_status_file}"
-      fi
-      ;;
-    ""|000)      rm -f "${dest}.tmp"; printf 'failed\t0\tdotnet-monitor /livemetrics unreachable\n' > "${counters_status_file}" ;;
-    *)           rm -f "${dest}.tmp"; printf 'failed\t0\tdotnet-monitor /livemetrics returned HTTP %s\n' "${http}" > "${counters_status_file}" ;;
-  esac
-}
-read_counters_state() {
-  if [[ -s "${counters_status_file}" ]]; then
-    if read_fields 3 < <(tr '\t' '\n' < "${counters_status_file}"); then
-      counters_state="${TSV_FIELDS[0]}"; counters_records="${TSV_FIELDS[1]}"; counters_reason="${TSV_FIELDS[2]}"
-    fi
-    rm -f "${counters_status_file}"
-  fi
-}
 counters_state="not-applicable"; counters_reason="runtime counters were not requested for this capture kind"; counters_records=0
 
 case "${kind}" in
@@ -663,6 +717,7 @@ case "${kind}" in
     run_load & load_pid=$!
     sleep 5
     pull "${out}/process.dmp" --get --data-urlencode "uid=${runtime_uid}" --data-urlencode "type=WithHeap" "${diagnostics_url}/dump"
+    retain_sensitive_file "${out}/process.dmp" process-memory || exit 1
     wait "${load_pid}"; load_pid=""
     ;;
   *)

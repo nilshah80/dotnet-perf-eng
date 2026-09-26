@@ -211,37 +211,65 @@ case "${logs_required}" in 0|1) ;; *) echo "PERFLAB_LOGS_REQUIRED must be 0 or 1
 queries_file="${artifact_dir}/telemetry/queries.ndjson"
 window_start_utc="$(date -u -r "${start_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@${start_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")"
 window_end_utc="$(date -u -r "${end_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@${end_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")"
-record_trace_slice() { # record_trace_slice <start> <end> <limit> <artifact> <state>
+record_trace_slice() { # record_trace_slice <start> <end> <limit> <artifact> <state> <page> <attempts> <last-exit>
   # Every parameter the request actually carried, so the record can be replayed
   # verbatim. Omitting one (most_recent changes WHICH traces come back, not just
   # how many) would make the provenance look exact while describing a different
-  # query than the one that produced the artifact.
+  # query than the one that produced the artifact. The retry history travels
+  # with it: "failed after six attempts, curl exit 7" and "answered first time"
+  # are different facts about the backend, and an empty page cannot say which.
   mkdir -p "${artifact_dir}/telemetry"
-  printf '{"signal":"traces","backend":"tempo","endpoint":"/api/search","query":"%s","artifact":"%s","captureState":"%s","startEpoch":%s,"endEpoch":%s,"limit":%s,"mostRecent":true}\n' \
-    "$(json_escape "${trace_query}")" "$(json_escape "$4")" "$(json_escape "$5")" "$1" "$2" "$3" >> "${queries_file}"
+  printf '{"signal":"traces","backend":"tempo","endpoint":"/api/search","query":"%s","artifact":"%s","captureState":"%s","startEpoch":%s,"endEpoch":%s,"limit":%s,"mostRecent":true,"page":%s,"attempts":%s,"lastExit":%s}\n' \
+    "$(json_escape "${trace_query}")" "$(json_escape "$4")" "$(json_escape "$5")" "$1" "$2" "$3" "${6:-1}" "${7:-1}" "${8:-0}" >> "${queries_file}"
 }
-record_query() { # record_query <signal> <backend> <endpoint> <query> <artifact> <state>
+record_query() { # record_query <signal> <backend> <endpoint> <query> <artifact> <state> [extra-json-fields]
+  # <extra-json-fields> is a pre-rendered ',"key":value' tail for request
+  # parameters the shared shape does not carry (step, time, page, attempts).
+  # A record that omits the step of a range query, or the evaluation time of
+  # an instant one, describes a request that cannot be replayed exactly.
   mkdir -p "${artifact_dir}/telemetry"
-  printf '{"signal":"%s","backend":"%s","endpoint":"%s","query":"%s","artifact":"%s","captureState":"%s","startEpoch":%s,"endEpoch":%s,"startUtc":"%s","endUtc":"%s"}\n' \
+  printf '{"signal":"%s","backend":"%s","endpoint":"%s","query":"%s","artifact":"%s","captureState":"%s","startEpoch":%s,"endEpoch":%s,"startUtc":"%s","endUtc":"%s"%s}\n' \
     "$(json_escape "$1")" "$(json_escape "$2")" "$(json_escape "$3")" "$(json_escape "$4")" \
     "$(json_escape "$5")" "$(json_escape "$6")" "${start_epoch}" "${end_epoch}" \
-    "$(json_escape "${window_start_utc:-}")" "$(json_escape "${window_end_utc:-}")" >> "${queries_file}"
+    "$(json_escape "${window_start_utc:-}")" "$(json_escape "${window_end_utc:-}")" "${7:-}" >> "${queries_file}"
 }
+# Range queries step through the window at this resolution. Named once so the
+# request and its provenance record cannot disagree.
+prometheus_range_step=5
 capture_prometheus_query() {
-  local state=captured
-  backend_curl -fsS --max-time 20 --get --data-urlencode "query=$2" \
+  local state=captured rc=0
+  # An instant query is evaluated at ONE time. Without time= Prometheus picks
+  # "now", which is after the window and on a recaptured package can be days
+  # later; the record would then describe the workload window while the value
+  # described the capture moment. Pin it to the window end so the two agree.
+  backend_curl -fsS --max-time 20 --get --data-urlencode "query=$2" --data-urlencode "time=${end_epoch}" \
     "${prometheus_url}/api/v1/query" > "${artifact_dir}/telemetry/metrics/$1.json" \
-    || { echo "WARNING: Prometheus instant query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; metric_query_failures=$((metric_query_failures + 1)); state=failed; }
-  record_query metrics prometheus "/api/v1/query" "$2" "telemetry/metrics/$1.json" "${state}"
+    || { rc=$?; echo "WARNING: Prometheus instant query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; metric_query_failures=$((metric_query_failures + 1)); state=failed; }
+  record_query metrics prometheus "/api/v1/query" "$2" "telemetry/metrics/$1.json" "${state}" \
+    ",\"time\":${end_epoch},\"attempts\":1,\"lastExit\":${rc}"
 }
-capture_prometheus_range() {
-  local state=captured
+# A rate at time t averages [t - window, t], so a rate series evaluated from the
+# window start averaged the time BEFORE the measurement: warm-up locally, and on
+# a shared or remote process the previous workload (R02 read R01's GC pauses and
+# was labelled gc-bound). Rate roles use a short window and are evaluated from
+# start + window, so every point lies inside the measurement. Raise
+# PERFLAB_RATE_WINDOW_SECONDS for a target that exports metrics less often than
+# every few seconds (the lab apps export every 5 s).
+rate_window_seconds="${PERFLAB_RATE_WINDOW_SECONDS:-20}"
+[[ "${rate_window_seconds}" =~ ^[1-9][0-9]*$ ]] || rate_window_seconds=20
+rate_start_epoch=$(( start_epoch + rate_window_seconds ))
+# A window too short to hold one lookback keeps its last point rather than none.
+(( rate_start_epoch <= end_epoch - prometheus_range_step )) || rate_start_epoch=$(( end_epoch - prometheus_range_step ))
+(( rate_start_epoch >= start_epoch )) || rate_start_epoch="${start_epoch}"
+capture_prometheus_range() { # capture_prometheus_range <file> <query> [start-epoch]
+  local state=captured rc=0 range_start="${3:-${start_epoch}}"
   backend_curl -fsS --max-time 30 --get --data-urlencode "query=$2" \
-    --data-urlencode "start=${start_epoch}" --data-urlencode "end=${end_epoch}" --data-urlencode "step=5" \
+    --data-urlencode "start=${range_start}" --data-urlencode "end=${end_epoch}" --data-urlencode "step=${prometheus_range_step}" \
     "${prometheus_url}/api/v1/query_range" > "${artifact_dir}/telemetry/metrics/$1.json" \
-    || { echo "WARNING: Prometheus range query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; metric_query_failures=$((metric_query_failures + 1)); state=failed; }
+    || { rc=$?; echo "WARNING: Prometheus range query '$1' failed; that metric is MISSING." >&2; capture_incomplete=1; metric_query_failures=$((metric_query_failures + 1)); state=failed; }
   [[ "${state}" == "captured" ]] && state="$(grade_metric_role "$1")"
-  record_query metrics prometheus "/api/v1/query_range" "$2" "telemetry/metrics/$1.json" "${state}"
+  record_query metrics prometheus "/api/v1/query_range" "$2" "telemetry/metrics/$1.json" "${state}" \
+    ",\"step\":${prometheus_range_step},\"start\":${range_start},\"attempts\":1,\"lastExit\":${rc}"
 }
 
 # A backend answering 200 with an empty result set is NOT a captured metric: the
@@ -349,8 +377,13 @@ if [[ -f "${metrics_map}" ]]; then
     q="${m_promql//\$JOB/${prom_job_regex}}"
     q="${q//\$RUN_ID/${telemetry_run_id}}"
     q="${q//\$SERVICE_INSTANCE/${service_instance_regex}}"
+    role_start="${start_epoch}"
+    if [[ "${q}" == *'$RATE_WINDOW'* ]]; then
+      q="${q//\$RATE_WINDOW/${rate_window_seconds}s}"
+      role_start="${rate_start_epoch}"
+    fi
     case "${m_type}" in
-      range) capture_prometheus_range "${m_file}" "${q}" ;;
+      range) capture_prometheus_range "${m_file}" "${q}" "${role_start}" ;;
       instant) capture_prometheus_query "${m_file}" "${q}" ;;
       *) echo "Unknown metric type '${m_type}' for role '${m_file}'." >&2 ;;
     esac
@@ -374,19 +407,22 @@ trace_population_seen=0
 trace_saturated=0
 trace_next_cursor=""
 capture_tempo_slice() { # <start-seconds> <end-seconds>
-  local slice_start="$1" slice_end="$2" remaining page_limit page_file count middle attempt slice_ok=0
+  local slice_start="$1" slice_end="$2" remaining page_limit page_file count middle attempt slice_ok=0 slice_attempts=0 slice_rc=0 slice_page
   (( trace_population_seen >= trace_limit )) && { trace_saturated=1; trace_next_cursor="${slice_start}000000000"; return 0; }
   remaining=$((trace_limit - trace_population_seen)); page_limit=1000
   (( remaining < page_limit )) && page_limit="${remaining}"
-  trace_page=$((trace_page + 1))
+  trace_page=$((trace_page + 1)); slice_page="${trace_page}"
   page_file="${trace_pages_dir}/search-$(printf '%05d' "${trace_page}").json"
   for attempt in $(seq 1 6); do
+    slice_attempts="${attempt}"
     if backend_curl -fsS --max-time 20 --get \
         --data-urlencode "q=${trace_query}" \
         --data-urlencode "start=${slice_start}" --data-urlencode "end=${slice_end}" --data-urlencode "limit=${page_limit}" \
         --data-urlencode "most_recent=true" \
         "${tempo_url}/api/search" > "${page_file}.tmp" 2>/dev/null; then
-      tempo_reachable=1; mv "${page_file}.tmp" "${page_file}"; slice_ok=1; break
+      tempo_reachable=1; mv "${page_file}.tmp" "${page_file}"; slice_ok=1; slice_rc=0; break
+    else
+      slice_rc=$?
     fi
     rm -f "${page_file}.tmp"; (( attempt < 6 )) && sleep 5
   done
@@ -396,7 +432,8 @@ capture_tempo_slice() { # <start-seconds> <end-seconds>
   # replayed. One record per slice keeps the provenance executable.
   record_trace_slice "${slice_start}" "${slice_end}" "${page_limit}" \
     "telemetry/traces/search-pages/$(basename "${page_file}")" \
-    "$([[ "${slice_ok:-0}" == "1" ]] && echo captured || echo failed)"
+    "$([[ "${slice_ok:-0}" == "1" ]] && echo captured || echo failed)" \
+    "${slice_page}" "${slice_attempts}" "${slice_rc}"
   [[ -s "${page_file}" ]] || return 1
   count="$(jqd -r '(.traces // []) | length' < "${page_file}" 2>/dev/null || echo 0)"
   if (( count >= page_limit && slice_end - slice_start > 1 )); then
@@ -497,21 +534,46 @@ log_start="${start_epoch}000000000"
 log_page=0
 log_total=0
 log_more=0
+# Loki answers a page whose encoded size exceeds its gRPC message limit (4 MiB by
+# default) with an HTTP 5xx. Large log lines -- exception stack traces -- reach
+# that well before 1000 entries, so an HTTP error halves the page size, and the
+# smaller size sticks for later pages. Only a transport failure counts as
+# unreachable.
+log_page_size=1000
+log_http_error=0
 while (( log_total < log_limit )); do
-  log_page=$((log_page + 1)); log_page_limit=1000
+  log_page=$((log_page + 1)); log_page_limit="${log_page_size}"
   log_remaining=$((log_limit - log_total)); (( log_remaining < log_page_limit )) && log_page_limit="${log_remaining}"
   log_page_file="${log_pages_dir}/page-$(printf '%05d' "${log_page}").json"
-  page_ok=0
-  for attempt in $(seq 1 6); do
+  page_ok=0; log_page_attempts=0; log_page_rc=0; attempt=0
+  while (( attempt < 6 )); do
+    attempt=$((attempt + 1)); log_page_attempts="${attempt}"
     if backend_curl -fsS --max-time 30 --get \
         --data-urlencode "query=${log_query}" \
         --data-urlencode "start=${log_start}" --data-urlencode "end=${log_end}" \
         --data-urlencode "direction=backward" --data-urlencode "limit=${log_page_limit}" \
         "${loki_url}/loki/api/v1/query_range" > "${log_page_file}.tmp" 2>/dev/null; then
-      log_reachable=1; page_ok=1; mv "${log_page_file}.tmp" "${log_page_file}"; break
+      log_reachable=1; page_ok=1; log_page_rc=0; mv "${log_page_file}.tmp" "${log_page_file}"; break
+    else
+      log_page_rc=$?
     fi
-    rm -f "${log_page_file}.tmp"; (( attempt < 6 )) && sleep 5
+    rm -f "${log_page_file}.tmp"
+    if (( log_page_rc == 22 )); then
+      log_http_error=1
+      if (( log_page_limit > 50 )); then
+        log_page_limit=$((log_page_limit / 2)); log_page_size="${log_page_limit}"; attempt=$((attempt - 1))
+        continue
+      fi
+    fi
+    (( attempt < 6 )) && sleep 5
   done
+  # Each page is its own request with its own cursor window; the merged record
+  # below cannot be replayed, this one can. Nanosecond bounds are Loki's, not
+  # the epoch-second window the shared record carries.
+  record_query logs loki "/loki/api/v1/query_range" "${log_query}" \
+    "telemetry/logs/pages/$(basename "${log_page_file}")" \
+    "$([[ "${page_ok}" == "1" ]] && echo captured || echo failed)" \
+    ",\"page\":${log_page},\"limit\":${log_page_limit},\"direction\":\"backward\",\"startNanos\":\"${log_start}\",\"endNanos\":\"${log_end}\",\"attempts\":${log_page_attempts},\"lastExit\":${log_page_rc}"
   (( page_ok == 1 )) || break
   page_count="$(jqd -r '[.data.result[]?.values[]?] | length' < "${log_page_file}" 2>/dev/null || echo 0)"
   log_total=$((log_total + page_count))
@@ -535,7 +597,11 @@ fi
 # diagnosis cannot distinguish "the application said nothing" from "the log
 # pipeline dropped everything", so it degrades the package to partial rather
 # than passing as a complete capture (D-P0-4: absence must not read as health).
-if [[ "${log_reachable}" -eq 0 ]]; then
+if [[ "${log_reachable}" -eq 0 && "${log_http_error}" -eq 1 ]]; then
+  echo "WARNING: Loki at ${loki_url} answered every attempt with an HTTP error, down to ${log_page_limit}-entry pages; logs FAILED." >&2
+  capture_incomplete=1
+  telemetry_log_state="failed"
+elif [[ "${log_reachable}" -eq 0 ]]; then
   echo "WARNING: Loki unreachable at ${loki_url} after retries; logs are MISSING." >&2
   capture_incomplete=1
   telemetry_log_state="missing"
@@ -627,6 +693,16 @@ fi
   docker version
   docker compose version
   wrk --version
+  # Name the wrk that generated this package's load: the host binary above, or
+  # the image (and its architecture) when PERFLAB_WRK_IMAGE selects Docker.
+  if [[ "${load_gen}" == "wrk" ]]; then
+    if [[ -n "${PERFLAB_WRK_IMAGE:-}" ]]; then
+      echo "--- wrk execution: docker ${PERFLAB_WRK_IMAGE} ---"
+      docker image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}}' "${PERFLAB_WRK_IMAGE}"
+    else
+      echo "--- wrk execution: host $(command -v wrk) ---"
+    fi
+  fi
   k6 version
   if [[ "${load_gen}" == "jmeter" && -n "${PERFLAB_JMETER_IMAGE:-}" ]]; then
     echo "--- jmeter ---"
@@ -660,7 +736,10 @@ lifecycle_ownership="none"
 if [[ "${target_mode}" == "local" ]]; then
   lifecycle_ownership="managed"
 fi
-if [[ "${PERF_WORKLOAD_KIND:-}" == "journey" || "${PERF_WRITE_ACK:-}" == "managed-reference" ]]; then
+# The class records the partition this run created, not an acknowledgement left
+# in the environment: a ScenarioLab write mix under PERF_WRITE_ACK has no
+# partition, and the gate then demanded a cleanup marker that cannot exist.
+if [[ "${PERF_WORKLOAD_KIND:-}" == "journey" || "${PERF_PARTITION_READY:-0}" == "1" ]]; then
   write_safety_class="managed-reference"
 fi
 remote_correlation_fact=false
@@ -695,18 +774,31 @@ fi
 # Prometheus just because the URL happens to be reachable (local-as-remote
 # fixtures would otherwise silently convert load-only into observed-mode facts).
 # Missing server costs stay absent -- never zero-filled.
-if [[ "${capture_telemetry}" == "1" ]]; then
+if [[ "${capture_telemetry}" == "1" && "${PERF_PROTOCOL:-}" != "browser-synthetic" ]]; then
   eff_window=$(( end_epoch - start_epoch )); (( eff_window < 1 )) && eff_window=1
   eff_si="${service_instance_regex:-.+}"
   eff_reqrate="sum(rate(http_server_request_duration_seconds_count{service_instance_id=~\"${eff_si}\",http_route!~\"/health.*|\"}[${eff_window}s]))"
-  prom_scalar() {
-    backend_curl -fsS -G "${prometheus_url}/api/v1/query" \
-      --data-urlencode "query=$1" --data-urlencode "time=${end_epoch}" 2>/dev/null \
-      | jqd -r '.data.result[0].value[1] // empty' 2>/dev/null || true
+  prom_scalar() { # <observation-name> <promql>
+    # These derived observations were the one query family with no provenance
+    # line: an absent efficiency fact could not be told apart from a query that
+    # was never issued. Recorded with the artifact they feed, the pinned time,
+    # and the state (empty = answered with no sample, failed = transport/HTTP).
+    local name="$1" query="$2" body="" rc=0 value="" state=captured
+    body="$(backend_curl -fsS -G "${prometheus_url}/api/v1/query" \
+      --data-urlencode "query=${query}" --data-urlencode "time=${end_epoch}" 2>/dev/null)" || rc=$?
+    if (( rc != 0 )); then
+      state=failed
+    else
+      value="$(printf '%s' "${body}" | jqd -r '.data.result[0].value[1] // empty' 2>/dev/null || true)"
+      [[ -n "${value}" ]] || state=empty
+    fi
+    record_query metrics prometheus "/api/v1/query" "${query}" "facts.json#observations/${name}" "${state}" \
+      ",\"time\":${end_epoch},\"attempts\":1,\"lastExit\":${rc},\"derived\":true"
+    printf '%s' "${value}"
   }
   eff_obs=()
   add_eff() { # <name> <unit> <numerator-promql>
-    local v; v="$(prom_scalar "$3 / ${eff_reqrate}")"
+    local v; v="$(prom_scalar "$1" "$3 / ${eff_reqrate}")"
     [[ -n "${v}" && "${v}" != "NaN" && "${v}" != "+Inf" && "${v}" != "-Inf" ]] || return 0
     eff_obs+=("{\"name\":\"$1\",\"value\":${v},\"unit\":\"$2\",\"source\":\"prometheus (derived)\"}")
   }

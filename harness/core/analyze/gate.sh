@@ -80,10 +80,18 @@ while IFS=$'\t' read -r n v; do [[ -n "${n}" ]] && OBS["${n}"]="${v}"; done < <(
 
 # --- 1. Absolute SLO checks -------------------------------------------------
 fail=0; checked=0
-journey_failed="${OBS[journeys.failed]:-0}"
+if awk -v value="${OBS[browser.checks.failed]:-0}" 'BEGIN { exit !((value + 0) > 0) }'; then
+  fail=$((fail+1)); checked=$((checked+1))
+  echo "  browser.checks.failed              max 0           observed=${OBS[browser.checks.failed]} FAIL (correctness)"
+fi
+# k6 reports journey.failed and the JMeter adapter journeys.failed. Reading only
+# the JMeter name passed a k6 checkout run with failed journeys.
+journey_metric="journey.failed"
+[[ -n "${OBS[journey.failed]:-}" ]] || journey_metric="journeys.failed"
+journey_failed="${OBS[${journey_metric}]:-0}"
 if awk -v value="${journey_failed}" 'BEGIN { exit !((value + 0) > 0) }'; then
   fail=$((fail+1)); checked=$((checked+1))
-  echo "  journeys.failed                    max 0           observed=${journey_failed} FAIL (correctness)"
+  printf '  %-34s max 0           observed=%s FAIL (correctness)\n' "${journey_metric}" "${journey_failed}"
 fi
 if [[ -s "${slos_file}" ]]; then
   echo "Absolute SLOs:"

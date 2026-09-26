@@ -4,6 +4,13 @@ import grpc from 'k6/net/grpc';
 import ws from 'k6/ws';
 import { check } from 'k6';
 import { Counter } from 'k6/metrics';
+const actualStatusErrors = new Counter('perflab_http_non_2xx_3xx');
+const actualTransportErrors = new Counter('perflab_http_transport_errors');
+function recordHttpOutcome(response) {
+  actualStatusErrors.add(response.status !== 0 && (response.status < 200 || response.status >= 400) ? 1 : 0);
+  actualTransportErrors.add(response.status === 0 ? 1 : 0);
+}
+
 
 const baseUrl = __ENV.PERF_BASE_URL || 'http://127.0.0.1:18080';
 const websocketUrl = baseUrl.replace(/^http/, 'ws');
@@ -11,6 +18,7 @@ const grpcTarget = __ENV.PERF_GRPC_TARGET || '127.0.0.1:18081';
 const scenario = __ENV.PERF_SCENARIO || 'P01';
 const runId = __ENV.PERF_RUN_ID || 'k6-manual';
 const protocolFailures = new Counter('protocol_failures');
+let reportedHandshakeFailure = false;
 const client = new grpc.Client();
 client.load(['.'], 'reliability.proto');
 setResponseCallback(expectedStatuses({ min: 200, max: 399 }, 429, 503));
@@ -46,7 +54,15 @@ function rawWebSocket() {
     });
     socket.setTimeout(() => socket.close(), 2000);
   });
-  if (response && response.status !== 101) protocolFailures.add(1);
+  if (!response || response.status !== 101) {
+    protocolFailures.add(1);
+    // Bound diagnostic logging to one failure per VU; the full count remains
+    // in protocol_failures even when handshake failures dominate a run.
+    if (!reportedHandshakeFailure) {
+      reportedHandshakeFailure = true;
+      console.warn(JSON.stringify({event: 'websocket-handshake-failed', status: response && response.status, errorCode: response && response.error_code, error: response && response.error}));
+    }
+  }
 }
 
 function signalR() {
@@ -88,6 +104,7 @@ function messaging() {
   const response = http.post(`${baseUrl}/api/reliability/messages?tenant=protocol`, null, {
     headers: { 'X-Perf-Run-Id': runId },
   });
+  recordHttpOutcome(response);
   const ok = check(response, {
     'message accepted or backpressured': value => value.status === 202 || value.status === 429,
   });

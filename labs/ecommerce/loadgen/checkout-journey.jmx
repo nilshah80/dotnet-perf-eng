@@ -111,6 +111,11 @@ if (sampler != null && "op::login".equals(sampler.getName())) {
             </elementProp>
           </HTTPSamplerProxy>
           <hashTree>
+            <ConstantThroughputTimer guiclass="TestBeanGUI" testclass="ConstantThroughputTimer" testname="Stable v1 journey arrival pacing" enabled="true">
+              <stringProp name="throughput">${__groovy(((props.get('perf.profile') ?: '') ==~ /open|arrival|capacity|knee/) ? ((props.get('perf.target_rps') ?: '1') as double) * 60 : 600000000)}</stringProp>
+              <intProp name="calcMode">4</intProp>
+            </ConstantThroughputTimer>
+            <hashTree/>
             <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract-token" enabled="true">
               <stringProp name="JSONPostProcessor.referenceNames">perf.token</stringProp>
               <stringProp name="JSONPostProcessor.jsonPathExprs">$.token</stringProp>
@@ -314,11 +319,6 @@ if ("completed".equalsIgnoreCase(state)) {
             <hashTree/>
           </hashTree>
         </hashTree>
-        <ConstantThroughputTimer guiclass="TestBeanGUI" testclass="ConstantThroughputTimer" testname="Stable v1 arrival pacing" enabled="true">
-          <stringProp name="throughput">${__groovy(((props.get('perf.profile') ?: '') ==~ /open|arrival|capacity|knee/) ? ((props.get('perf.target_rps') ?: '1') as double) * 60 : 600000000)}</stringProp>
-          <intProp name="calcMode">4</intProp>
-        </ConstantThroughputTimer>
-        <hashTree/>
       </hashTree>
     </hashTree>
   </hashTree>

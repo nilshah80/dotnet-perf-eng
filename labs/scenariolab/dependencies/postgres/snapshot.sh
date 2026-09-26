@@ -21,12 +21,23 @@ mkdir -p "${artifact_dir}/dependencies"
 plan_file="${artifact_dir}/dependencies/postgres-query-plan.json"
 
 # Deadlock + rollback counters -- the definitive evidence for the deadlock
-# scenario (S27), captured for every scenario (deadlocks=0 for the rest). These
-# are cumulative since the last stats reset, so on a fresh stack the count
-# reflects this run; read it as a delta if the stack has served earlier runs.
+# scenario (S27), captured for every scenario. They are cumulative since the
+# last stats reset, so the raw file carries every earlier run on this stack;
+# postgres-deadlocks-delta.json subtracts the post-warm-up baseline written by
+# the postgres reset-stats adapter and is the count for this measured window.
 compose exec -T "${pg_service}" psql -U "${pg_user}" -d "${pg_db}" -c \
   "COPY (SELECT datname, numbackends, xact_commit, xact_rollback, deadlocks FROM pg_stat_database WHERE datname='${pg_db}') TO STDOUT WITH CSV HEADER" \
   > "${artifact_dir}/dependencies/postgres-deadlocks.csv" 2>/dev/null || true
+deadlocks_before="${artifact_dir}/dependencies/postgres-deadlocks-preload.csv"
+deadlocks_after="${artifact_dir}/dependencies/postgres-deadlocks.csv"
+if [[ -s "${deadlocks_before}" && -s "${deadlocks_after}" ]]; then
+  # A negative difference means the counters were reset in between: no delta.
+  awk -F, 'NR == FNR { if (FNR == 2) { c = $3; r = $4; d = $5 } next }
+    FNR == 2 {
+      if ($3 < c || $4 < r || $5 < d) print "{\"scope\":\"not-comparable\",\"reason\":\"pg_stat_database counters were reset during the run\"}"
+      else printf "{\"scope\":\"measured-window\",\"xactCommit\":%d,\"xactRollback\":%d,\"deadlocks\":%d}\n", $3 - c, $4 - r, $5 - d
+    }' "${deadlocks_before}" "${deadlocks_after}" > "${artifact_dir}/dependencies/postgres-deadlocks-delta.json" || true
+fi
 
 method="${PERF_METHOD:-GET}"
 full_path="${PERF_PATH:-}"

@@ -5,6 +5,8 @@
 set -euo pipefail
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/normalization.sh"
 
 artifact_dir="${1:?Usage: normalize-runtime.sh <artifact-directory>}"
 [[ -d "${artifact_dir}" ]] || { echo "Artifact directory '${artifact_dir}' does not exist." >&2; exit 1; }
@@ -30,6 +32,11 @@ normalization_rc=0
 if "${normalizer}" "${artifact_dir}"; then
   printf '{"startedAt":"%s","completedAt":"%s","status":"captured"}\n' \
     "$(json_escape "${normalization_started}")" "$(json_escape "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" > "${normalization_json}"
+  # A normalizer can succeed with a recorded limitation (an extended SOS
+  # command failed while the thread and heap listing was kept). Carry it here,
+  # where the single-kind path's only normalization record lives.
+  normalization_merge_limitations "${normalization_json}" "${artifact_dir}/runtime/normalization-limitations.json" \
+    || echo "WARNING: the normalization limitations were not merged into ${normalization_json}." >&2
 else
   normalization_rc=$?
   printf '{"startedAt":"%s","completedAt":"%s","status":"partial","reason":"one or more independent capture normalizations failed"}\n' \

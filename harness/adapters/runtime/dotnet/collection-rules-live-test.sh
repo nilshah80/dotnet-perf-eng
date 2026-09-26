@@ -44,7 +44,11 @@ compose() {
 }
 cleanup() {
   compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+  if [[ "${PERFLAB_TEST_KEEP:-0}" == "1" ]]; then
+    echo "retained live evidence at ${work}" >&2
+  else
   rm -rf -- "${work}"
+  fi
 }
 trap cleanup EXIT HUP INT TERM
 

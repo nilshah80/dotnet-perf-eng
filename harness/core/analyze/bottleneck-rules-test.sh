@@ -249,7 +249,75 @@ PATH="${test_root}/bin:${PATH}" PERFLAB_LAB=scenariolab \
   || fail "the classifier failed on a run with dropped iterations"
 notes "${starved_gen}" | grep -q 'dropped iteration' \
   || fail "dropped iterations were not surfaced, so generator starvation reads as server behaviour"
-notes "${starved_gen}" | grep -q 'offered load exceeded served throughput' \
+notes "${starved_gen}" | grep -q 'scheduled load was not delivered' \
   || fail "the note does not say the offered load was never delivered"
+
+# Aggregate CPU work can exceed wall latency without CPU saturation (P01).
+ratio_run="$(build_run cpu-cost-not-saturation 30 0.15 0 "")"
+ratio_dir="$(dirname "$(dirname "${ratio_run}")")"
+jq '(.observations[] | select(.name == "http.latency.p50").value) = 1
+    | (.observations[] | select(.name == "efficiency.cpu_ms_per_request").value) = 4.2'   "${ratio_dir}/facts.json" > "${ratio_dir}/facts.json.tmp"
+mv "${ratio_dir}/facts.json.tmp" "${ratio_dir}/facts.json"
+PATH="${test_root}/bin:${PATH}" PERFLAB_LAB=scenariolab   bash "${repo}/harness/core/analyze/bottleneck.sh" "${ratio_dir}" >/dev/null 2>&1
+[[ "$(verdict "${ratio_run}")" != cpu-bound ]] || fail "CPU cost/latency ratio was mistaken for saturation"
+notes "${ratio_run}" | grep -q 'system has headroom' && fail "absence of saturation was advertised as headroom"
+notes "${starved_gen}" | grep -q 'past the knee' && fail "generator drops were attributed to server capacity"
+
+# Captured fractional quotas apply per instance; two half-core replicas each
+# using 0.45 cores are 90% utilized, not 180% or 45%.
+quota_run="$(build_run fractional-quota 30 0.45 0 "")"
+quota_dir="$(dirname "$(dirname "${quota_run}")")"
+mkdir -p "${quota_dir}/environment/measurement-start"
+"${PYTHON}" - "${quota_dir}" <<'PYFIX'
+import json,pathlib,sys
+p=pathlib.Path(sys.argv[1]);m=p/'telemetry/metrics'
+for name in ['process_cpu','cpu_count']:
+ d=json.loads((m/(name+'.json')).read_text());rows=[]
+ for instance in ['a','b']:
+  row=dict(d['data']['result'][0]);row['metric']={'service_instance_id':instance,'service_name':'service-'+instance}
+  if name=='cpu_count': row['values']=[[1790340000,'1']]
+  rows.append(row)
+ d['data']['result']=rows;(m/(name+'.json')).write_text(json.dumps(d))
+(p/'environment/measurement-start/resource-limits.json').write_text(json.dumps([
+ {'telemetryService':'service-a','cpuLimit':0.5,'telemetryExporterAuthority':'lgtm:4317'},
+ {'telemetryService':'service-b','cpuLimit':0.5,'telemetryExporterAuthority':'lgtm:4317'}]))
+# An exporter with a huge old cumulative wait must never explain request latency.
+f=m/'http_client_metrics.json';d=json.loads(f.read_text())
+for row in d['data']['result']:
+ row['metric']['server_port']='4317' if row['metric']['server_address']=='lgtm' else '80'
+ if row['metric']['server_address']=='lgtm' and row['metric']['__name__'].endswith('_sum'): row['values']=[[1700000000,'90000']]
+f.write_text(json.dumps(d))
+PYFIX
+PATH="${test_root}/bin:${PATH}" PERFLAB_LAB=scenariolab   bash "${repo}/harness/core/analyze/bottleneck.sh" "${quota_dir}" >/dev/null 2>&1
+jq -e '.resources.cpu.utilizationPct == 90 and .resources.cpu.cpuCount == 0.5
+  and .resources.upstreamPool.pool == "upstream" and .resources.upstreamPool.saturated == false' "${quota_run}" >/dev/null   || fail "replica quota or exporter attribution is wrong"
+
+# One high queue point during a spike must not become sustained starvation.
+spike="$(build_run isolated-queue 148 0.2 24 "")"
+"${PYTHON}" - "$(dirname "$(dirname "${spike}")")/telemetry/metrics/thread_pool_queue.json" <<'PYSPIKE'
+import json,sys
+p=sys.argv[1];d=json.load(open(p))
+for row in d['data']['result']:
+ for i,point in enumerate(row['values']): point[1]='24' if i==5 else '0'
+open(p,'w').write(json.dumps(d))
+PYSPIKE
+PATH="${test_root}/bin:${PATH}" PERFLAB_LAB=scenariolab bash "${repo}/harness/core/analyze/bottleneck.sh" "$(dirname "$(dirname "${spike}")")" >/dev/null
+jq -e '.resources.threadPool.saturated == false and .verdict != "threadpool-starved" and any(.notes[];contains("isolated"))' "${spike}" >/dev/null \
+  || fail "one isolated queue point was promoted to sustained starvation"
+
+
+# --- DB time above the median names both values with a decimal --------------
+# The checkout journey's 2.16 ms of DB time against a 1.84 ms median used to
+# read "mean database time per request (2 ms) exceeds the median request
+# latency (2 ms)".
+report="$(build_run dbshare 100 0.05 0 "")"
+dbdir="$(dirname "$(dirname "${report}")")"
+jq '(.observations[] | select(.name == "http.latency.p50") | .value) = 1.84
+    | (.observations[] | select(.name == "efficiency.db_ms_per_request") | .value) = 2.16' \
+  "${dbdir}/facts.json" > "${dbdir}/facts.json.tmp" && mv "${dbdir}/facts.json.tmp" "${dbdir}/facts.json"
+PATH="${test_root}/bin:${PATH}" PERFLAB_LAB=scenariolab bash "${repo}/harness/core/analyze/bottleneck.sh" "${dbdir}" > "${dbdir}/run.out" 2>&1 \
+  || fail "dbshare: bottleneck.sh failed"
+jq -e '.verdict == "dependency-bound-db" and (.reason | test("\\(2\\.2 ms\\) exceeds the median request latency \\(1\\.8 ms\\)"))' "${report}" >/dev/null \
+  || fail "DB-share wording lost its decimals: $(jq -r .reason "${report}")"
 
 echo "bottleneck classifier rule tests passed"

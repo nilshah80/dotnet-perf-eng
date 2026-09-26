@@ -43,7 +43,11 @@ cleanup() {
     kill "${app_pid}" 2>/dev/null || true
     wait "${app_pid}" 2>/dev/null || true
   fi
+  if [[ "${PERFLAB_TEST_KEEP:-0}" == "1" ]]; then
+    echo "retained live evidence at ${work}" >&2
+  else
   rm -rf "${work}"
+  fi
 }
 trap cleanup EXIT HUP INT TERM
 

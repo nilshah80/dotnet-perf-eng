@@ -55,11 +55,12 @@ services:
   diagnostic-permissions:
     image: alpine:3.22
     user: "0:0"
-    command: ["sh", "-c", "mkdir -p /diag/crash-dumps/incomplete && chown -R 1654:1654 /diag && chmod -R 0770 /diag"]
+    command: ["sh", "-c", "mkdir -p /diag/crash-dumps/incomplete /diag-b/crash-dumps/incomplete && chown -R 1654:1654 /diag /diag-b && chmod -R 0770 /diag /diag-b"]
     volumes:
       - diagnostic-ipc:/diag
+      - diagnostic-ipc-b:/diag-b
 
-  dotnet-monitor:
+  dotnet-monitor: &monitor
     build:
       context: ../../harness/adapters/runtime/dotnet/monitor
       dockerfile: Dockerfile
@@ -93,6 +94,16 @@ services:
       diagnostic-permissions:
         condition: service_completed_successfully
 
+  # Each replica has its own diagnostic socket and monitor. Assembly names and
+  # namespace-local PIDs are identical, so sharing a monitor cannot prove role.
+  dotnet-monitor-b:
+    <<: *monitor
+    ports:
+      - "127.0.0.1:19333:52323"
+      - "127.0.0.1:19335:52325"
+    volumes:
+      - diagnostic-ipc-b:/diag
+
   api-a:
     <<: *api
     ports:
@@ -122,11 +133,11 @@ services:
       OTEL_SERVICE_NAME: protocol-reliability-b
       DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
     volumes:
-      - diagnostic-ipc:/diag
+      - diagnostic-ipc-b:/diag
     depends_on:
       lgtm:
         condition: service_started
-      dotnet-monitor:
+      dotnet-monitor-b:
         condition: service_started
 
   gateway:
@@ -154,3 +165,4 @@ services:
 volumes:
   lgtm-data:
   diagnostic-ipc:
+  diagnostic-ipc-b:

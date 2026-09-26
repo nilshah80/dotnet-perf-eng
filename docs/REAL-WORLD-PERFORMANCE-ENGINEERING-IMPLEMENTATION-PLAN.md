@@ -2156,8 +2156,8 @@ the rule above that counts as not met, not as an omission.
 | 8 | Open arrival proves journey starts/s and amplification | A | native `harness/adapters/loadgen/k6/journey-normalization-test.sh` |
 | 9 | Closed execution proves concurrent user/session semantics | A | native `harness/adapters/loadgen/k6/profile-shape-test.sh` |
 | 10 | Stress distinguishes saturation from generator starvation | A | native `harness/core/analyze/bottleneck-rules-test.sh` |
-| 11 | Breakpoint records last healthy and first failing levels | A | native `harness/adapters/loadgen/k6/profile-shape-test.sh` |
-| 12 | Spike records failure and recovery time by phase | A | native `harness/adapters/loadgen/k6/profile-shape-test.sh` |
+| 11 | Breakpoint records last healthy and first failing levels | A | native `harness/adapters/loadgen/k6/profile-shape-test.sh` and `harness/core/analyze/analyze-stages-test.sh`; PerfLab `go test ./internal/peanalyze/ -run TestStages` |
+| 12 | Spike records failure and recovery time by phase | A | native `harness/adapters/loadgen/k6/profile-shape-test.sh` and `harness/core/analyze/analyze-stages-test.sh`; PerfLab `go test ./internal/peanalyze/ -run TestStages` |
 | 13 | Soak uses one uninterrupted session with checkpoints | B | native `harness/core/lib/soak-session-test.sh`; perflab `go test ./internal/session/ -run TestSoakUsesOneSession`; perflab `go test ./internal/session/ -run TestRejectRestartedGenerator`; perflab `go test ./internal/lab/ -run TestSoakCertificationRequiresFourHours` |
 | 14 | Data-scale restores and verifies each dataset fingerprint | A | native `harness/core/run/run-scenario-lifecycle-test.sh` |
 | 15 | Fault execution proves apply and restore | B | native `harness/core/lib/fault-proof-test.sh`; perflab `go test ./internal/orchestrator/ -run TestFaultRestoresOnFailureAndInterruptedMeasurement`; perflab `go test ./internal/orchestrator/ -run TestKillFaultRestoresWithStart` |
@@ -2236,7 +2236,16 @@ These do not block Gate A unless the release claims the capability.
 | C-4 | JMeter implements a subset of k6 profiles. | Advertising a JMeter profile beyond the subset | Keep the subset; fail unsupported profiles before traffic. k6 stays canonical for open-arrival and complex shapes. |
 | C-7 / C-8 | Fault and reliability orchestration is narrow. | Advertising fault or reliability qualification | Safe apply/restore confirmation, emergency cleanup, recovery correctness. Network/disk faults may stay deferred. |
 | C-9 / C-10 / C-11 | Complete: advertised Protocol Reliability profiles, six Pyroscope types, and diagnose-mode `/stacks` are qualified with fixed proof commands. | Each advertised lab, generator, profile, or diagnostic type | `harness/core/lib/capability-qualification-test.sh`; PerfLab qualification tests; the live Protocol Reliability Gate B suite. |
-| C-12 | Complete: a live 14,400-second Protocol Reliability soak (`gateb-soak-20260919T135323Z`) produced a verified evidence package. | A stability or soak-certification claim | One uninterrupted generator identity, heartbeats, snapshots, target-window/no-restart proof, and cancellation handling are enforced; the recorded session has 2,924 identity-bound heartbeats. Eight- and 24-hour runs stay Gate C. |
+| C-12 | Complete for the session-identity and duration gates. A 14,400-second native Protocol Reliability soak on 2026-09-19 qualified them; its evidence package was not retained, so the run id `gateb-soak-20260919T135323Z` and its 2,924 identity-bound heartbeats are a historical record, not a live artifact. | A stability or soak-certification claim | Durable checks: native `performance_soak_cert_preflight` (configured duration >= 14,400 s under `PERFLAB_SOAK_CERT=1`) and `performance_soak_bind_pid`; PerfLab `TestSoakCertificationRequiresFourHours`, `TestRejectRestartedGenerator`, `TestSoakUsesOneSession`, `TestLoadProfileRuntimeRejectsRestartedGenerator`, and the measured-phase check `TestLoadPhaseRejectsAGeneratorIdentityChange`. The four-hour check is a configured-duration gate, not elapsed-time proof; an accepted soak keeps a compact summary (elapsed measured time, generator and target continuity, completion state), never bulk artifacts. Rolling leak/SLO monitoring during the session is not part of this claim: native heartbeats carry identity only, and the lab path runs a long measured phase rather than the session evaluator. Eight- and 24-hour runs stay Gate C. |
+
+**Hang bound.** `/stacks` and collection rules require an owned managed-Compose
+diagnose recreate: that can reproduce a hang, it cannot snapshot a process
+that was already hung. The native `dump` preset also recreates an owned Compose
+target before it attaches. A process that is already hung can be dumped only on
+a path that does not recreate (remote, attach, or PerfLab against the same
+generation), and the thread stacks read from that dump (D-P2-3) are the hang
+path that works there. Production incident attach is a wider claim than any
+of these rows make.
 
 ### 23.4 Gate C — platform expansion
 
@@ -2246,14 +2255,14 @@ specific failure classes and are not required for every .NET project.
 | ID | Item | Note |
 | --- | --- | --- |
 | D-P1-3 | Span-to-profile correlation | `PyroscopeSpanProcessor`; CPU profiles only |
-| D-P1-4 | Native/kernel/off-CPU path | PerfCollect / `collect-linux` / `dotnet-symbol`; explicit unsupported |
+| D-P1-4 | Native/kernel/off-CPU path | Unsupported in both products and not advertised: no PerfCollect, `collect-linux` or `dotnet-symbol` path exists. Latency that remains after CPU, GC and dependency time are explained is outside what the labs can attribute. |
 | D-P1-8 | Dynamic `perf.phase` and run baggage | Application signal source; generated queries when advertised |
-| D-P1-10 | Mid-load container stats and sockets | Contract already has `deployment-topology` and `target-network-evidence`. Gap is PerfLab collectors and optional-native weakness, not a missing family |
+| D-P1-10 | Mid-load container stats and sockets | Landed. Native `sample_resource_series` samples owned containers on a bounded `PERFLAB_RESOURCE_SAMPLE_SECONDS` cadence into `dependencies/container-stats-series.ndjson`, `dependencies/<app>-sockets-series.ndjson` and `resource-series.json`; every tick is bounded, a tick is captured only when both files got a row, and the summary counts captured, partial and failed ticks plus each file's own count (`run-scenario-lifecycle-test.sh`). PerfLab records a `target-container-series` environment document per measured phase and service from the same cgroup, throttling, OOM and socket-state counters, with per-metric gaps and a not-applicable document for a window shorter than one tick (`go test ./internal/environment/ -run TestBuildContainerSeries`; `go test ./internal/orchestrator/ -run TestResourceSeries`). Boundary snapshots remain; the series is best-effort. |
 | D-P2-1 | Speedscope keeps CPU samples only | Raw nettrace is retained |
-| D-P2-7 | Clock and query provenance incomplete except profiles | Replayable metrics/logs/traces queries; not a Gate A promise |
-| D-P2-3 | Dump analysis under-normalized | `dumpasync`, `syncblk`, `analyzeoom` |
-| D-P2-4 | PerfLab capability preflight | Refuse unsupported dump/gcdump before perturbing |
-| D-P1-9 / D-P1-11 / D-P2-2 / D-P2-5 / D-P2-6 | Test wiring, hygiene, keyword pin. D-P1-11 is `dotnet-counters` **wired up, not deleted**: the tool is in the diagnostics image for exactly this, and the defect was that nothing invoked it. | Land with the related fix; not a release blocker |
+| D-P2-7 | Clock and query provenance | Landed for metrics, logs and traces. Every native record carries its step or pinned evaluation time, page, attempt count and last transport exit; the derived efficiency scalars are recorded; PerfLab provenance already carried attempts and truncation (`capture-evidence-empty-signal-test.sh` case 8). Profiles unchanged. |
+| D-P2-3 | Dump analysis | Landed. Native `dotnet-dump analyze` runs the thread and heap listing first and `dumpasync`, `syncblk` and `analyzeoom` as a second invocation, so an extended-command failure is recorded on the normalization rather than paid for with the whole report. PerfLab ClrMD reports every thread's state, wait classification and top frames, contended sync blocks and shared frames in a `runtime.dump.threads` artifact that is retained and not exportable, like `/stacks` output; the exportable `findings.threads` block carries counts and wait kinds only and names that artifact (`ThreadSummarizerTests`, `DumpThreadsTests` against a live dump). This is the only PerfLab hang path that works on a process that was already hung: `/stacks` needs a diagnose recreate, a dump does not. `analyzeoom` explains a managed OutOfMemory, not a container OOM kill. |
+| D-P2-4 | PerfLab capability preflight | Landed. `MonitorCapabilities.RequireAsync` reads `/info` and the OpenAPI document at prepare time and refuses a monitor without a named Listen-mode diagnostic port, the same rule as the native harness, and a missing `/trace`, `/gcdump`, `/dump` or `/stacks`, or disabled `call_stacks`, before any campaign; the IPC path refuses a GC dump without the packaged tool; process dumps and stacks are refused before the target is perturbed when the volume mounted at the destination cannot hold their budget (`MonitorCapabilityTests`). Endpoint presence is not harmlessness: a GC dump is still a full GC and a large heap still pauses. |
+| D-P1-9 / D-P1-11 / D-P2-2 / D-P2-5 / D-P2-6 | Test wiring, hygiene, keyword pin. D-P1-11 is the live-counters signal, not the `dotnet-counters` executable: native reads dotnet-monitor `/livemetrics` through `monitor_curl` in both single-kind and campaign trace captures, and PerfLab opens a System.Runtime EventPipe session even without a CPU trace. The unused tool in the diagnostics image is not the capability and not the next feature. | Land with the related fix; not a release blocker |
 | C-13 | Native Tempo unique-fill | Minor. 993 unique traces against a 1,000 maximum is not a broken result. Preserve returned count and dedup facts. Refill only if callers require an exact unique-count guarantee |
 | C-6 extra | Second data-provider family | SQL plus message-queue is a portfolio choice |
 | Deferred | Kubernetes, Windows/macOS, 8/24h soak, Datadog, hostile-environment, upgrade/rollback, network/disk faults | Stay deferred; never reported as complete |
@@ -2282,7 +2291,7 @@ command that runs in a contract check.
 | 13 | Collection rules and crash dumps if post-incident capture is claimed | D-P0-6 | B | Done |
 | 14 | External-target auth; qualify each advertised capability | D-P1-6, C-9, C-10, C-11 | B | Done |
 | 15 | Advertised JMeter extras, soak cert, faults, distributed load | C-4, C-12, C-7, C-8, C-3 | B | Done except C-4: JMeter extras remain deliberately unadvertised |
-| 16 | Remaining Gate C diagnostics and provenance | D-P1-3, D-P1-4, D-P1-8, D-P1-10, D-P2-7, D-P2-* remainder, C-13 | C | Not started |
+| 16 | Remaining Gate C diagnostics and provenance | D-P1-3, D-P1-4, D-P1-8, D-P1-10, D-P2-7, D-P2-* remainder, C-13 | C | Partial: D-P1-10, D-P2-3, D-P2-4 and D-P2-7 landed with proof commands; D-P1-4 is documented as unsupported; D-P1-3, D-P1-8 and C-13 are not started |
 
 ### 23.6 Claims examined and rejected
 

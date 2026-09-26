@@ -55,14 +55,23 @@ work_pattern="${PERFLAB_ASYNC_WORK_QUEUE_PATTERN:-created|orders|work}"
 # rather than reporting a number it cannot scope.
 preload="$(dirname "${queues}")/rabbitmq-queues-preload.json"
 baseline_published=0; baseline_acked=0; baseline_redelivered=0; scope_state="run-scoped"
+# Depths at the baseline too: the counters are subtracted, so the depths must be
+# as well, or messages queued or dead-lettered during warm-up are charged to the
+# measured run (S17 starts its window with a full queue and a populated DLQ).
+baseline_ready=0; baseline_unacked=0; baseline_dead=0
 if [[ -s "${preload}" ]]; then
-  read_fields 3 < <(
+  read_fields 6 < <(
     jqd -r --arg work "${work_pattern}" --arg dead "${dead_pattern}" '
       [.[]? | select((.name // "") | test($dead) | not) | select((.name // "") | test($work))] as $w |
+      [.[]? | select((.name // "") | test($dead))] as $d |
       [ ([$w[].message_stats.publish // 0] | add // 0),
         ([$w[].message_stats.ack // 0] | add // 0),
-        ([$w[].message_stats.redeliver // 0] | add // 0) ] | .[] | tostring' < "${preload}" 2>/dev/null) \
-    && { baseline_published="${TSV_FIELDS[0]}"; baseline_acked="${TSV_FIELDS[1]}"; baseline_redelivered="${TSV_FIELDS[2]}"; }
+        ([$w[].message_stats.redeliver // 0] | add // 0),
+        ([$w[].messages_ready // 0] | add // 0),
+        ([$w[].messages_unacknowledged // 0] | add // 0),
+        ([$d[].messages // 0] | add // 0) ] | .[] | tostring' < "${preload}" 2>/dev/null) \
+    && { baseline_published="${TSV_FIELDS[0]}"; baseline_acked="${TSV_FIELDS[1]}"; baseline_redelivered="${TSV_FIELDS[2]}"
+         baseline_ready="${TSV_FIELDS[3]}"; baseline_unacked="${TSV_FIELDS[4]}"; baseline_dead="${TSV_FIELDS[5]}"; }
 else
   scope_state="unscoped"
 fi
@@ -90,6 +99,19 @@ redelivered=$(( TSV_FIELDS[2] - baseline_redelivered ))
 (( redelivered < 0 )) && redelivered=0
 backlog="${TSV_FIELDS[3]}"; unacked="${TSV_FIELDS[4]}"; dead="${TSV_FIELDS[5]}"
 work_seen="${TSV_FIELDS[6]}"; dead_seen="${TSV_FIELDS[7]}"
+# The balance uses the change in each depth across the run; the end depths are
+# still reported, because they are the state the next operator inherits.
+ready_delta=$(( backlog - baseline_ready ))
+unacked_delta=$(( unacked - baseline_unacked ))
+dead_delta=$(( dead - baseline_dead ))
+# Management counters are emitted every collect_statistics_interval (5 s by
+# default), so a snapshot can trail the traffic by up to one interval. A
+# difference within that much of the run's publish rate is sampling lag, not loss.
+stats_lag=0
+if [[ -s "${run_arg}/manifest.json" ]]; then
+  window="$(jqd -r '((.measurementEndedEpoch // 0) - (.measurementStartedEpoch // 0))' < "${run_arg}/manifest.json" 2>/dev/null | head -1 || true)"
+  [[ "${window:-0}" =~ ^[0-9]+$ && "${window}" -gt 0 ]] && stats_lag=$(( (published * 5 + window - 1) / window ))
+fi
 # Successful requests only. http.requests.total counts failures too, and a
 # request that returned 500 was never accepted -- comparing it against publishes
 # would invent a gap the system does not have.
@@ -98,6 +120,15 @@ accepted="$(jqd -r '
   ((.observations[]? | select(.name=="http.responses.non_2xx_3xx") | .value) // 0) as $status |
   ((.observations[]? | select(.name=="http.transport_errors") | .value) // 0) as $transport |
   ($total - $status - $transport) | if . < 0 then 0 else . end' < "${facts}" 2>/dev/null | head -1 || true)"
+# Only a single-request workload publishes once per success. A weighted mix
+# counts every member, so ScenarioLab's mixed-runtime (10% POST /api/orders)
+# reported 176,207 reads as requests "accepted and never enqueued".
+http_comparison="compared"
+workload_method="$(jqd -r '.workload.method // empty' < "${run_arg}/manifest.json" 2>/dev/null | head -1 || true)"
+case "${workload_method}" in
+  ""|GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) ;;
+  *) http_comparison="not-applicable: ${workload_method} workload; its HTTP successes include operations that do not publish" ;;
+esac
 
 findings=""
 balanced=true
@@ -113,6 +144,41 @@ findings=""
 balanced=true
 add() { findings="${findings}${findings:+,}$(printf '"%s"' "$(json_escape "$1")")"; balanced=false; }
 
+# A broker restart inside the window starts message_stats from zero, so the
+# post-warm-up baseline no longer applies and "published" would count only the
+# traffic since the restart -- inventing a gap of accepted-but-never-enqueued
+# work. Evidence of a restart: this run's own stop/kill fault on the broker, or
+# a node whose uptime is shorter than the time since the baseline was taken.
+restart_reason=""
+fault_proof="${run_arg}/benchmark/fault-proof.json"
+if [[ -s "${fault_proof}" ]]; then
+  restart_reason="$(jqd -r --arg svc "${rabbit_service:-rabbitmq}" '
+    select(.service == $svc and .applied == true and (.action == "stop" or .action == "kill")) |
+    "the \(.action) fault in this run restarted \(.service) at \(.appliedAt)"' < "${fault_proof}" 2>/dev/null | head -1 || true)"
+fi
+nodes_before="$(dirname "${queues}")/rabbitmq-nodes-preload.json"
+nodes_after="$(dirname "${queues}")/rabbitmq-nodes.json"
+if [[ -z "${restart_reason}" && -s "${nodes_before}" && -s "${nodes_after}" ]]; then
+  restart_reason="$(cat "${nodes_before}" "${nodes_after}" | jqd -rs '
+    (.[1].capturedAtEpoch - .[0].capturedAtEpoch) as $elapsed | .[0].nodes as $before |
+    [ .[1].nodes[] as $n | select(any($before[]; .name == $n.name)) |
+      select((($n.uptime // 0) / 1000) < ($elapsed - 5)) | $n.name ] |
+    if length > 0 then "broker node \(join(", ")) has less uptime than the \($elapsed)s since the baseline, so it restarted" else empty end' 2>/dev/null | head -1 || true)"
+fi
+if [[ -n "${restart_reason}" ]]; then
+  # Current depths stay true after a restart: a dead-letter queue still holding
+  # messages is loss the client never saw. Only the cumulative balance is void.
+  [[ "${backlog:-0}" -gt 0 ]] && add "${backlog} message(s) still queued at the end of the run"
+  [[ "${unacked:-0}" -gt 0 ]] && add "${unacked} message(s) unacknowledged at the end of the run"
+  [[ "${dead:-0}" -gt 0 ]] && add "${dead} message(s) in the dead-letter queue at the end of the run: accepted work the HTTP result cannot show"
+  printf '{"kind":"async-reconciliation","captureState":"not-captured","reason":"%s; message_stats restarted from zero, so publish/ack cannot be scoped to this run and no balance is computed","balanced":null,"stillQueued":%s,"inFlight":%s,"deadLettered":%s,"httpSuccessful":%s,"scope":"broker-restarted","workQueues":%s,"deadLetterQueues":%s,"findings":[%s]}\n' \
+    "$(json_escape "${restart_reason}")" "${backlog:-0}" "${unacked:-0}" "${dead:-0}" "${accepted:-null}" \
+    "${work_seen:-0}" "${dead_seen:-0}" "${findings}" > "${out}"
+  echo "async-reconciliation: ${restart_reason}; balance not computed." >&2
+  echo "wrote ${out}"
+  exit 0
+fi
+
 # The broker only reports message_stats once it has seen traffic. Without them
 # there is no completed count, and saying "balanced" would be a claim about a
 # measurement nobody took.
@@ -127,30 +193,36 @@ fi
 
 # The balance itself. Anything published and not accounted for is work the
 # broker took and cannot place.
-unaccounted="$(awk -v p="${published:-0}" -v a="${acknowledged:-0}" -v r="${backlog:-0}" \
-  -v u="${unacked:-0}" -v d="${dead:-0}" 'BEGIN { printf "%d", p - (a + r + u + d) }')"
+unaccounted="$(awk -v p="${published:-0}" -v a="${acknowledged:-0}" -v r="${ready_delta:-0}" \
+  -v u="${unacked_delta:-0}" -v d="${dead_delta:-0}" 'BEGIN { printf "%d", p - (a + r + u + d) }')"
 
-[[ "${backlog:-0}" -gt 0 ]] && add "${backlog} message(s) still queued at the end of the run: accepted by the API, never processed, and counted as success by the client"
-[[ "${unacked:-0}" -gt 0 ]] && add "${unacked} message(s) unacknowledged: delivered to a consumer that never confirmed them"
-[[ "${dead:-0}" -gt 0 ]] && add "${dead} message(s) dead-lettered: rejected or corrupt work the HTTP result cannot show"
+inherited() { if [[ "$1" -gt 0 ]]; then printf ' (%s already there when the measured window began)' "$1"; fi; }
+[[ "${backlog:-0}" -gt 0 ]] && add "${backlog} message(s) still queued at the end of the run: accepted by the API, never processed, and counted as success by the client$(inherited "${baseline_ready}")"
+[[ "${unacked:-0}" -gt 0 ]] && add "${unacked} message(s) unacknowledged: delivered to a consumer that never confirmed them$(inherited "${baseline_unacked}")"
+if [[ "${dead:-0}" -gt 0 && "${baseline_dead}" -gt 0 ]]; then
+  add "${dead_delta} message(s) dead-lettered during the run (${dead} in the dead-letter queue, ${baseline_dead} of them from before the measured window): rejected or corrupt work the HTTP result cannot show"
+elif [[ "${dead:-0}" -gt 0 ]]; then
+  add "${dead} message(s) dead-lettered: rejected or corrupt work the HTTP result cannot show"
+fi
 [[ "${redelivered:-0}" -gt 0 ]] && add "${redelivered} redelivery(ies): the broker delivered work more than once. That is a delivery ATTEMPT, not proof a handler completed twice -- but a non-idempotent handler has been given the chance to."
-if [[ "${unaccounted}" -gt 0 ]]; then
+if [[ "${unaccounted}" -gt "${stats_lag}" ]]; then
   add "${unaccounted} published message(s) are unaccounted for: not acknowledged, not queued, not in flight, not dead-lettered"
-elif [[ "${unaccounted}" -lt 0 ]]; then
+elif [[ "${unaccounted}" -lt $(( -stats_lag )) ]]; then
   add "the broker acknowledged more messages than it recorded publishing (${unaccounted} difference); the counters span more than this run window"
 fi
 
 # The HTTP count is reported beside the broker count, never in place of it: a
 # gap between them is itself a finding -- requests that returned 202 without
 # reaching the broker at all.
-if [[ -n "${accepted:-}" && "${accepted}" != "null" ]]; then
+if [[ "${http_comparison}" == "compared" && -n "${accepted:-}" && "${accepted}" != "null" ]]; then
   http_gap="$(awk -v h="${accepted}" -v p="${published:-0}" 'BEGIN { printf "%d", h - p }')"
-  [[ "${http_gap}" -gt 0 ]] && add "${http_gap} request(s) succeeded over HTTP without a corresponding publish; they were accepted and never enqueued"
+  [[ "${http_gap}" -gt "${stats_lag}" ]] && add "${http_gap} request(s) succeeded over HTTP without a corresponding publish; they were accepted and never enqueued"
 fi
 
-printf '{"kind":"async-reconciliation","captureState":"captured","balanced":%s,"published":%s,"acknowledged":%s,"stillQueued":%s,"inFlight":%s,"deadLettered":%s,"duplicate":{"captureState":"captured","redeliveries":%s,"meaning":"redelivery attempts, not confirmed duplicate completions"},"unaccounted":%s,"httpSuccessful":%s,"scope":"%s","workQueues":%s,"deadLetterQueues":%s,"findings":[%s]}\n' \
-  "${balanced}" "${published:-0}" "${acknowledged:-0}" "${backlog:-0}" "${unacked:-0}" "${dead:-0}" \
-  "${redelivered:-0}" "${unaccounted}" "${accepted:-null}" "${scope_state}" \
+printf '{"kind":"async-reconciliation","captureState":"captured","balanced":%s,"published":%s,"acknowledged":%s,"stillQueued":%s,"inFlight":%s,"deadLettered":%s,"deadLetteredDuringRun":%s,"baseline":{"stillQueued":%s,"inFlight":%s,"deadLettered":%s},"statsLagTolerance":%s,"duplicate":{"captureState":"captured","redeliveries":%s,"meaning":"redelivery attempts, not confirmed duplicate completions"},"unaccounted":%s,"httpSuccessful":%s,"httpComparison":"%s","scope":"%s","workQueues":%s,"deadLetterQueues":%s,"findings":[%s]}\n' \
+  "${balanced}" "${published:-0}" "${acknowledged:-0}" "${backlog:-0}" "${unacked:-0}" "${dead:-0}" "${dead_delta:-0}" \
+  "${baseline_ready}" "${baseline_unacked}" "${baseline_dead}" "${stats_lag}" \
+  "${redelivered:-0}" "${unaccounted}" "${accepted:-null}" "$(json_escape "${http_comparison}")" "${scope_state}" \
   "${work_seen:-0}" "${dead_seen:-0}" "${findings}" > "${out}"
 
 if [[ "${balanced}" == "false" ]]; then

@@ -228,15 +228,39 @@ if [[ -n "${lab_config}" ]]; then
   source "${script_lib_dir}/target-lifecycle.sh"
 fi
 
+# wrk_execution_mode: print "docker" when PERFLAB_WRK_IMAGE names an image, else
+# "host" when a wrk binary is on PATH. A Docker image whose architecture differs
+# from the Docker host is refused before traffic: an amd64 wrk emulated on an
+# arm64 host dies with SIGSEGV (exit 139), even for a plain GET.
+wrk_execution_mode() {
+  if [[ -z "${wrk_image:-}" ]]; then
+    command -v wrk >/dev/null 2>&1 || {
+      echo "wrk not found: install wrk on the host, or set PERFLAB_WRK_IMAGE to a wrk image for the Docker path." >&2
+      return 1
+    }
+    echo host
+    return 0
+  fi
+  command -v docker >/dev/null 2>&1 || { echo "wrk image ${wrk_image} needs docker, which is not installed." >&2; return 1; }
+  local image_arch host_arch
+  image_arch="$(docker image inspect --format '{{.Architecture}}' "${wrk_image}" 2>/dev/null)" || {
+    echo "wrk image ${wrk_image} is not present locally; the run never pulls it." >&2
+    return 1
+  }
+  host_arch="$(docker info --format '{{.Architecture}}' 2>/dev/null)"
+  case "${host_arch}" in aarch64) host_arch=arm64 ;; x86_64) host_arch=amd64 ;; esac
+  if [[ -n "${host_arch}" && "${image_arch}" != "${host_arch}" ]]; then
+    echo "wrk image ${wrk_image} is ${image_arch} but the Docker host is ${host_arch}; emulated wrk crashes. Unset PERFLAB_WRK_IMAGE to use the host wrk, or pin a ${host_arch} image." >&2
+    return 1
+  fi
+  echo docker
+}
+
 require_loadgen() {
   case "${load_generator}" in
     k6) require_command k6 ;;
     wrk)
-      require_command docker
-      [[ -n "${wrk_image}" ]] || {
-        echo "wrk runs via Docker; set PERFLAB_WRK_IMAGE in the descriptor to your wrk image." >&2
-        exit 1
-      }
+      wrk_execution_mode >/dev/null || exit 1
       ;;
     jmeter)
       require_command docker
@@ -407,6 +431,19 @@ read_fields() {
   return 0
 }
 
+# Local replicas may have identical assembly names. Resolve their isolated
+# monitor endpoint without weakening the adapter's single-match identity check.
+# Remote targets continue to require the explicitly acknowledged endpoint.
+diag_endpoint() {
+  local svc="$1" pair
+  if [[ "${target_mode:-local}" != remote ]]; then
+    for pair in ${PERFLAB_DIAG_ENDPOINTS:-}; do
+      if [[ "${pair%%=*}" == "${svc}" ]]; then printf '%s' "${pair#*=}"; return 0; fi
+    done
+  fi
+  printf '%s' "${diagnostics_url}"
+}
+
 # diag_target <app-service> -> process identity from PERFLAB_DIAG_TARGETS.
 diag_target() {
   local svc="$1" pair
@@ -429,10 +466,10 @@ scenario_value() {
     id) col=1 ;; name) col=2 ;; method) col=3 ;; path) col=4 ;; body) col=5 ;;
     target) col=6 ;; diagnostic) col=7 ;; connections) col=8 ;;
       type|selector) col=0 ;;
-      profilingPolicy) col=0 ;;
+      profilingPolicy|loadModel) col=0 ;;
     *) echo "Unknown scenario field '${field}'." >&2; return 1 ;;
   esac
-  if [[ -n "${scenario_catalog:-}" && -f "${scenario_catalog}" && "$field" != "type" && "$field" != "selector" && "$field" != "profilingPolicy" ]]; then
+  if [[ -n "${scenario_catalog:-}" && -f "${scenario_catalog}" && "${col}" != 0 ]]; then
     local from_tsv
     from_tsv="$(awk -F'\t' -v id="${id}" -v c="${col}" '
       $0 ~ /^[[:space:]]*#/ { next }
@@ -454,6 +491,7 @@ scenario_value() {
       diagnostic) filter='.diagnostics.preset' ;;
       profilingPolicy) filter='.diagnostics.profilingPolicy' ;;
       connections) filter='.defaults.rate' ;;
+      loadModel) filter='.defaults.loadModel' ;;
       *) filter='' ;;
     esac
     if [[ -n "${filter}" ]]; then

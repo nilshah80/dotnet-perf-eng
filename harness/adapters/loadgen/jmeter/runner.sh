@@ -345,14 +345,16 @@ publish_summary() {
       {name:"http.error_rate",value:.errorRate,unit:"ratio",source:"benchmark/jmeter-summary-v1.json"},
       {name:"http.dropped_iterations",value:.droppedIterations,unit:"iteration",source:"benchmark/jmeter-summary-v1.json"}
     ] + (if .journeyWireRequests > 0 and .iterations != .requests then [
-      {name:"journeys.started",value:.iterations,unit:"journey",source:"benchmark/jmeter-summary-v1.json"},
-      {name:"journeys.completed",value:.journeySucceeded,unit:"journey",source:"benchmark/jmeter-summary-v1.json"},
-      {name:"journeys.failed",value:.journeyFailed,unit:"journey",source:"benchmark/jmeter-summary-v1.json"},
-      {name:"journeys.aborted",value:.journeyAborted,unit:"journey",source:"benchmark/jmeter-summary-v1.json"},
-      {name:"journeys.child_ops",value:.journeyChildOps,unit:"operation",source:"benchmark/jmeter-summary-v1.json"},
-      {name:"journeys.wire_requests",value:.journeyWireRequests,unit:"request",source:"benchmark/jmeter-summary-v1.json"},
-      {name:"journeys.retries",value:.journeyRetries,unit:"request",source:"benchmark/jmeter-summary-v1.json"},
-      {name:"journeys.request_amplification",value:(if .iterations > 0 then .journeyWireRequests / .iterations else 0 end),unit:"request/journey",source:"benchmark/jmeter-summary-v1.json"}
+      # Same journey.* names and units as the k6 adapter, so gates, comparisons
+      # and parity read one vocabulary; this adapter used to emit journeys.*.
+      {name:"journey.starts",value:.iterations,unit:"iteration",source:"benchmark/jmeter-summary-v1.json"},
+      {name:"journey.completed",value:.journeySucceeded,unit:"iteration",source:"benchmark/jmeter-summary-v1.json"},
+      {name:"journey.failed",value:.journeyFailed,unit:"iteration",source:"benchmark/jmeter-summary-v1.json"},
+      {name:"journey.aborted",value:.journeyAborted,unit:"iteration",source:"benchmark/jmeter-summary-v1.json"},
+      {name:"journey.child_ops",value:.journeyChildOps,unit:"operation",source:"benchmark/jmeter-summary-v1.json"},
+      {name:"journey.wire_requests",value:.journeyWireRequests,unit:"request",source:"benchmark/jmeter-summary-v1.json"},
+      {name:"journey.retries",value:.journeyRetries,unit:"request",source:"benchmark/jmeter-summary-v1.json"},
+      {name:"journey.request_amplification",value:(if .iterations > 0 then .journeyWireRequests / .iterations else 0 end),unit:"request/iteration",source:"benchmark/jmeter-summary-v1.json"}
     ] else [] end)' "${summary_path}" > "${observations}.tmp"
     mv "${observations}.tmp" "${observations}"
   fi

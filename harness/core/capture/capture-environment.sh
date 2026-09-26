@@ -46,6 +46,19 @@ else
   state="partial"; reason="no owned containers were running at this boundary"
 fi
 
+# Retain only non-secret container resource and telemetry identity fields. The
+# full inspect response (including environment secrets) is never written.
+if [[ -n "${cids// /}" ]]; then
+  # shellcheck disable=SC2086
+  docker inspect ${cids} 2>/dev/null | jqd '[.[] | {
+    containerId:.Id, service:(.Config.Labels["com.docker.compose.service"] // ""),
+    telemetryService:([.Config.Env[]? | select(startswith("OTEL_SERVICE_NAME=")) | ltrimstr("OTEL_SERVICE_NAME=")][0] // ""),
+    telemetryExporterAuthority:([.Config.Env[]? | select(startswith("OTEL_EXPORTER_OTLP_ENDPOINT=")) | ltrimstr("OTEL_EXPORTER_OTLP_ENDPOINT=") | sub("^https?://";"") | split("/")[0] | split("@")[-1]][0] // ""),
+    cpuLimit:(if .HostConfig.NanoCpus > 0 then .HostConfig.NanoCpus / 1000000000
+      elif .HostConfig.CpuQuota > 0 and .HostConfig.CpuPeriod > 0 then .HostConfig.CpuQuota / .HostConfig.CpuPeriod else null end)
+  }]' > "${out_dir}/resource-limits.json" 2>/dev/null || true
+fi
+
 # Compose topology: which services existed, and in what state. A container that
 # restarted between two boundaries is invisible in the stats alone.
 compose ps --format json 2>/dev/null | jqd -s '.' > "${out_dir}/compose-ps.json" 2>/dev/null || true
@@ -78,6 +91,6 @@ compose ps --format json 2>/dev/null | jqd -s '.' > "${out_dir}/compose-ps.json"
   printf '}\n'
 } > "${out_dir}/host.json" 2>/dev/null || true
 
-printf '{"phase":"%s","capturedAt":"%s","captureState":"%s","reason":"%s","artifacts":["environment/%s/container-stats.ndjson","environment/%s/compose-ps.json","environment/%s/host.json"]}\n' \
+printf '{"phase":"%s","capturedAt":"%s","captureState":"%s","reason":"%s","artifacts":["environment/%s/container-stats.ndjson","environment/%s/compose-ps.json","environment/%s/host.json","environment/%s/resource-limits.json"]}\n' \
   "$(json_escape "${phase}")" "$(json_escape "${captured_at}")" "${state}" "$(json_escape "${reason}")" \
-  "${phase}" "${phase}" "${phase}" > "${out_dir}/environment.json"
+  "${phase}" "${phase}" "${phase}" "${phase}" > "${out_dir}/environment.json"

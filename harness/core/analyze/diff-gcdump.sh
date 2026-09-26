@@ -107,18 +107,18 @@ diff_one() { # <baseline-report> <candidate-report> [header]
       printf "  %12s  count %+d   %d B -> %d B   %s\n", human($1), $2, $3, $4, t }'
 
   echo "Top ${top} GROWN types (leak suspects):"
-  echo "${rows}" | awk -F'\t' '$1>0' | sort -t"$(printf '\t')" -k1,1 -rn | head -n "${top}" | awk -F'\t' "${fmt}"
-  echo "${rows}" | awk -F'\t' '$1>0' | grep -q . || echo "  (none)"
+  echo "${rows}" | awk -F'\t' '$1>0' | sort -t"$(printf '\t')" -k1,1 -rn | sed -n "1,${top}p" | awk -F'\t' "${fmt}"
+  awk -F'\t' '$1>0 { found=1 } END { exit !found }' <<< "${rows}" || echo "  (none)"
 
   echo ""
   echo "Top ${top} type(s) NEW in candidate (retained from zero):"
-  echo "${rows}" | awk -F'\t' '$5==1 && $1>0' | sort -t"$(printf '\t')" -k1,1 -rn | head -n "${top}" | awk -F'\t' "${fmt}"
-  echo "${rows}" | awk -F'\t' '$5==1 && $1>0' | grep -q . || echo "  (none)"
+  echo "${rows}" | awk -F'\t' '$5==1 && $1>0' | sort -t"$(printf '\t')" -k1,1 -rn | sed -n "1,${top}p" | awk -F'\t' "${fmt}"
+  awk -F'\t' '$5==1 && $1>0 { found=1 } END { exit !found }' <<< "${rows}" || echo "  (none)"
 
   echo ""
   echo "Top ${top} SHRUNK types:"
-  echo "${rows}" | awk -F'\t' '$1<0' | sort -t"$(printf '\t')" -k1,1 -n | head -n "${top}" | awk -F'\t' "${fmt}"
-  echo "${rows}" | awk -F'\t' '$1<0' | grep -q . || echo "  (none)"
+  echo "${rows}" | awk -F'\t' '$1<0' | sort -t"$(printf '\t')" -k1,1 -n | sed -n "1,${top}p" | awk -F'\t' "${fmt}"
+  awk -F'\t' '$1<0 { found=1 } END { exit !found }' <<< "${rows}" || echo "  (none)"
 }
 
 find_report() { find "$1" -type f -name "$2-gcdump-report.txt" 2>/dev/null | head -1; }

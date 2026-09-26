@@ -40,8 +40,9 @@ PERFLAB_MEASUREMENT_WINDOW_PROBE_PATH="/api/reliability/window"
 PERFLAB_MEASUREMENT_WINDOW_VERSION="perflab-measurement-window-v1"
 # Measurement default: /stacks injects ICorProfiler and cannot share that slot
 # with Pyroscope. Diagnose-mode capture-runtime.sh overrides this to true after
-# recreating the owned app with PERFLAB_CONTINUOUS_PROFILING=0.
-PERFLAB_ENABLE_DOTNET_MONITOR_STACKS="false"
+# recreating the owned app with PERFLAB_CONTINUOUS_PROFILING=0; the runtime
+# adapter re-reads this descriptor, so the default must not clobber that value.
+PERFLAB_ENABLE_DOTNET_MONITOR_STACKS="${PERFLAB_ENABLE_DOTNET_MONITOR_STACKS:-false}"
 PERFLAB_PYROSCOPE_SERVICES="protocol-reliability-a protocol-reliability-b"
 PERFLAB_PYROSCOPE_REQUIRED_SERVICES="protocol-reliability-a protocol-reliability-b"
 PERFLAB_PYROSCOPE_ROLE_SERVICES="api-a:protocol-reliability-a api-b:protocol-reliability-b"
@@ -58,6 +59,7 @@ PERFLAB_LOAD_GENERATOR_DEFAULT="k6"
 PERFLAB_K6_SCRIPT="labs/protocol-reliability/loadgen/k6.js"
 PERFLAB_JMETER_PLAN="labs/protocol-reliability/loadgen/test-plan.jmx"
 PERFLAB_DIAG_TARGETS="api-a:ProtocolReliability.Api api-b:ProtocolReliability.Api"
+PERFLAB_DIAG_ENDPOINTS="api-a=http://127.0.0.1:19323 api-b=http://127.0.0.1:19333"
 PERFLAB_DIAG_PRESETS="trace gcdump stacks dump"
 PERFLAB_ADMIN_TOKEN="${PERFLAB_ADMIN_TOKEN:-protocol-reliability-local}"
 PERF_GRPC_TARGET="${PERF_GRPC_TARGET:-127.0.0.1:18081}"

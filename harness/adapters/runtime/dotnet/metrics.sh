@@ -42,15 +42,15 @@
 PERFLAB_REQUIRED_METRIC_ROLES="process_cpu working_set gc_heap thread_pool_queue request_duration"
 
 PERFLAB_METRIC_ROLES=(
-  'process_cpu|range|rate(dotnet_process_cpu_time_seconds_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[1m])'
+  'process_cpu|range|rate(dotnet_process_cpu_time_seconds_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[$RATE_WINDOW])'
   'working_set|range|dotnet_process_memory_working_set_bytes{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
   'gc_heap|range|dotnet_gc_last_collection_heap_size_bytes{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
   'thread_pool_queue|range|dotnet_thread_pool_queue_length_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
   'request_duration|range|http_server_request_duration_seconds_count{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
-  'gc_allocation_rate|range|rate(dotnet_gc_heap_allocated_bytes_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[1m])'
+  'gc_allocation_rate|range|rate(dotnet_gc_heap_allocated_bytes_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[$RATE_WINDOW])'
   'gc_committed|range|dotnet_gc_last_collection_memory_committed_size_bytes{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
   'gc_collections|range|dotnet_gc_collections_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
-  'gc_pause|range|rate(dotnet_gc_pause_time_seconds_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[1m])'
+  'gc_pause|range|rate(dotnet_gc_pause_time_seconds_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[$RATE_WINDOW])'
   'database_pool_metrics|range|{__name__=~"(db_client_connection_.*|db_client_operation_npgsql_.*|npgsql_.*)",service_instance_id=~"$SERVICE_INSTANCE"}'
   'http_client_metrics|range|{__name__=~"http_client_.*",service_instance_id=~"$SERVICE_INSTANCE"}'
   # Saturation signals the USE-method classifier (analyze/bottleneck.sh) needs and
@@ -61,7 +61,7 @@ PERFLAB_METRIC_ROLES=(
   # thread_count pairs with thread_pool_queue to tell "starved" (queue grows while
   # threads plateau) from "just busy". A runtime without these emits empty files and
   # the classifier degrades that dimension to "not captured" -- never a false verdict.
-  'lock_contention|range|rate(dotnet_monitor_lock_contentions_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[1m])'
+  'lock_contention|range|rate(dotnet_monitor_lock_contentions_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[$RATE_WINDOW])'
   'cpu_count|instant|dotnet_process_cpu_count{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
   'thread_count|range|dotnet_thread_pool_thread_count_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
 )

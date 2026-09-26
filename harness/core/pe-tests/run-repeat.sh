@@ -50,6 +50,7 @@ excluded_reps=0
 for ((k = 1; k <= repeats; k++)); do
   echo; echo "[repeat] rep ${k}/${repeats} ..."
   d="${rep_dir}/reps/rep-$(printf '%02d' "${k}")"
+  mkdir -p "${d}"
   if [[ "${reseed_between_reps}" == "true" ]]; then
     echo "[repeat] --reseed: wiping + reseeding the DB before rep ${k} ..."
     docker compose -f "${compose_file}" down -v >/dev/null 2>&1 || {
@@ -57,7 +58,7 @@ for ((k = 1; k <= repeats; k++)); do
   fi
   rep_rc=0
   PERFLAB_ARTIFACT_DIR="${d}" PERFLAB_PACKAGE_RUN_ID="${rep_id}-rep${k}" PERFLAB_TELEMETRY_RUN_ID="${rep_id}-rep${k}" \
-    "${harness_core_dir}/run/run-scenario.sh" "${scenario_id}" "${duration}" >/dev/null 2>&1 || rep_rc=$?
+    "${harness_core_dir}/run/run-scenario.sh" "${scenario_id}" "${duration}" > "${d}/run.log" 2>&1 || rep_rc=$?
   # Only a clean, fully-CAPTURED rep contributes: a rep that errored, or that
   # finalized status:"partial" (a required capture failed -- run-scenario still
   # exits 0), would otherwise skew median/stddev/CV and let partial evidence into a
@@ -154,8 +155,18 @@ for ff in "${facts_files[@]}"; do
   # makes the whole repeat non-steady.
   rep_verdicts+=("$(jqd -r "${_rep_filter}" < "${ff}" 2>/dev/null || echo missing)")
 done
+# The aggregate names the worst thing a rep showed: measured drift (unsteady,
+# then warming) outranks a rep that could not be judged. Three 30 s E11 reps,
+# each "insufficient-data", used to aggregate as "unsteady" -- a drift nobody saw.
 agg_steady="steady"
-for v in "${rep_verdicts[@]}"; do [[ "${v}" == "steady" ]] || { agg_steady="unsteady"; break; }; done
+for v in "${rep_verdicts[@]}"; do
+  case "${v}" in
+    steady) ;;
+    unsteady) agg_steady="unsteady" ;;
+    warming) [[ "${agg_steady}" == "unsteady" ]] || agg_steady="warming" ;;
+    *) [[ "${agg_steady}" == "unsteady" || "${agg_steady}" == "warming" ]] || agg_steady="${v}" ;;
+  esac
+done
 verdicts_json="$(printf '%s\n' "${rep_verdicts[@]}" | jqd -Rn '[inputs]' 2>/dev/null || echo '[]')"
 # Carry runId+scenarioId INTO the stamp (from stats.json's own fields) so gate.sh's
 # provenance check accepts a repeat candidate or a promoted repeat baseline -- without

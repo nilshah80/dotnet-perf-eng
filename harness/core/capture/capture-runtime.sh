@@ -7,6 +7,8 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/performance.sh"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/sensitive-evidence.sh"
 
 artifact_dir="${1:?Usage: capture-runtime.sh <artifact-directory> [trace|gcdump|stacks|dump] [duration-seconds] | <artifact-directory> --preset <cpu|memory|cpu-memory|hang|dump> [duration-seconds] [--include-dump]}"
 manifest="${artifact_dir}/manifest.json"
@@ -254,6 +256,9 @@ if [[ "${manifest_dataset}" == seedScale=* ]]; then
   fi
 fi
 
+diagnostics_url="$(diag_endpoint "${target}")"
+export PERFLAB_DIAGNOSTICS_URL="${diagnostics_url}"
+
 # D-P0-3. An inherited PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true from the
 # operator environment must not arm ICorProfiler on a remote or attach-only
 # target. The flag is set only after a successful owned compose recreate.
@@ -415,6 +420,12 @@ if [[ "${PERFLAB_COLLECTION_RULES:-0}" == "1" && "${target_mode}" != "remote" ]]
     '{version:"perflab-dotnet-monitor-collection-rules-v1",state:$state,stateReason:$reason,targetUid:$uid,egress:$egress,localDumps:$dumps,maxBytes:536870912,actionCountLimit:1,sensitiveDataPolicy:"ack-required-not-exportable"}' \
     > "${rules_status_file}"
   performance_crash_dump_enforce "${crash_dir}"
+  # A Triage dump is process memory like any other dump: it leaves the package.
+  crash_dumps="$(find "${crash_dir}" -type f ! -name '.*' ! -name '*.retained.json' -print)"
+  while IFS= read -r crash_dump; do
+    [[ -n "${crash_dump}" ]] || continue
+    retain_sensitive_file "${crash_dump}" process-memory || exit 1
+  done <<< "${crash_dumps}"
 fi
 if [[ "${measurement_before}" != "${measurement_after}" ]]; then
   echo "Runtime diagnostics changed measured facts or observations; refusing the mutated evidence package." >&2

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# wrk load adapter -- wrk is NOT installed on the host; it runs via Docker,
-# joined to the compose network, targeting the app's INTERNAL url (e.g.
-# http://api:8080). k6, by contrast, runs on the host. Set PERFLAB_WRK_IMAGE in
-# the descriptor to a wrk image whose entrypoint is wrk.
+# wrk load adapter. With PERFLAB_WRK_IMAGE set, wrk runs via Docker, joined to
+# the compose network, targeting the app's INTERNAL url (e.g. http://api:8080);
+# the image's entrypoint must be wrk and its architecture must match the Docker
+# host. Without an image, the host's wrk binary runs against the app's published
+# base_url, the same path k6 uses.
 #   run.sh <artifact-dir> <phase>   phase = warmup | measure | diagnostic
 set -euo pipefail
 HARNESS_ROOT="${PERFLAB_HARNESS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
@@ -18,7 +19,7 @@ if [[ "${PERF_WORKLOAD_KIND:-request}" == "journey" || "${PERF_WORKLOAD_KIND:-re
   exit 1
 fi
 
-[[ -n "${wrk_image}" ]] || { echo "PERFLAB_WRK_IMAGE is not set; wrk runs via Docker." >&2; exit 1; }
+wrk_mode="$(wrk_execution_mode)" || exit 1
 
 # The workload script is the lab's own wrk.lua if it ships one, else the shared
 # default.lua. Its directory (not this adapter's) is mounted at /lab, and the
@@ -27,36 +28,55 @@ fi
 script="$(loadgen_script)"
 script_dir="$(cd "$(dirname "${script}")" && pwd)"
 script_base="$(basename "${script}")"
-# Local target: join the compose network and hit the app's INTERNAL url. Remote
-# target: no compose network -- run on Docker's default bridge and hit base_url
-# (the app's external url). A host-loopback base_url (127.0.0.1) is NOT reachable
-# from inside the container, so a host-local remote target must use k6, not wrk.
-if [[ "${target_mode:-local}" == "remote" ]]; then
-  network_args=()
+if [[ "${wrk_mode}" == "host" ]]; then
+  # The host binary reaches the app where k6 does: the published base_url, for a
+  # local or a remote target, including host loopback.
   url="${base_url}"
-  # wrk runs in a container: its 127.0.0.1 is the container's own loopback, not the
-  # host, so a host-loopback remote base_url yields an all-transport-errors run. Fail
-  # fast with the fix rather than emitting a misleading 100%-error result.
-  case "${url}" in
-    *"://127.0.0.1"*|*"://localhost"*|*"://[::1]"*)
-      echo "wrk cannot reach a host-loopback remote target (${url}) from inside its container. Use PERFLAB_LOAD_GENERATOR=k6 for a host-local remote target, or point PERFLAB_BASE_URL at a routable host." >&2
-      exit 1 ;;
-  esac
+  lua="${script_dir}/${script_base}"
+  wrk_run() { wrk "$@"; }
 else
-  network_args=(--network "${compose_network}")
-  url="${internal_base_url}"
+  # Local target: join the compose network and hit the app's INTERNAL url. Remote
+  # target: no compose network -- run on Docker's default bridge and hit base_url
+  # (the app's external url). A host-loopback base_url (127.0.0.1) is NOT reachable
+  # from inside the container, so a host-local remote target must use the host wrk
+  # or k6.
+  if [[ "${target_mode:-local}" == "remote" ]]; then
+    network_args=()
+    url="${base_url}"
+    # wrk runs in a container: its 127.0.0.1 is the container's own loopback, not the
+    # host, so a host-loopback remote base_url yields an all-transport-errors run. Fail
+    # fast with the fix rather than emitting a misleading 100%-error result.
+    case "${url}" in
+      *"://127.0.0.1"*|*"://localhost"*|*"://[::1]"*)
+        echo "wrk cannot reach a host-loopback remote target (${url}) from inside its container. Unset PERFLAB_WRK_IMAGE to use the host wrk, use PERFLAB_LOAD_GENERATOR=k6, or point PERFLAB_BASE_URL at a routable host." >&2
+        exit 1 ;;
+    esac
+  else
+    network_args=(--network "${compose_network}")
+    url="${internal_base_url}"
+  fi
+  wrk_run() {
+    MSYS_NO_PATHCONV=1 docker run --rm "${network_args[@]}" \
+      -e PERF_METHOD -e PERF_PATH -e PERF_BODY -e PERF_RUN_ID -e PERF_HEADERS \
+      -v "${script_dir}:/lab:ro" \
+      "${wrk_image}" "$@"
+  }
+  lua="/lab/${script_base}"
 fi
-wrk_run() {
-  MSYS_NO_PATHCONV=1 docker run --rm "${network_args[@]}" \
-    -e PERF_METHOD -e PERF_PATH -e PERF_BODY -e PERF_RUN_ID -e PERF_HEADERS \
-    -v "${script_dir}:/lab:ro" \
-    "${wrk_image}" "$@"
-}
-lua="/lab/${script_base}"
 
 case "${phase}" in
   warmup)
-    wrk_run -t2 -c16 -d10s -s "${lua}" "${url}" > "${artifact_dir}/benchmark/warmup.txt"
+    # Same bounds k6 applies: the run announces PERFLAB_WARMUP_SECONDS, so the
+    # warm-up must last that long rather than a fixed 10 seconds.
+    warmup_seconds="${PERFLAB_WARMUP_SECONDS:-10}"
+    case "${warmup_seconds}" in
+      ''|*[!0-9]*) echo "PERFLAB_WARMUP_SECONDS must be an integer number of seconds; received '${warmup_seconds}'." >&2; exit 1 ;;
+    esac
+    if (( warmup_seconds < 1 || warmup_seconds > 600 )); then
+      echo "PERFLAB_WARMUP_SECONDS must be between 1 and 600; received '${warmup_seconds}'." >&2
+      exit 1
+    fi
+    wrk_run -t2 -c16 -d"${warmup_seconds}s" -s "${lua}" "${url}" > "${artifact_dir}/benchmark/warmup.txt"
     ;;
   measure | diagnostic)
     conns="${PERFLAB_CONNECTIONS:?PERFLAB_CONNECTIONS not set}"

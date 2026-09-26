@@ -1,6 +1,13 @@
 import http from 'k6/http';
 import { check } from 'k6';
 import { Counter } from 'k6/metrics';
+const actualStatusErrors = new Counter('perflab_http_non_2xx_3xx');
+const actualTransportErrors = new Counter('perflab_http_transport_errors');
+function recordHttpOutcome(response) {
+  actualStatusErrors.add(response.status !== 0 && (response.status < 200 || response.status >= 400) ? 1 : 0);
+  actualTransportErrors.add(response.status === 0 ? 1 : 0);
+}
+
 import { expectedStatuses, setResponseCallback } from 'k6/http';
 
 const baseUrl = __ENV.PERF_BASE_URL || 'http://127.0.0.1:18080';
@@ -24,6 +31,7 @@ export default function () {
     headers: { 'X-Perf-Run-Id': runId },
     tags: { name: `operation::${__ENV.PERF_SCENARIO || 'P00'}` },
   });
+  recordHttpOutcome(response);
   if (response.status === 429 || response.status === 503) {
     expectedBackpressure.add(1);
   }

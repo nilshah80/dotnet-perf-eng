@@ -92,4 +92,21 @@ jq -e '
   exit 1
 }
 
-echo "measurement-window proof passed: restart is explicit in its own window and stale instances are excluded from the next window"
+# A Compose recycle keeps INSTANCE_ID constant. The process start timestamp,
+# rather than the service name alone, must distinguish the new generation.
+performance_measurement_window_probe "${base}" run-same-name mw-third start "${work}/third-start.json"
+kill "${app_pid}"
+wait "${app_pid}" 2>/dev/null || true
+app_pid=""
+start_app after-restart
+performance_measurement_window_probe "${base}" run-same-name mw-third end "${work}/third-end.json"
+performance_measurement_window_finalize "${work}/third-start.json" "${work}/third-end.json" "${work}/third-window.json"
+jq -e '
+  .restartDetected == true and .instanceIds == ["after-restart"] and
+  .start.processStartedAtUnixMilliseconds != .end.processStartedAtUnixMilliseconds
+' "${work}/third-window.json" >/dev/null || {
+  echo "measurement-window-proof-test: same-name process replacement was missed" >&2
+  exit 1
+}
+
+echo "measurement-window proof passed: renamed and same-name restarts are explicit; stable generations stay stable"

@@ -213,7 +213,7 @@ pyroscope_capture_profiles() {
     return 0
   fi
   mkdir -p "${artifact_dir}/telemetry/profiles"
-  local service selector start_utc end_utc endpoint overall="captured" required_failed=0 files=0
+  local service selector start_utc end_utc endpoint overall="captured" required_failed=0 files=0 sampled_files=0
   local profile_type profile_types_json="" old_ifs
   local services_json="" service_json
   start_utc="$(date -u -r "${start_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@${start_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
@@ -263,6 +263,7 @@ pyroscope_capture_profiles() {
     for service in ${pyroscope_services}; do
       pyroscope_query_service "${service}"
       files=$((files + 1))
+      case "${pyroscope_last_state}" in captured|truncated) sampled_files=$((sampled_files + 1)) ;; esac
       selector="$(pyroscope_query_selector "${service}")"
     if [[ "${pyroscope_last_state}" == "captured" || "${pyroscope_last_state}" == "truncated" ]] && [[ "${pyroscope_last_symbolization}" != "symbolized" ]]; then
       echo "WARNING: Pyroscope profile for ${service} is ${pyroscope_last_symbolization} (${pyroscope_last_symbolized} symbolized of ${pyroscope_last_nodes} frames). On aarch64 hosts pyroscope-dotnet 1.5.1 is an unsupported build that loses every frame of tiered-up (re-jitted) methods; the lab entrypoint disables tiered compilation there unless PERFLAB_PROFILING_KEEP_TIERING=1 was set. Check the profile's dotnet_tiered_compilation label." >&2
@@ -272,7 +273,7 @@ pyroscope_capture_profiles() {
       "$(json_escape "${pyroscope_last_state}")" "$(json_escape "${pyroscope_last_reason}")" \
       "${pyroscope_last_nodes}" "${pyroscope_last_symbolized}" "$(json_escape "${pyroscope_last_symbolization}")" \
       "$([[ "${pyroscope_last_state}" == "truncated" ]] && echo true || echo false)" \
-      "$(pyroscope_service_required "${service}" && echo true || echo false)" \
+      "$(pyroscope_service_required "${service}" && pyroscope_type_required "${profile_type}" && echo true || echo false)" \
       "${pyroscope_last_attempts}" "$(json_escape "${pyroscope_last_http}")" "$(json_escape "${selector}")")"
     if [[ -n "${services_json}" ]]; then
       services_json="${services_json},"
@@ -336,6 +337,9 @@ pyroscope_capture_profiles() {
     done
     [[ "${weakest}" != "captured" ]] && overall="${weakest}"
   fi
+  # Successful empty queries are not sampled profiles. Conditional types may
+  # legitimately have no events without making the overall package incomplete.
+  if (( sampled_files == 0 )) && [[ "${overall}" == captured ]]; then overall=missing; fi
   telemetry_profiles_state="${overall}"
   printf '{"schemaVersion":"pyroscope-query-v1","endpoint":"%s","ready":%s,"profileTypes":[%s],"maxNodes":%s,"startEpoch":%s,"endEpoch":%s,"startUtc":"%s","endUtc":"%s","windowScoped":%s,"attemptsPerService":%s,"services":[%s]}\n' \
     "$(json_escape "${endpoint}")" "${pyroscope_ready}" "${profile_types_json}" "${PYROSCOPE_MAX_NODES}" \

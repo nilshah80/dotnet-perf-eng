@@ -53,6 +53,13 @@ function unitInterval(value) {
     hash ^= value.charCodeAt(i);
     hash = Math.imul(hash, 16777619);
   }
+  // FNV-1a alone leaves the high bits correlated for keys that differ only in
+  // their trailing VU/iteration digits; the murmur3 finalizer spreads them.
+  hash ^= hash >>> 16;
+  hash = Math.imul(hash, 0x85ebca6b);
+  hash ^= hash >>> 13;
+  hash = Math.imul(hash, 0xc2b2ae35);
+  hash ^= hash >>> 16;
   return (hash >>> 0) / 4294967296;
 }
 

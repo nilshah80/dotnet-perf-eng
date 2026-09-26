@@ -67,8 +67,10 @@ printf '{}\n' > "$1/benchmark/k6-summary.json"
 if [[ "${2:-}" == "${LIFECYCLE_SLOW_PHASE:-}" ||
       ( "${2:-}" == "warmup" && "${PERFLAB_TEST_SLOW_WARMUP:-0}" == "1" ) ]]; then
   # Success after interruption forces the parent to exit from its own trap.
-  sleep 30
+  # LIFECYCLE_PHASE_SLEEP shortens the stall for cases that let it finish.
+  sleep "${LIFECYCLE_PHASE_SLEEP:-30}"
 fi
+if [[ "${2:-}" == "measure" && "${LIFECYCLE_FAIL_MEASURE:-0}" == "1" ]]; then exit 99; fi
 if [[ "${2:-}" == "warmup" && "${PERFLAB_TEST_FAIL_WARMUP:-0}" == "1" ]]; then
   echo "simulated warm-up interruption" >&2
   exit 1
@@ -141,6 +143,10 @@ if [[ "\${1:-}" == "run" ]]; then
   shift
   exec $(command -v jq) "\$@"
 fi
+# A stalled docker stats models a wedged daemon during an in-window tick.
+if [[ "\${1:-}" == "stats" && -n "\${LIFECYCLE_SLOW_DOCKER_STATS:-}" ]]; then
+  sleep "\${LIFECYCLE_SLOW_DOCKER_STATS}"
+fi
 exit 0
 EOF
 chmod +x "${test_root}/bin/docker"
@@ -151,6 +157,17 @@ cat > "${test_root}/bin/curl" <<'EOF'
 set -euo pipefail
 url="${*: -1}"
 case "${url}" in
+  */verification-window)
+    if grep -q '^loadgen:measure$' "${PERFLAB_TEST_CALLS}"; then exit 52; fi
+    run=""; window=""
+    for arg in "$@"; do
+      case "${arg}" in
+        'X-Perf-Run-Id: '*) run="${arg#X-Perf-Run-Id: }" ;;
+        'X-Perf-Measurement-Window: '*) window="${arg#X-Perf-Measurement-Window: }" ;;
+      esac
+    done
+    printf '{"runId":"%s","measurementWindowId":"%s","instanceId":"api","processStartedAtUnixMilliseconds":1000}' "${run}" "${window}"
+    ;;
   *health*|*ready*) printf 'OK' ;;
   *) printf '{"status":"success","data":{"result":[]}}' ;;
 esac
@@ -225,7 +242,7 @@ grep -q 'no lifecycle/reset' "${test_root}/case18.out" \
   || fail "run-scenario.sh did not take the remote path: $(head -5 "${test_root}/case18.out")"
 
 # --- C-6 interruption recovery ----------------------------------------------
-marker="${test_root}/artifacts/.dataset-preparation"
+marker="${test_root}/artifacts/.dataset-preparation-scenariolab"
 
 # A run interrupted during WARM-UP has prepared the dataset but never measured.
 # The marker has to outlive that, or the next run trusts a half-prepared state.
@@ -335,8 +352,80 @@ again_pkg="$(ls -dt "${test_root}"/artifacts/runs/*/ | head -1)"
 # Every reset must have succeeded for the fingerprint to mean anything: a
 # fingerprint recorded over state the run failed to clear describes data that
 # was never prepared.
+# The in-window resource series starts with the load and stops with it, and
+# always leaves a summary whose counts add up -- even for a window too short to
+# yield a sample, so a reader never mistakes "no samples" for "no sampler".
+series="${small_pkg}/dependencies/resource-series.json"
+[[ -s "${series}" ]] || fail "no dependencies/resource-series.json was written"
+jq -e '.version == "perflab-resource-series-v1" and .intervalSeconds >= 1 and .maxSamples >= 1
+       and .tickBoundSeconds >= 2 and .expected >= 0
+       and .samples == (.captured + .partial + .failed)
+       and .statsCaptured <= .samples and .socketsCaptured <= .samples
+       and .captured <= .statsCaptured and .captured <= .socketsCaptured
+       and (.files.containerStats == "dependencies/container-stats-series.ndjson")' "${series}" >/dev/null \
+  || fail "resource-series.json is not a consistent summary: $(cat "${series}")"
+[[ -f "${small_pkg}/dependencies/container-stats-series.ndjson" ]] \
+  || fail "container-stats-series.ndjson was not created alongside the summary"
+
+# A run that ends while a tick is mid-collection must finalize that tick as a
+# gap: sequence had already advanced, so a summary written straight from the
+# stop trap used to count one sample and zero outcomes. Here the load lasts
+# two seconds, the sampler ticks every second, and docker stats stalls longer
+# than the tick bound, so the stop arrives during the tick.
+interrupted_pkg="${test_root}/interrupted-tick"
+: > "${calls}"
+env LIFECYCLE_SLOW_PHASE=measure LIFECYCLE_PHASE_SLEEP=2 LIFECYCLE_SLOW_DOCKER_STATS=6 \
+  PERFLAB_RESOURCE_SAMPLE_SECONDS=1 \
+  PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${lab_config}" \
+  PERFLAB_TEST_CALLS="${calls}" PERFLAB_ARTIFACT_DIR="${interrupted_pkg}" \
+  PERFLAB_WARMUP_SECONDS=0 \
+  bash "${test_root}/harness/core/run/run-scenario.sh" S01 1 > "${interrupted_pkg}.out" 2>&1 || true
+# Like every run in this fixture, the stub generator publishes no k6
+# compatibility envelope, so the run ends at evidence capture; the sampler has
+# already been stopped by then, which is the moment under test.
+series="${interrupted_pkg}/dependencies/resource-series.json"
+[[ -s "${series}" ]] || fail "no resource-series.json after an interrupted tick"
+jq -e '.samples >= 1 and .samples == (.captured + .partial + .failed) and (.partial + .failed) >= 1' "${series}" >/dev/null \
+  || fail "an interrupted tick was not finalized in the summary: $(cat "${series}")"
+grep -q '"captureState":"failed"' "${interrupted_pkg}/dependencies/container-stats-series.ndjson" \
+  || fail "the interrupted tick left no gap row in the stats series"
+[[ ! -e "${interrupted_pkg}/dependencies/.resource-series-tick.pid" ]] \
+  || fail "the sampler left its tick pid file behind"
+jq -e '.overheadMs.max > 0' "${series}" >/dev/null \
+  || fail "interrupted collection time vanished from sampler overhead"
 jq -e '.resetFailures == 0' "${small_pkg}/data/dataset.json" >/dev/null \
   || fail "a dataset fingerprint was recorded despite failed resets"
+
+# A failed measurement must still stop/finalize its sampler and invoke evidence
+# capture as partial. Stub only the downstream capture for this path assertion.
+capture_script="${test_root}/harness/core/capture/capture-evidence.sh"
+cp "${capture_script}" "${capture_script}.saved"
+cat > "${capture_script}" <<'EOF'
+#!/usr/bin/env bash
+printf '{"status":"%s"}\n' "${PERFLAB_CAPTURE_INCOMPLETE:-0}" > "$1/facts.json"
+EOF
+failed_pkg="${test_root}/failed-measure"
+rc=0
+env LIFECYCLE_SLOW_PHASE=measure LIFECYCLE_PHASE_SLEEP=3 LIFECYCLE_FAIL_MEASURE=1   PERFLAB_RESOURCE_SAMPLE_SECONDS=1 PERFLAB_BOTTLENECK=0 PERFLAB_STEADY_STATE=0 PERFLAB_RECORD_TREND=0   PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${lab_config}"   PERFLAB_TEST_CALLS="${calls}" PERFLAB_ARTIFACT_DIR="${failed_pkg}" PERFLAB_WARMUP_SECONDS=0   bash "${test_root}/harness/core/run/run-scenario.sh" S01 3 > "${failed_pkg}.out" 2>&1 || rc=$?
+[[ "${rc}" == 99 ]] || fail "failed measurement did not retain its exit: ${rc}"
+jq -e '.status == "1"' "${failed_pkg}/facts.json" >/dev/null || fail "failed measurement skipped partial capture"
+jq -e '.samples == .expected and .samples == (.captured + .partial + .failed)'   "${failed_pkg}/dependencies/resource-series.json" >/dev/null || fail "failed measurement lost scheduled ticks"
+[[ ! -e "${failed_pkg}/dependencies/.resource-series-tick.pid" ]] || fail "failed measurement left a tick process"
+
+# Losing the end attestation must retain the successful load's partial package.
+window_pkg="${test_root}/failed-window"
+: > "${calls}"
+rc=0
+env PERFLAB_MEASUREMENT_WINDOW_PROBE_PATH=/verification-window \
+  PERFLAB_BOTTLENECK=0 PERFLAB_STEADY_STATE=0 PERFLAB_RECORD_TREND=0 \
+  PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${lab_config}" \
+  PERFLAB_TEST_CALLS="${calls}" PERFLAB_ARTIFACT_DIR="${window_pkg}" PERFLAB_WARMUP_SECONDS=0 \
+  bash "${test_root}/harness/core/run/run-scenario.sh" S01 1 > "${window_pkg}.out" 2>&1 || rc=$?
+[[ "${rc}" == 1 ]] || fail "failed end attestation was not refused: ${rc}"
+jq -e '.boundary == "start"' "${window_pkg}/analysis/measurement-window-start.json" >/dev/null || fail "start attestation was not captured"
+jq -e '.captureState == "failed"' "${window_pkg}/analysis/measurement-window-error.json" >/dev/null || fail "end attestation failure was lost"
+jq -e '.status == "1"' "${window_pkg}/facts.json" >/dev/null || fail "failed end attestation discarded partial evidence"
+mv "${capture_script}.saved" "${capture_script}"
 
 # --- acceptance case 25 ------------------------------------------------------
 # Cancellation must preserve what was already captured and restore what the run

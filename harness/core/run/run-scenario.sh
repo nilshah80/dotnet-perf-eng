@@ -43,6 +43,14 @@ else
   fi
   connections="$(scenario_value "${scenario_id}" connections)"
   perf_scenario="${scenario_id}"
+  # The catalog declares each scenario's default load model. Without an explicit
+  # PERFLAB_PROFILE an open-model scenario runs at its declared arrival rate:
+  # checkout (open, 5 journeys/s) ran as 5 closed users at ~20 journeys/s.
+  if [[ -z "${PERFLAB_PROFILE:-}" && "$(scenario_value "${scenario_id}" loadModel 2>/dev/null || true)" == "open" ]]; then
+    load_profile="open"
+    export PERFLAB_TARGET_RPS="${PERFLAB_TARGET_RPS:-${connections}}"
+    echo "Catalog load model for ${scenario_id}: open at ${PERFLAB_TARGET_RPS}/s (set PERFLAB_PROFILE to override)."
+  fi
   if [[ "${PERF_WORKLOAD_KIND}" == "journey" ]]; then
     export PERF_PARTITION_READY="${PERF_PARTITION_READY:-0}"
   fi
@@ -264,22 +272,41 @@ fi
 # stuck backend. Give each external cleanup command its own process group so a
 # second terminal signal cannot kill it, and bound that entire group.
 cleanup_timeout_seconds=30
-cleanup_command() {
-  local pid rc=0 monitor=0 deadline=$((SECONDS + cleanup_timeout_seconds))
+# bounded_command <seconds> <command...>: run the command in its own process
+# group and kill the whole group at the deadline. bounded_pid names the group
+# while it runs, so a trap that fires mid-command can kill it too.
+bounded_pid=""
+bounded_pid_file=""
+bounded_command() {
+  local seconds="$1" pid rc=0 monitor=0 deadline; shift
+  deadline=$((SECONDS + seconds))
   [[ "$-" != *m* ]] || monitor=1
   set -m
   ( "$@" ) </dev/null & pid=$!
   [[ "${monitor}" == 1 ]] || set +m
+  bounded_pid="${pid}"
+  # A caller that runs this inside $(...) sees none of this subshell's
+  # variables, so the group id also goes to a file the caller named.
+  [[ -z "${bounded_pid_file}" ]] || printf '%s' "${pid}" > "${bounded_pid_file}"
   while kill -0 "${pid}" 2>/dev/null; do
     if (( SECONDS >= deadline )); then
       kill -KILL -- "-${pid}" 2>/dev/null || true
       wait "${pid}" 2>/dev/null || true
-      echo "Cleanup command timed out after ${cleanup_timeout_seconds}s: $1" >&2
+      bounded_pid=""
+      [[ -z "${bounded_pid_file}" ]] || : > "${bounded_pid_file}"
       return 124
     fi
     sleep 0.1
   done
   wait "${pid}" || rc=$?
+  bounded_pid=""
+  [[ -z "${bounded_pid_file}" ]] || : > "${bounded_pid_file}"
+  return "${rc}"
+}
+cleanup_command() {
+  local rc=0
+  bounded_command "${cleanup_timeout_seconds}" "$@" || rc=$?
+  (( rc == 124 )) && echo "Cleanup command timed out after ${cleanup_timeout_seconds}s: $1" >&2
   return "${rc}"
 }
 
@@ -434,7 +461,10 @@ else
   require_target_ownership "reset owned dependency state" || exit 1
   data_state_dir="${artifact_dir}/data"
   mkdir -p "${data_state_dir}"
-  data_marker="${artifacts_root}/.dataset-preparation"
+  # One marker per lab: labs share artifacts_root but not datasets. A shared
+  # marker left by an interrupted ScenarioLab run was reported as an ecommerce
+  # recovery, and that run's cleanup erased ScenarioLab's own interruption.
+  data_marker="${artifacts_root}/.dataset-preparation-${PERFLAB_PROJECT:-lab}"
   # Capture this BEFORE the marker is rewritten and removed below. Reading the
   # marker after the reset always answered "no interruption", which is the one
   # answer it can never usefully give -- the field existed but could not carry
@@ -571,7 +601,7 @@ sample_midload() {
     "$(dependency_dir "${dep}")/sample-midload.sh" "${artifact_dir}" \
       || echo "WARNING: ${dep} mid-load sample failed (best-effort peak snapshot; the windowed range-gauge telemetry still covers the peak)." >&2
   done
-  compose exec -T "${primary_app_service}" sh -c 'cat /proc/net/tcp /proc/net/tcp6' \
+  bounded_command 10 compose exec -T "${primary_app_service}" sh -c 'cat /proc/net/tcp /proc/net/tcp6' \
     > "${artifact_dir}/dependencies/${primary_app_service}-net-tcp-midload.txt" 2>/dev/null || true
   # Per-container CPU/memory at peak load, scoped to this compose project. This is
   # the only host-side resource signal in the package: the runtime metrics show a
@@ -580,12 +610,191 @@ sample_midload() {
   # (e.g. the co-located observability stack) with these numbers. NDJSON, one
   # container per line.
   local cids
-  cids="$(compose ps -q 2>/dev/null | tr '\n' ' ')"
+  cids="$(bounded_command 10 compose ps -q 2>/dev/null | tr '\n' ' ' || true)"
   if [[ -n "${cids// /}" ]]; then
+    # Bounded like a series tick: a wedged daemon must not hold the midpoint
+    # sampler open past the run it belongs to.
     # shellcheck disable=SC2086
-    MSYS_NO_PATHCONV=1 docker stats --no-stream --format '{{json .}}' ${cids} \
+    MSYS_NO_PATHCONV=1 bounded_command 10 docker stats --no-stream --format '{{json .}}' ${cids} \
       > "${artifact_dir}/dependencies/container-stats-midload.ndjson" 2>/dev/null || true
   fi
+}
+
+# In-window resource series (D-P1-10). The four boundary snapshots and the single
+# midpoint sample above cannot place a throttling episode, a socket-state climb
+# or a memory step INSIDE the measured window; a bounded series can. Every
+# PERFLAB_RESOURCE_SAMPLE_SECONDS the owned containers' docker stats rows and
+# the app's TCP socket-state counts are appended as NDJSON, one line per
+# container per tick, and every failed tick is written as a gap with its
+# reason rather than skipped. The cadence widens so a window never yields more
+# than PERFLAB_RESOURCE_SAMPLE_MAX samples, and each tick records how long it
+# took, so the sampler's own cost sits in the evidence beside what it observed.
+# Best-effort like the midpoint sample: a gap is reported, never fatal.
+resource_series_interval="${PERFLAB_RESOURCE_SAMPLE_SECONDS:-15}"
+resource_series_max="${PERFLAB_RESOURCE_SAMPLE_MAX:-240}"
+case "${resource_series_interval}" in ''|*[!0-9]*) echo "PERFLAB_RESOURCE_SAMPLE_SECONDS must be a positive integer" >&2; exit 1 ;; esac
+case "${resource_series_max}" in ''|*[!0-9]*) echo "PERFLAB_RESOURCE_SAMPLE_MAX must be a positive integer" >&2; exit 1 ;; esac
+(( resource_series_interval >= 1 )) || resource_series_interval=1
+(( resource_series_max >= 1 )) || resource_series_max=1
+if (( effective_duration / resource_series_interval > resource_series_max )); then
+  resource_series_interval=$(( (effective_duration + resource_series_max - 1) / resource_series_max ))
+fi
+sample_resource_series() {
+  local dir="${artifact_dir}/dependencies" stats_file socket_file summary_file
+  # Local on purpose: bounded_command reads it through Bash's dynamic scope,
+  # and the parent shell's cleanup commands must never inherit the path.
+  local bounded_pid_file=""
+  local sequence=0 captured=0 partial=0 failed=0 stats_captured=0 sockets_captured=0
+  local started_epoch ended_epoch overhead_max=0 overhead_total=0 sleep_pid="" tick_bound next_tick delay
+  # One tick never outlives the next one. Docker calls carry no timeout of
+  # their own, and Bash defers a TERM trap while a foreground command runs, so
+  # an unbounded tick would also make the sampler unstoppable.
+  tick_bound=$(( resource_series_interval > 10 ? 10 : resource_series_interval ))
+  (( tick_bound >= 2 )) || tick_bound=2
+  mkdir -p "${dir}"
+  stats_file="${dir}/container-stats-series.ndjson"
+  socket_file="${dir}/${primary_app_service}-sockets-series.ndjson"
+  summary_file="${dir}/resource-series.json"
+  : > "${stats_file}"; : > "${socket_file}"
+  started_epoch="$(date -u +%s)"
+  write_series_summary() {
+    local mean=0 expected
+    ended_epoch="$(date -u +%s)"
+    expected=$(( (ended_epoch - started_epoch) / resource_series_interval ))
+    (( expected > resource_series_max )) && expected="${resource_series_max}"
+    # Account for every due tick, including deadlines missed by a slow tick.
+    while (( sequence < expected )); do
+      sequence=$((sequence + 1)); failed=$((failed + 1))
+      printf '{"atEpoch":%s,"sequence":%s,"captureState":"failed","reason":"sample deadline missed before sampler stopped"}\n' "$((started_epoch + sequence * resource_series_interval))" "${sequence}" >> "${stats_file}"
+      printf '{"atEpoch":%s,"sequence":%s,"captureState":"failed","reason":"sample deadline missed before sampler stopped"}\n' "$((started_epoch + sequence * resource_series_interval))" "${sequence}" >> "${socket_file}"
+    done
+    (( sequence > 0 )) && mean=$(( overhead_total / sequence ))
+    # A tick is captured only when BOTH files got a real row; a socket gap with
+    # good stats is partial, and both missing is failed. The per-file counts say
+    # which half was missing, so a full-looking summary cannot hide a socket
+    # file that is nothing but gaps.
+    printf '{"version":"perflab-resource-series-v1","intervalSeconds":%s,"maxSamples":%s,"tickBoundSeconds":%s,"startedEpoch":%s,"endedEpoch":%s,"expected":%s,"samples":%s,"captured":%s,"partial":%s,"failed":%s,"statsCaptured":%s,"socketsCaptured":%s,"overheadMs":{"mean":%s,"max":%s},"files":{"containerStats":"dependencies/container-stats-series.ndjson","sockets":"dependencies/%s-sockets-series.ndjson"}}\n' \
+      "${resource_series_interval}" "${resource_series_max}" "${tick_bound}" "${started_epoch}" "${ended_epoch}" "${expected}" \
+      "${sequence}" "${captured}" "${partial}" "${failed}" "${stats_captured}" "${sockets_captured}" "${mean}" "${overhead_max}" \
+      "$(json_escape "${primary_app_service}")" > "${summary_file}"
+  }
+  # The tick in flight, if any: sequence has already advanced, so a stop that
+  # lands mid-tick must finalize it as a gap or the summary's arithmetic
+  # silently loses that tick.
+  local tick_in_progress=0 tick_stats_done=0 tick_sockets_done=0
+  local now_epoch tick_start tick_end elapsed cids stats line raw stats_state stats_reason socket_state s_total s_est s_tw s_lis
+  record_tick_outcome() {
+    tick_end="${EPOCHREALTIME:-$(date -u +%s).000000}"; tick_end="${tick_end/./}"
+    elapsed=$(( (10#${tick_end} - 10#${tick_start}) / 1000 )); (( elapsed < 0 )) && elapsed=0
+    (( elapsed > overhead_max )) && overhead_max="${elapsed}"
+    overhead_total=$((overhead_total + elapsed))
+    if [[ "${stats_state}" == captured && "${socket_state}" == captured ]]; then
+      captured=$((captured + 1))
+    elif [[ "${stats_state}" == captured || "${socket_state}" == captured ]]; then
+      partial=$((partial + 1))
+    else
+      failed=$((failed + 1))
+    fi
+    tick_in_progress=0
+  }
+  finish_series() {
+    trap - TERM INT
+    [[ -n "${sleep_pid}" ]] && kill "${sleep_pid}" 2>/dev/null
+    local group=""
+    [[ -s "${bounded_pid_file}" ]] && group="$(cat "${bounded_pid_file}")"
+    [[ -n "${group}" ]] && { kill -KILL -- "-${group}" 2>/dev/null || kill -KILL "${group}" 2>/dev/null || true; }
+    rm -f "${bounded_pid_file}"
+    if (( tick_in_progress == 1 )); then
+      if (( tick_stats_done == 0 )); then
+        stats_state=failed
+        printf '{"atEpoch":%s,"sequence":%s,"captureState":"failed","reason":"sampler stopped before this tick completed"}\n' "${now_epoch}" "${sequence}" >> "${stats_file}"
+      fi
+      if (( tick_sockets_done == 0 )); then
+        socket_state=failed
+        printf '{"atEpoch":%s,"sequence":%s,"captureState":"failed","reason":"sampler stopped before this tick completed"}\n' "${now_epoch}" "${sequence}" >> "${socket_file}"
+      fi
+      record_tick_outcome
+    fi
+    write_series_summary
+    exit 0
+  }
+  trap finish_series TERM INT
+  bounded_pid_file="${dir}/.resource-series-tick.pid"
+  : > "${bounded_pid_file}"
+  while (( sequence < resource_series_max )); do
+    # A backgrounded sleep keeps the loop interruptible: TERM reaches the trap
+    # at once instead of after the interval.
+    next_tick=$((started_epoch + (sequence + 1) * resource_series_interval))
+    delay=$((next_tick - $(date -u +%s)))
+    if (( delay > 0 )); then
+      sleep "${delay}" & sleep_pid=$!
+      wait "${sleep_pid}" 2>/dev/null || true
+      sleep_pid=""
+    elif (( delay <= -resource_series_interval )); then
+      # Do not invent a late observation for a deadline missed by collection.
+      sequence=$((sequence + 1)); failed=$((failed + 1))
+      printf '{"atEpoch":%s,"sequence":%s,"captureState":"failed","reason":"previous sample overran this deadline"}\n' "${next_tick}" "${sequence}" >> "${stats_file}"
+      printf '{"atEpoch":%s,"sequence":%s,"captureState":"failed","reason":"previous sample overran this deadline"}\n' "${next_tick}" "${sequence}" >> "${socket_file}"
+      continue
+    fi
+    sequence=$((sequence + 1))
+    tick_in_progress=1; tick_stats_done=0; tick_sockets_done=0
+    now_epoch="$(date -u +%s)"; tick_start="${EPOCHREALTIME:-${now_epoch}.000000}"; tick_start="${tick_start/./}"
+    stats_state=captured; stats_reason=""; socket_state=captured
+    cids="$(bounded_command "${tick_bound}" compose ps -q 2>/dev/null | tr '\n' ' ' || true)"
+    if [[ -z "${cids// /}" ]]; then
+      stats_state=failed; stats_reason="no owned containers were listed within ${tick_bound}s"
+    else
+      # shellcheck disable=SC2086
+      stats="$(MSYS_NO_PATHCONV=1 bounded_command "${tick_bound}" docker stats --no-stream --format '{{json .}}' ${cids} 2>/dev/null || true)"
+      if [[ -z "${stats//[[:space:]]/}" ]]; then
+        stats_state=failed; stats_reason="docker stats returned no rows within ${tick_bound}s"
+      else
+        while IFS= read -r line; do
+          [[ -n "${line}" ]] || continue
+          printf '{"atEpoch":%s,"sequence":%s,"captureState":"captured","stats":%s}\n' "${now_epoch}" "${sequence}" "${line}"
+        done <<< "${stats}" >> "${stats_file}"
+      fi
+    fi
+    if [[ "${stats_state}" == captured ]]; then
+      stats_captured=$((stats_captured + 1))
+    else
+      printf '{"atEpoch":%s,"sequence":%s,"captureState":"failed","reason":"%s"}\n' "${now_epoch}" "${sequence}" "$(json_escape "${stats_reason}")" >> "${stats_file}"
+    fi
+    tick_stats_done=1
+    raw="$(bounded_command "${tick_bound}" compose exec -T "${primary_app_service}" sh -c 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null' 2>/dev/null || true)"
+    if [[ -n "${raw//[[:space:]]/}" ]]; then
+      read -r s_total s_est s_tw s_lis <<< "$(printf '%s\n' "${raw}" | awk '$4 ~ /^[0-9A-F][0-9A-F]$/ {n++; if ($4=="01") est++; if ($4=="06") tw++; if ($4=="0A") lis++} END {printf "%d %d %d %d", n+0, est+0, tw+0, lis+0}')"
+      printf '{"atEpoch":%s,"sequence":%s,"captureState":"captured","total":%s,"established":%s,"timeWait":%s,"listen":%s}\n' \
+        "${now_epoch}" "${sequence}" "${s_total}" "${s_est}" "${s_tw}" "${s_lis}" >> "${socket_file}"
+      sockets_captured=$((sockets_captured + 1))
+    else
+      socket_state=failed
+      printf '{"atEpoch":%s,"sequence":%s,"captureState":"failed","reason":"socket table was not readable within %ss"}\n' "${now_epoch}" "${sequence}" "${tick_bound}" >> "${socket_file}"
+    fi
+    tick_sockets_done=1
+    record_tick_outcome
+  done
+  rm -f "${bounded_pid_file}"
+  write_series_summary
+}
+
+# Stop the series sampler: TERM makes it write its summary; a sampler stuck in
+# a tick is killed after the tick bound plus a margin rather than waited on
+# forever. Safe to call when it never started or has already stopped.
+stop_resource_series() {
+  [[ -n "${resource_series_pid:-}" ]] || return 0
+  local pid="${resource_series_pid}" deadline=$((SECONDS + 15))
+  resource_series_pid=""
+  kill -TERM "${pid}" 2>/dev/null || true
+  while kill -0 "${pid}" 2>/dev/null; do
+    if (( SECONDS >= deadline )); then
+      kill -KILL "${pid}" 2>/dev/null || true
+      break
+    fi
+    sleep 0.1
+  done
+  wait "${pid}" 2>/dev/null || true
 }
 
 # Optional fault injection during the measured window (PERFLAB_FAULT_DEP set by
@@ -658,6 +867,7 @@ restore_fault_dep() {
   # have already restored the dependency.
   [[ -n "${fault_pid:-}" ]]   && { stop_run_child "${fault_pid}"; fault_pid=""; }
   [[ -n "${midload_pid:-}" ]] && { stop_run_child "${midload_pid}"; midload_pid=""; }
+  stop_resource_series
   [[ -n "${load_pid:-}" ]]    && { stop_run_child "${load_pid}"; load_pid=""; }
   [[ -n "${PERFLAB_FAULT_DEP:-}" ]] || return 0
   # Quiet compose itself (unpause of a dependency that is not paused is noise),
@@ -680,23 +890,31 @@ if [[ "${load_profile}" == "soak" ]]; then
     exit 1
   fi
 fi
-midload_pid=""; fault_pid=""
+midload_pid=""; fault_pid=""; resource_series_pid=""
 if [[ "${target_mode}" == "local" ]]; then
-  if [[ -n "${PERFLAB_FAULT_DEP:-}" || "${partition_cleanup_required}" == "1" ]]; then
-    trap 'restore_fault_dep; cleanup_partition' EXIT
-    trap 'on_signal INT' INT
-    trap 'on_signal TERM' TERM
-  fi
+  # Cleanup is armed for EVERY local run, not only fault and partition runs:
+  # the samplers below are background children of this shell, and a generator
+  # failure that exits early would otherwise leave them probing Docker and
+  # writing into the package until their sample limit. restore_fault_dep and
+  # cleanup_partition are no-ops when there is no fault or partition to undo.
+  trap 'restore_fault_dep; cleanup_partition' EXIT
+  trap 'on_signal INT' INT
+  trap 'on_signal TERM' TERM
   # Mid-load sampling and fault injection both act on OWNED dependencies/compose,
   # so they run only for a local target. A remote target measures the load
   # generator's SLIs against base_url with no dependency/compose probing.
   sample_midload & midload_pid=$!
-  inject_fault & fault_pid=$!
+  sample_resource_series & resource_series_pid=$!
 fi
 # Boundary environment snapshots (phase envelope). Best-effort: the
 # environment contextualises a verdict, it never IS the verdict.
 "${harness_core_dir}/capture/capture-environment.sh" "${artifact_dir}" measurement-start >/dev/null 2>&1 || true
 measure_started_epoch="$(date -u +%s)"
+# --at is an offset into the measured window, so the injector starts only once
+# that window's start is recorded (the snapshot above takes seconds).
+if [[ "${target_mode}" == "local" ]]; then
+  inject_fault & fault_pid=$!
+fi
 measurement_window_start=""
 measurement_window_end=""
 measurement_window_id=""
@@ -810,17 +1028,24 @@ else
   fi
 fi
 measure_ended_epoch="$(date -u +%s)"
+# Stop collection at the load boundary, before post-measure probes.
+stop_resource_series
+run_rc="${load_rc}"
 if [[ -n "${measurement_window_start}" ]]; then
   measurement_window_end="${artifact_dir}/analysis/measurement-window-end.json"
-  performance_measurement_window_probe "${base_url}" "${telemetry_run_id}" "${measurement_window_id}" end "${measurement_window_end}" || {
-    echo "measurement-window end attestation failed; evidence cannot be scoped to an exact target generation" >&2
-    exit 1
-  }
-  performance_measurement_window_finalize "${measurement_window_start}" "${measurement_window_end}" \
-    "${artifact_dir}/analysis/measurement-window.json" || {
-    echo "measurement-window evidence could not be finalized" >&2
-    exit 1
-  }
+  window_rc=0
+  performance_measurement_window_probe "${base_url}" "${telemetry_run_id}" "${measurement_window_id}" end "${measurement_window_end}" || window_rc=$?
+  if (( window_rc == 0 )); then
+    performance_measurement_window_finalize "${measurement_window_start}" "${measurement_window_end}" \
+      "${artifact_dir}/analysis/measurement-window.json" || window_rc=$?
+  fi
+  if (( window_rc != 0 )); then
+    echo "measurement-window end attestation failed; retaining partial evidence without an exact generation claim" >&2
+    export PERFLAB_CAPTURE_INCOMPLETE=1
+    (( run_rc != 0 )) || run_rc=1
+    printf '{"captureState":"failed","reason":"measurement-window end attestation failed","exitCode":%s}\n' "${window_rc}" \
+      > "${artifact_dir}/analysis/measurement-window-error.json"
+  fi
 fi
 if (( load_rc != 0 )); then
   if [[ "${load_profile}" == "soak" ]]; then
@@ -828,7 +1053,10 @@ if (( load_rc != 0 )); then
   else
     echo "load generator exited with status ${load_rc}" >&2
   fi
-  exit "${load_rc}"
+  export PERFLAB_CAPTURE_INCOMPLETE=1
+  printf '{"phase":"measure","exitCode":%s,"captureState":"failed"}\n' "${load_rc}" > "${artifact_dir}/benchmark/generator-exit.json"
+  # An early failed generator must not wait for the midpoint of a long window.
+  [[ -z "${midload_pid}" ]] || { kill -TERM "${midload_pid}" 2>/dev/null || true; }
 fi
 if [[ "${distributed_enabled}" == "1" ]]; then
   distributed_write_compatibility || {
@@ -844,6 +1072,8 @@ if [[ "${load_profile}" == "soak" ]]; then
     > "${artifact_dir}/benchmark/session/stop.json"
 fi
 [[ -n "${midload_pid}" ]] && { wait "${midload_pid}" 2>/dev/null || true; midload_pid=""; }
+# The series sampler runs until told to stop; TERM makes it write its summary.
+stop_resource_series
 fault_rc=0; [[ -n "${fault_pid}" ]] && { wait "${fault_pid}" 2>/dev/null || fault_rc=$?; fault_pid=""; }
 # Record whether the fault applied AND whether the dependency recovered within the
 # measured window. Either failing makes the resilience package incomplete, so mark
@@ -865,7 +1095,12 @@ sleep 6
 export PERFLAB_MEASURE_START_EPOCH="${measure_started_epoch}" PERFLAB_MEASURE_END_EPOCH="${measure_ended_epoch}"
 cleanup_partition
 
-"${harness_core_dir}/capture/capture-evidence.sh" "${artifact_dir}"
+capture_rc=0
+"${harness_core_dir}/capture/capture-evidence.sh" "${artifact_dir}" || capture_rc=$?
+if (( capture_rc != 0 )); then
+  (( run_rc == 0 )) || exit "${run_rc}"
+  exit "${capture_rc}"
+fi
 
 # Server-side analyzers read Prometheus. A black-box remote measurement must not
 # query it just because the URL is reachable; write an explicit not-applicable
@@ -885,6 +1120,11 @@ if [[ "${target_mode}" == "local" || "${remote_telemetry:-0}" == "1" ]]; then
   if [[ "${PERFLAB_STEADY_STATE:-1}" != "0" ]]; then
     "${harness_core_dir}/analyze/steady-state.sh" "${artifact_dir}" || true
   fi
+
+  # Staged profiles (ramp, load, stress, breakpoint, spike, capacity): per-stage
+  # server-side results, last healthy / first failing level and spike recovery
+  # (analysis/stages.json). Writes not-applicable for other profiles.
+  "${harness_core_dir}/analyze/analyze-stages.sh" "${artifact_dir}" || true
 
   # USE-method bottleneck classification (CPU / thread pool / GC / locks / DB pool /
   # dependency) from the captured evidence -- a reproducible "what is the bottleneck?"
@@ -935,3 +1175,4 @@ elif [[ "${remote_diagnostics:-0}" == "1" ]]; then
   echo "Next (optional REMOTE runtime diagnostics, separate perturbing run): ${harness_core_dir}/capture/capture-runtime.sh ${artifact_dir} <trace|gcdump|stacks> <seconds>"
 fi
 echo "Then analyze: ${harness_root}/ai/scripts/analyze-with-claude.sh ${artifact_dir}"
+exit "${run_rc}"

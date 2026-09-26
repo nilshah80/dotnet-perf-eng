@@ -16,6 +16,15 @@ load_generator=k6
 diagnostics_url=http://monitor
 artifacts_root="${PERFLAB_TEST_ARTIFACTS_ROOT:-}"
 diag_target() { printf 'Fixture.Api'; }
+# Mirrors common.sh: a local role mapped in PERFLAB_DIAG_ENDPOINTS gets its own
+# monitor; everything else uses the shared diagnostics URL.
+diag_endpoint() {
+  local svc="$1" pair
+  for pair in ${PERFLAB_DIAG_ENDPOINTS:-}; do
+    if [[ "${pair%%=*}" == "${svc}" ]]; then printf '%s' "${pair#*=}"; return 0; fi
+  done
+  printf '%s' "${diagnostics_url}"
+}
 # Delegates to the host jq so the selector under test is the real one, but it
 # must keep BOTH guards common.sh's jqd applies. jq.exe writes CRLF on Windows,
 # so a value read through a bare override carries a trailing CR that corrupts
@@ -24,9 +33,26 @@ diag_target() { printf 'Fixture.Api'; }
 # C:/Program Files/Git/stacks and the lookup silently misses.
 jqd() { MSYS_NO_PATHCONV=1 jq "$@" | tr -d '\r'; return "${PIPESTATUS[0]}"; }
 json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s}"; }
+# The real helper, verbatim: the counters state file is a TSV record read
+# through it, and a fixture without it left every counters capture unread.
+read_fields() {
+  local expected="${1:?read_fields <expected-count>}" line
+  TSV_FIELDS=()
+  while IFS= read -r line; do
+    TSV_FIELDS+=("${line}")
+  done
+  if [[ "${#TSV_FIELDS[@]}" -ne "${expected}" ]]; then
+    echo "Expected ${expected} fields, received ${#TSV_FIELDS[@]}; refusing to continue with a misaligned record." >&2
+    return 1
+  fi
+  return 0
+}
 loadgen_warmup() { mkdir -p "$1"; printf 'warmup\n' >> "${PERFLAB_TEST_CALLS}"; printf '{}' > "$1/warmup.json"; }
 loadgen_measure() { mkdir -p "$1"; printf 'diagnostic\n' >> "${PERFLAB_TEST_CALLS}"; [[ -z "${PERFLAB_TEST_SLOW_LOAD:-}" ]] || sleep "${PERFLAB_TEST_SLOW_LOAD}"; printf '{}' > "$1/diagnostic.json"; }
-monitor_curl() { curl "$@"; }
+# Record every request that reaches the authenticated wrapper. A monitor call
+# that bypasses it (bare curl) would carry no Authorization, CA or client
+# certificate on a protected monitor, and this log is how the test sees it.
+monitor_curl() { printf 'monitor_curl:%s\n' "${*: -1}" >> "${PERFLAB_TEST_CALLS}"; curl "$@"; }
 compose() {
   local previous='' argument output=''
   for argument in "$@"; do [[ "${previous}" == '--output' ]] && output="${argument}"; previous="${argument}"; done
@@ -47,6 +73,7 @@ compose() {
       printf '24 4 System.String\n'
     fi
   elif [[ " $* " == *' dotnet-dump analyze '* ]]; then
+    if [[ "${PERFLAB_TEST_FAIL_EXTENDED_SOS:-0}" == '1' && " $* " == *' dumpasync '* ]]; then return 1; fi
     printf 'dump report\n'
   fi
 }
@@ -71,6 +98,14 @@ case "${url}" in
   */trace) printf 'nettrace' ;;
   */stacks) printf 'Thread: (0x1)\n  Fixture.Api!Program.Main\n' ;;
   */dump) printf 'dump' ;;
+  */livemetrics)
+    # RFC 7464 json-seq: an ASCII RS before every record. Written to the -o
+    # target like the real endpoint, because capture_counters parses the file.
+    out=''; previous=''
+    for argument in "$@"; do [[ "${previous}" == '-o' ]] && out="${argument}"; previous="${argument}"; done
+    body=$'\x1e{"name":"cpu-usage","value":1.5}\n\x1e{"name":"working-set","value":42}\n'
+    if [[ -n "${out}" ]]; then printf '%s' "${body}" > "${out}"; else printf '%s' "${body}"; fi
+    for argument in "$@"; do [[ "${argument}" == '-w' ]] && { printf '200'; break; }; done ;;
   *) exit 22 ;;
 esac
 EOF
@@ -103,6 +138,37 @@ run_case() {
 
 run_case captured 0 0
 grep -q '"status":"captured"' "${test_root}/captured/runtime/campaign.json"
+# Runtime counters must reach the monitor through monitor_curl, the only path
+# that presents the Authorization header, CA and client certificate. The bare
+# curl this replaced looked healthy on an unauthenticated lab and silently
+# lost the signal on every protected monitor.
+grep -q '^monitor_curl:.*/livemetrics' "${test_root}/captured-calls" \
+  || { echo 'captured: /livemetrics was not requested through monitor_curl' >&2; exit 1; }
+# A campaign trace stage records the counters it captured alongside its
+# nettrace; presets used to skip counters entirely.
+grep -q '"counters":{"captureState":"captured","reason":"","records":2,' \
+  "${test_root}/captured/runtime/captures/trace/capture.json" \
+  || { echo 'captured: campaign trace stage did not record parsed counters' >&2; exit 1; }
+
+# Single-kind trace: the same counters path, the same wrapper, the same record.
+trace_kind_output="${test_root}/trace-kind"
+mkdir -p "${trace_kind_output}"; : > "${test_root}/trace-kind-calls"
+PATH="${test_root}/bin:${PATH}" \
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_CALLS="${test_root}/trace-kind-calls" \
+PERFLAB_TEST_GCDUMP_COUNT="${test_root}/trace-kind-gcdumps" \
+PERFLAB_DIAGNOSTIC_RECOVERY_SECONDS=0 \
+PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES=67108864 \
+PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
+  bash "${adapter_dir}/capture.sh" "${trace_kind_output}" trace 1 api >/dev/null 2>&1
+[[ -s "${trace_kind_output}/runtime/api/cpu.nettrace" ]]
+grep -q '^monitor_curl:.*/livemetrics' "${test_root}/trace-kind-calls" \
+  || { echo 'trace-kind: /livemetrics was not requested through monitor_curl' >&2; exit 1; }
+grep -q '"counters":{"captureState":"captured","reason":"","records":2,' \
+  "${trace_kind_output}/runtime/capture.json" \
+  || { echo 'trace-kind: json-seq counter records were not parsed as captured' >&2; exit 1; }
+[[ -s "${trace_kind_output}/runtime/api/counters.json-seq" ]] \
+  || { echo 'trace-kind: counters.json-seq was not retained' >&2; exit 1; }
 grep -q '"sequence":1' "${test_root}/captured/runtime/captures/gcdump-before/capture.json"
 grep -q '"sequence":2' "${test_root}/captured/runtime/captures/trace/capture.json"
 grep -q '"sequence":3' "${test_root}/captured/runtime/captures/gcdump-after/capture.json"
@@ -186,11 +252,88 @@ PERFLAB_TEST_GCDUMP_COUNT="${test_root}/dump-only-gcdumps" \
 PERFLAB_DIAGNOSTIC_RECOVERY_SECONDS=0 \
 PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES=67108864 \
 PERFLAB_DIAGNOSTIC_INCLUDE_DUMP=0 \
+PERFLAB_TEST_ARTIFACTS_ROOT="${test_root}" \
 PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
   bash "${adapter_dir}/capture.sh" "${dump_output}" preset:dump 1 api >/dev/null 2>&1
-[[ -s "${dump_output}/runtime/captures/dump/process.dmp" ]]
-[[ ! -s "${test_root}/dump-only-calls" ]]
+# A process dump is process memory -- connection strings and tokens included --
+# and a package is what gets shared (acceptance case 26). The dump leaves the
+# package for the owner-only sensitive store; the package keeps a pointer with
+# its hash, and the capture record names the pointer.
+[[ ! -e "${dump_output}/runtime/captures/dump/process.dmp" ]] \
+  || { echo 'dump-only: the process dump stayed in the evidence package' >&2; exit 1; }
+dump_pointer="${dump_output}/runtime/captures/dump/process.dmp.retained.json"
+retained_dump="${test_root}/sensitive/dump-only/runtime/captures/dump/process.dmp"
+[[ -s "${retained_dump}" ]] || { echo 'dump-only: the dump was not retained in the sensitive store' >&2; exit 1; }
+jq -e --arg sha "$(shasum -a 256 "${retained_dump}" | awk '{print $1}')" \
+  '.exportable == false and .retainedPath == "sensitive/dump-only/runtime/captures/dump/process.dmp" and .sha256 == $sha and (.retainUntil | length > 0)' \
+  "${dump_pointer}" >/dev/null || { echo 'dump-only: the retention pointer is wrong' >&2; cat "${dump_pointer}" >&2; exit 1; }
+if [[ "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* ]]; then
+  [[ "$(ls -l "${retained_dump}" | cut -c1-10)" == "-rw-------" ]] \
+    || { echo 'dump-only: the retained dump is readable by others' >&2; exit 1; }
+fi
+grep -q '"artifactPaths":\["runtime/captures/dump/process.dmp.retained.json"\]' "${dump_output}/runtime/captures/dump/capture.json" \
+  || { echo 'dump-only: the capture record does not name the retention pointer' >&2; exit 1; }
+# No warm-up and no diagnostic traffic. Monitor requests are logged in the
+# same file, so look for the load hooks rather than an empty file.
+! grep -q '^warmup$\|^diagnostic$' "${test_root}/dump-only-calls"
 grep -q '"diagnosticLoadState":"not-applicable"' "${dump_output}/runtime/campaign.json"
+
+# A single-kind dump has no per-stage normalization record. When the extended
+# SOS commands fail, the thread and heap listing must survive, the retained
+# report must say what failed, and the package metadata must carry it -- the
+# reason used to be handed to a writer that returned without writing.
+dump_kind_output="${test_root}/dump-kind"
+mkdir -p "${dump_kind_output}"; : > "${test_root}/dump-kind-calls"
+PATH="${test_root}/bin:${PATH}" \
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_CALLS="${test_root}/dump-kind-calls" \
+PERFLAB_TEST_GCDUMP_COUNT="${test_root}/dump-kind-gcdumps" \
+PERFLAB_DIAGNOSTIC_RECOVERY_SECONDS=0 \
+PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES=67108864 \
+PERFLAB_TEST_ARTIFACTS_ROOT="${test_root}/dump-kind" \
+PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
+  bash "${adapter_dir}/capture.sh" "${dump_kind_output}" dump 1 api >/dev/null 2>&1
+[[ ! -e "${dump_kind_output}/runtime/api/process.dmp" && -s "${dump_kind_output}/runtime/api/process.dmp.retained.json" ]] \
+  || { echo 'dump-kind: the process dump stayed in the evidence package' >&2; exit 1; }
+[[ -s "${dump_kind_output}/sensitive/runtime/api/process.dmp" ]]
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_ARTIFACTS_ROOT="${test_root}/dump-kind" \
+PERFLAB_TEST_FAIL_EXTENDED_SOS=1 \
+  bash "${adapter_dir}/normalize.sh" "${test_root}/dump-kind" >/dev/null 2>&1 \
+  || { echo 'dump-kind: an extended SOS failure must not fail normalization' >&2; exit 1; }
+dump_report="$(find "${dump_kind_output}/analysis/runtime" -name '*-dump-report.txt' | head -1)"
+[[ -n "${dump_report}" ]] && grep -q '^dump report' "${dump_report}" \
+  || { echo 'dump-kind: the thread and heap listing was not retained' >&2; exit 1; }
+grep -q 'FAILED: extended SOS commands' "${dump_report}" \
+  || { echo 'dump-kind: the retained report does not say the extended commands failed' >&2; exit 1; }
+grep -q 'extended SOS commands (dumpasync, syncblk, analyzeoom) failed' "${dump_kind_output}/runtime/normalization-limitations.json" \
+  || { echo 'dump-kind: the package metadata does not carry the extended SOS failure' >&2; exit 1; }
+# And the same normalization with the extended commands succeeding leaves no stale note.
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_ARTIFACTS_ROOT="${test_root}/dump-kind" \
+  bash "${adapter_dir}/normalize.sh" "${test_root}/dump-kind" >/dev/null 2>&1
+[[ ! -e "${dump_kind_output}/runtime/normalization-limitations.json" ]] \
+  || { echo 'dump-kind: a stale limitations file survived a clean normalization' >&2; exit 1; }
+grep -q '=== extended SOS: dumpasync, syncblk, analyzeoom ===' "${dump_report}" \
+  || { echo 'dump-kind: the extended SOS output was not appended to the report' >&2; exit 1; }
+
+# A package captured before dumps left packages still holds its dump. Normalize
+# analyses it in place and then retains it, so the package stops carrying the
+# credential the dump holds.
+legacy_output="${test_root}/legacy-dump"
+mkdir -p "${legacy_output}/runtime/api"
+printf 'Host=db;Password=perflab;\n' > "${legacy_output}/runtime/api/process.dmp"
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_ARTIFACTS_ROOT="${legacy_output}" \
+  bash "${adapter_dir}/normalize.sh" "${legacy_output}" >/dev/null 2>&1 \
+  || { echo 'legacy-dump: normalization failed' >&2; exit 1; }
+find "${legacy_output}/analysis/runtime" -name 'process-dump-report.txt' | grep -q . \
+  || { echo 'legacy-dump: the in-package dump was not analysed' >&2; exit 1; }
+[[ -s "${legacy_output}/runtime/api/process.dmp.retained.json" && -s "${legacy_output}/sensitive/runtime/api/process.dmp" ]] \
+  || { echo 'legacy-dump: the analysed dump was not retained' >&2; exit 1; }
+if grep -ral 'Password=perflab' "${legacy_output}/runtime" "${legacy_output}/analysis" >/dev/null 2>&1; then
+  echo 'legacy-dump: the package still carries the credential' >&2; exit 1
+fi
 
 stacks_output="${test_root}/stacks-only"
 mkdir -p "${stacks_output}"; : > "${test_root}/stacks-only-calls"

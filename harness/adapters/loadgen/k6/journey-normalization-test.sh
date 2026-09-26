@@ -58,7 +58,7 @@ for arg in "$@"; do
   previous="${arg}"
 done
 [[ -n "${export_path}" ]] && cp "${PERFLAB_TEST_SUMMARY}" "${export_path}"
-exit 0
+exit "${PERFLAB_TEST_K6_EXIT:-0}"
 EOF
 chmod +x "${test_root}/bin/k6"
 
@@ -172,4 +172,33 @@ awk -v v="$(value http.latency.p99)" 'BEGIN { exit (v == 77) ? 0 : 1 }' \
 awk -v v="$(value journey.duration.p95)" 'BEGIN { exit (v == 410) ? 0 : 1 }' \
   || fail "journey.duration.p95=$(value journey.duration.p95), want the journey p95 of 410 kept separate from wire latency"
 
-echo "k6 journey and arrival-model normalization tests passed"
+# Expected protocol backpressure is still a non-success HTTP outcome. A k6
+# threshold failure must preserve the same normalized evidence and its exit.
+cat > "${test_root}/backpressure-summary.json" <<'EOF'
+{"metrics":{"iterations":{"count":10,"rate":1},"http_reqs":{"count":10,"rate":1},"http_req_failed":{"value":0},"protocol_failures":{"count":0},"perflab_http_non_2xx_3xx":{"count":9},"perflab_http_transport_errors":{"count":1},"iteration_duration":{"p(50)":1,"p(90)":2,"p(95)":3,"p(99)":4}}}
+EOF
+failed_pkg="${test_root}/failed-threshold"
+rc=0
+PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${repo}/labs/scenariolab/lab.config.sh" PERFLAB_TEST_SUMMARY="${test_root}/backpressure-summary.json" PERFLAB_TEST_K6_EXIT=99 PERF_WORKLOAD_KIND=protocol PERF_SCENARIO=P04 PERF_RUN_ID=run-backpressure PERFLAB_DURATION_SECONDS=10 PERFLAB_CONNECTIONS=1 PERF_METHOD=POST PERF_PATH=/messages PERF_BASE_URL=http://127.0.0.1:8080 PERFLAB_K6_PROM_RW=0   bash "${adapter_dir}/run.sh" "${failed_pkg}" measure > "${test_root}/failed-threshold.out" 2>&1 || rc=$?
+[[ "${rc}" == 99 ]] || fail "failed k6 threshold lost its exit status: ${rc}"
+obs="${failed_pkg}/benchmark/observations.json"
+[[ "$(value http.responses.non_2xx_3xx)" == 9 ]] || fail "expected backpressure disappeared from HTTP outcomes"
+[[ "$(value http.transport_errors)" == 1 ]] || fail "transport failure disappeared from HTTP outcomes"
+[[ "$(value http.error_rate)" == 1 ]] || fail "failed threshold did not preserve normalized error rate"
+[[ -s "${failed_pkg}/benchmark/compatibility.json" ]] || fail "failed threshold lost its compatibility envelope"
+
+cat > "${test_root}/browser-summary.json" <<'EOF'
+{"metrics":{"iterations":{"count":10,"rate":1},"iteration_duration":{"p(95)":1200},"browser_http_req_duration":{"p(50)":2,"p(90)":3,"p(95)":4,"p(99)":5},"browser_http_req_failed":{"passes":3,"fails":27},"checks":{"fails":1}}}
+EOF
+browser_pkg="${test_root}/browser"
+PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${repo}/labs/scenariolab/lab.config.sh" PERFLAB_TEST_SUMMARY="${test_root}/browser-summary.json" PERF_WORKLOAD_KIND=protocol PERF_PROTOCOL=browser-synthetic PERF_SCENARIO=P10 PERF_RUN_ID=run-browser PERFLAB_DURATION_SECONDS=10 PERFLAB_CONNECTIONS=1 PERF_METHOD=GET PERF_PATH=/ PERF_BASE_URL=http://127.0.0.1:8080 PERFLAB_K6_PROM_RW=0 bash "${adapter_dir}/run.sh" "${browser_pkg}" measure > "${test_root}/browser.out" 2>&1 || fail "browser parser failed"
+obs="${browser_pkg}/benchmark/observations.json"
+[[ -z "$(value http.requests.total)" ]] || fail "browser visits leaked into backend requests"
+[[ "$(value browser.visits.total)" == 10 ]] || fail "browser visits lost"
+[[ "$(value browser.http.requests.total)" == 30 ]] || fail "browser subrequests confused with visits"
+[[ "$(value browser.http.requests_per_second)" == 3 ]] || fail "browser request rate denominator wrong"
+[[ "$(value browser.http.error_rate)" == 0.1 ]] || fail "browser error ratio denominator wrong"
+[[ "$(value browser.visit.duration.p95)" == 1200 ]] || fail "visit latency confused with subrequest latency"
+[[ "$(value browser.http.latency.p95)" == 4 ]] || fail "browser subrequest latency lost"
+[[ "$(value browser.checks.failed)" == 1 ]] || fail "browser correctness failure lost"
+echo "k6 journey, protocol and browser normalization tests passed"

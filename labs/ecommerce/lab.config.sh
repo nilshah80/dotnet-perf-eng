@@ -19,6 +19,9 @@ PERFLAB_APP_SERVICES="api"
 PERFLAB_PRIMARY_APP_SERVICE="api"
 PERFLAB_BASE_URL="${PERFLAB_BASE_URL:-http://127.0.0.1:8080}"
 PERFLAB_READY_URL="${PERFLAB_READY_URL:-http://127.0.0.1:8080/health/ready}"
+# The API provides /api/perf/runs/{id}/seed|reset|cleanup, so write mixes and
+# the checkout journey run in a managed-reference run partition.
+PERFLAB_WRITE_SAFETY_CLASS="managed-reference"
 
 # --- Telemetry correlation ---
 PERFLAB_PROM_JOB_REGEX="ecommerce-.*"
@@ -45,7 +48,7 @@ PERFLAB_DIAGNOSTICS_URL="http://127.0.0.1:18323"
 PERFLAB_LOAD_GENERATOR_DEFAULT="k6"
 PERFLAB_INTERNAL_BASE_URL="http://api:8080"
 PERFLAB_COMPOSE_NETWORK="ecommerce_default"
-PERFLAB_WRK_IMAGE=""
+PERFLAB_WRK_IMAGE="${PERFLAB_WRK_IMAGE:-}"
 # JMeter is optional and container-only. Build the native image with
 # harness/adapters/loadgen/jmeter/package.sh, then pin PERFLAB_JMETER_IMAGE
 # to that digest. k6.js is unchanged.

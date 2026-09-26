@@ -39,6 +39,12 @@ scenario="$(jqd -r '.scenarioId // ""' < "${facts}" 2>/dev/null || echo "")"
 run_id="$(jqd -r '.telemetryRunId // .runId // ""' < "${facts}" 2>/dev/null || echo "")"
 status="$(jqd -r '.status // "unknown"' < "${facts}" 2>/dev/null || echo unknown)"
 
+# Browser HTTP subrequests do not certify backend load-generator capacity.
+if jqd -e 'any(.observations[]?; .name == "browser.visits.total")' < "${facts}" >/dev/null; then
+  jqd -n --arg runId "${run_id}" --arg scenarioId "${scenario}" '{kind:"bottleneck",runId:$runId,scenarioId:$scenarioId,verdict:"not-applicable",confidence:"low",reason:"browser synthetic metrics are separate from backend load-generator SLIs"}' > "${out}"
+  exit 0
+fi
+
 # --- observation scalars from facts.json (one jqd call) ---------------------
 obs() { jqd -r --arg n "$1" '((.observations // [])[]? | select(.name==$n) | .value) // empty' < "${facts}" 2>/dev/null | head -1; }
 rps="$(obs http.requests_per_second)"
@@ -100,25 +106,91 @@ dbpool_worst() { # -> "usedPeak\tmaxCfg\tpendingPeak" of the most-saturated pool
 # client's idle connections instead of the dependency the workload calls.
 upstream_worst() { # -> "meanWaitSeconds\tactiveRequestsPeak\topenConnectionsPeak\tpool"
   local f="${mdir}/http_client_metrics.json"; [[ -s "${f}" ]] || return 0
-  jqd -r '
-    [ .data.result[]?
+  {
+    cat "${f}"
+    if [[ -s "${run_arg}/environment/measurement-start/resource-limits.json" ]]; then
+      cat "${run_arg}/environment/measurement-start/resource-limits.json"
+    else printf '[]\n'; fi
+  } | jqd -rs '
+    def counter_delta($points):
+      if ($points|length) < 2 then ($points[0][1]|tonumber)
+      else reduce range(1; $points|length) as $i (0;
+        ($points[$i][1]|tonumber) as $v | ($points[$i-1][1]|tonumber) as $before |
+        . + (if $v >= $before then $v-$before else $v end)) end;
+    [.[1][]? | .telemetryExporterAuthority | select(. != null and . != "")] as $exporters |
+    [ .[0].data.result[]?
+      | select((.metric.server_address // "") as $host |
+          (($host + (if .metric.server_port then ":" + .metric.server_port else "" end))) as $authority |
+          ($exporters | index($authority)) == null)
+      | (.values // (if .value then [.value] else [] end) | sort_by(.[0])) as $points
+      | select(($points|length) > 0)
       | { pool: (.metric.server_address // .metric.http_client_connection_pool_name // "default"),
-          nm:   (.metric.__name__ // ""),
-          st:   (.metric.http_connection_state // ""),
-          peak: ([ (.values // (if .value then [.value] else [] end))[] | .[1]|tonumber ] | if length==0 then 0 else max end) } ]
-    | group_by(.pool)
-    | map({ pool: .[0].pool,
-            qsum: ([ .[] | select(.nm=="http_client_request_time_in_queue_seconds_sum") | .peak ] | add // 0),
-            qcnt: ([ .[] | select(.nm=="http_client_request_time_in_queue_seconds_count") | .peak ] | add // 0),
-            act:  ([ .[] | select(.nm=="http_client_active_requests") | .peak ] | max // 0),
-            conn: ([ .[] | select(.nm=="http_client_open_connections") | .peak ] | add // 0) })
-    | map(. + {wait: (if .qcnt>0 then .qsum/.qcnt else 0 end)})
-    | (sort_by(.wait) | last) // {wait:0,act:0,conn:0,pool:"none"}
-    | "\(.wait)\t\(.act)\t\(.conn)\t\(.pool)"' < "${f}" 2>/dev/null | head -1
+          port: (.metric.server_port // ""), nm:(.metric.__name__ // ""),
+          peak: (if (.metric.__name__ // "" | test("time_in_queue_seconds_(sum|count)$"))
+            then counter_delta($points) else ($points | map(.[1]|tonumber) | max) end),
+          pts: (if (.metric.__name__ // "") == "http_client_open_connections" then $points else [] end) } ]
+    | group_by([.pool,.port])
+    | map({pool:.[0].pool,
+        qsum:([.[]|select(.nm=="http_client_request_time_in_queue_seconds_sum")|.peak]|add // 0),
+        qcnt:([.[]|select(.nm=="http_client_request_time_in_queue_seconds_count")|.peak]|add // 0),
+        act:([.[]|select(.nm=="http_client_active_requests")|.peak]|max // 0),
+        # Open connections are split by state (active/idle). The pool size at an
+        # instant is their sum at one timestamp; adding each state peak counted a
+        # 2-connection pool as 4, because the idle peak follows the active one.
+        conn:([.[]|select(.nm=="http_client_open_connections")|.pts[]] | group_by(.[0])
+          | map(map(.[1]|tonumber) | add) | max // 0)})
+    | map(. + {wait:(if .qcnt>0 then .qsum/.qcnt else 0 end)})
+    | (sort_by(.wait)|last) // empty
+    | "\(.wait)\t\(.act)\t\(.conn)\t\(.pool)"' 2>/dev/null | head -1
 }
 
-cpu_busy_peak="$(mstat_sum process_cpu max)"
-cpu_count="$(mstat cpu_count last)"; [[ -z "${cpu_count}" ]] && cpu_count="$(mstat cpu_count max)"
+# CPU modes are summed WITHIN an instance and timestamp. Rank instance
+# utilization using its own runtime capacity and captured fractional quota.
+# Summing replicas against one instance's rounded ProcessorCount is invalid.
+cpu_worst() {
+  [[ -s "${mdir}/process_cpu.json" ]] || return 0
+  {
+    cat "${mdir}/process_cpu.json"
+    if [[ -s "${mdir}/cpu_count.json" ]]; then cat "${mdir}/cpu_count.json"; else printf '{}\n'; fi
+    if [[ -s "${run_arg}/environment/measurement-start/resource-limits.json" ]]; then
+      cat "${run_arg}/environment/measurement-start/resource-limits.json"
+    else printf '[]\n'; fi
+  } | jqd -s '
+    def points: [.data.result[]? as $r | ($r.values // (if $r.value then [$r.value] else [] end))[]
+      | {instance:($r.metric.service_instance_id // $r.metric.instance // $r.metric.service_name // "default"),
+         service:($r.metric.service_name // ""), at:.[0], value:(.[1]|tonumber?)}];
+    (.[0]|points) as $usage | (.[1]|points) as $capacity | .[2] as $limits |
+    [$usage | group_by([.instance,.at])[] | .[0] as $point | (map(.value)|add) as $busy |
+      ([$capacity[] | select(.instance == $point.instance) | .value] | min) as $runtime |
+      ([$limits[]? | select(.telemetryService == $point.service and .telemetryService != "" and (.cpuLimit // 0) > 0) | .cpuLimit] | unique) as $quotas |
+      (if ($quotas|length) == 1 then $quotas[0] else null end) as $quota |
+      ([$runtime,$quota] | map(select(. != null and . > 0)) | min) as $cores |
+      select($cores != null) | {instance:$point.instance,service:$point.service,atEpoch:$point.at,
+        coresBusy:$busy,capacityCores:$cores,utilization:($busy/$cores),runtimeCores:$runtime,containerQuotaCores:$quota}]
+    | sort_by(.utilization) | last // {}' 2>/dev/null
+}
+cpu_busy_peak=""; cpu_count=""
+cpu_evidence="$(cpu_worst || true)"
+if [[ -n "${cpu_evidence}" ]]; then
+  printf '%s\n' "${cpu_evidence}" > "${run_arg}/analysis/cpu-utilization.json"
+  cpu_busy_peak="$(printf '%s' "${cpu_evidence}" | jqd -r '.coresBusy // empty')"
+  cpu_count="$(printf '%s' "${cpu_evidence}" | jqd -r '.capacityCores // empty')"
+fi
+# Require backlog in successive observations of the same process. A single
+# spike during a load step is queue pressure, not sustained starvation.
+queue_persistence() {
+  local f="${mdir}/thread_pool_queue.json"; [[ -s "${f}" ]] || return 0
+  jqd -r --argjson rps "${rps:-0}" --argjson depth "${PERFLAB_USE_TPQ_SAT:-2}" --argjson wait "${PERFLAB_USE_TPQ_WAIT_SAT:-0.05}" '
+    [.data.result[]? | (.values // (if .value then [.value] else [] end))
+      | unique_by(.[0]) | sort_by(.[0])
+      | reduce .[] as $point ({count:0,current:0,longest:0};
+          .count += 1 |
+          if (($point[1]|tonumber) >= $depth and ($rps <= 0 or ($point[1]|tonumber)/$rps >= $wait))
+          then .current += 1 else .current = 0 end |
+          .longest = ([.longest,.current]|max))]
+    | if ([.[].count]|max // 0) < 2 then empty else ([.[]|select(.count>=2)|.longest]|max) end' < "${f}" 2>/dev/null
+}
+tpq_persistence="$(queue_persistence)"
 tpq_peak="$(mstat thread_pool_queue max)"; tpq_avg="$(mstat thread_pool_queue avg)"
 thread_peak="$(mstat thread_count max)"
 gc_pause_peak="$(mstat gc_pause max)"
@@ -134,7 +206,7 @@ if read_fields 3 < <(dbpool_worst | tr '\t' '\n'); then
   db_used_peak="${TSV_FIELDS[0]}"; db_max="${TSV_FIELDS[1]}"; db_pending_peak="${TSV_FIELDS[2]}"
 fi
 up_wait=""; up_active=""; up_conns=""; up_pool=""
-if read_fields 4 < <(upstream_worst | tr '\t' '\n'); then
+if read_fields 4 2>/dev/null < <(upstream_worst | tr '\t' '\n'); then
   up_wait="${TSV_FIELDS[0]}"; up_active="${TSV_FIELDS[1]}"
   up_conns="${TSV_FIELDS[2]}"; up_pool="${TSV_FIELDS[3]}"
 fi
@@ -159,7 +231,7 @@ json="$(awk \
   -v errate="$(d "${errate}")" -v dropped="$(d "${dropped}")" \
   -v effcpu="$(d "${eff_cpu}")" -v effgc="$(d "${eff_gc}")" -v effdb="$(d "${eff_db}")" -v effalloc="$(d "${eff_alloc}")" \
   -v cpubusy="$(d "${cpu_busy_peak}")" -v cpucount="$(d "${cpu_count}")" \
-  -v tpqpeak="$(d "${tpq_peak}")" -v tpqavg="$(d "${tpq_avg}")" -v threadpeak="$(d "${thread_peak}")" \
+  -v tpqpersistence="$(d "${tpq_persistence}")" -v tpqpeak="$(d "${tpq_peak}")" -v tpqavg="$(d "${tpq_avg}")" -v threadpeak="$(d "${thread_peak}")" \
   -v gcpause="$(d "${gc_pause_peak}")" -v allocrate="$(d "${alloc_rate_peak}")" -v lockrate="$(d "${lock_rate_peak}")" \
   -v dbpending="$(d "${db_pending_peak}")" -v dbused="$(d "${db_used_peak}")" -v dbmax="$(d "${db_max}")" \
   -v upwait="$(d "${up_wait}")" -v upactive="$(d "${up_active}")" -v upconns="$(d "${up_conns}")" -v uppool="${up_pool:-}" \
@@ -191,7 +263,7 @@ json="$(awk \
      # 294 rps is ~425 ms of backlog (the actual defect). Gate on depth/throughput
      # seconds so a fast server is never called "starved" for a transient queue.
      tpq_wait = (has(tpqpeak) && has(rps) && rps+0>0) ? (tpqpeak+0)/(rps+0) : -1;
-     tpq_sat  = (has(tpqpeak) && tpqpeak+0>=TPQ_SAT && (tpq_wait<0 || tpq_wait>=TPQ_WAIT_SAT));
+     tpq_sat  = (has(tpqpeak) && tpqpeak+0>=TPQ_SAT && (tpq_wait<0 || tpq_wait>=TPQ_WAIT_SAT) && (!has(tpqpersistence) || tpqpersistence+0>=2));
      gc_sat   = (has(gcpause) && gcpause+0>=GC_SAT);
      lock_sat = (lock_per_req>=0 && lock_per_req>=LOCK_SAT);
      dbp_sat  = (has(dbpending) && dbpending+0>0);
@@ -227,7 +299,8 @@ json="$(awk \
      # db-pool-saturated: only a candidate when the pool is not saturated.
      if (dep_dom && !dbp_sat){ cand[++n]="dependency-bound-db"; sc[n]=0.5 + db_share }
      # utilisation-only fallbacks (no hard saturation, but a resource clearly dominates)
-     if (n==0 && cpu_share>=0.5){ cand[++n]="cpu-bound"; sc[n]=0.4+cpu_share }
+     # Aggregate CPU cost divided by median request latency is not saturation.
+     # Parallel work, exporter work and connection setup can make that ratio >1.
      if (n==0 && gc_share>=0.3){ cand[++n]="gc-bound"; sc[n]=0.4+gc_share }
      if (n==0 && cpu_util>=0.6){ cand[++n]="cpu-bound"; sc[n]=0.3+cpu_util }
 
@@ -283,19 +356,20 @@ json="$(awk \
      # This matches the completeness cap in PerfLab, so the two products do not
      # disagree about how much to trust the same evidence.
      if (has(dropped) && dropped+0>0) conf="low";
+     if (verdict=="threadpool-starved" && !has(tpqpersistence)) conf="low";
 
      # ----- notes -----
      nn=0;
      if (has(errate) && errate+0>0.01) notes[++nn]=sprintf("error_rate=%.3f -- the system is failing requests; the bottleneck reasoning is about an OVERLOADED system (see the gate).", errate+0);
-     if (has(dropped) && dropped+0>0) notes[++nn]=sprintf("%d dropped iteration(s) -- offered load exceeded served throughput; capacity is already past the knee.", dropped+0);
+     if (has(dropped) && dropped+0>0) notes[++nn]=sprintf("%d dropped iteration(s) -- scheduled load was not delivered; inspect generator capacity, connection/setup time and target pressure before identifying the limit.", dropped+0);
      if (tpq_sat && cpu_sat) notes[++nn]="thread-pool queue AND CPU are both saturated -- the queue is most likely CPU starvation, not sync-over-async blocking.";
      # Only when nothing else explains the queue. A saturated upstream pool
      # already accounts for parked threads, and emitting both notes tells the
      # reader to look for blocking calls AND for the pool limit that is the real
      # cause -- two contradictory instructions from one report.
-     if (tpq_sat && !cpu_sat && !up_sat) notes[++nn]="thread-pool queue is high while CPU is NOT saturated -- classic sync-over-async / blocking-call starvation (threads parked, not busy).";
+     if (tpq_sat && !cpu_sat && !up_sat) notes[++nn]="thread-pool backlog is high while CPU is not saturated; inspect time-aligned stacks for blocked work before attributing it to sync-over-async.";
      if (verdict=="dependency-bound-db" && dbp_sat) notes[++nn]="most request time is DB AND the pool is saturated -- the DB dependency is the bottleneck via pool exhaustion.";
-     if (verdict=="no-clear-bottleneck" && any) notes[++nn]="no resource crossed a saturation gate -- the system has headroom at this load (push RPS with a capacity profile to find the knee).";
+     if (verdict=="no-clear-bottleneck" && any) notes[++nn]="no captured resource crossed a saturation gate; this alone does not establish headroom or successful delivery.";
      # Retention is reported, never ranked: a leak is a stability defect, not a
      # latency bottleneck, so it must not win the verdict -- but "nothing
      # saturated" must not be the last word when the heap grew by orders of
@@ -303,7 +377,9 @@ json="$(awk \
      if (up_sat) notes[++nn]=sprintf("~%.0f ms of a typical request is spent waiting for an upstream HTTP connection (%.0f in flight, %.0f open) -- the connection pool is the constraint, not the code behind it. Raise MaxConnectionsPerServer / SocketsHttpHandler limits, or reduce concurrency.", (upwait+0)*1000, (has(upactive)?upactive+0:0), (has(upconns)?upconns+0:0));
      if (up_sat && tpq_sat) notes[++nn]="the thread-pool queue is behind a saturated upstream connection pool -- it is a symptom of connection waiting, not independent starvation.";
      if (retain_sat) notes[++nn]=sprintf("managed heap grew %.1f%% between the in-process before/after GC dumps -- RETENTION, not a latency bottleneck; read analysis/runtime/diff-gcdump-before-after.txt for the growing types.", (retaingrowth+0)*100);
-     if (tpq_sat==0 && has(tpqpeak) && tpqpeak+0>=TPQ_SAT && tpq_wait>=0) notes[++nn]=sprintf("thread-pool queue peaked at %d but drains in ~%.1f ms at %.0f rps -- transient depth, not starvation.", tpqpeak+0, tpq_wait*1000, rps+0);
+     if (tpq_sat==0 && has(tpqpeak) && tpqpeak+0>=TPQ_SAT && tpq_wait>=0 && tpq_wait<TPQ_WAIT_SAT) notes[++nn]=sprintf("thread-pool queue peaked at %d but drains in ~%.1f ms at %.0f rps -- transient depth, not starvation.", tpqpeak+0, tpq_wait*1000, rps+0);
+     if (has(tpqpeak) && tpqpeak+0>=TPQ_SAT && has(tpqpersistence) && tpqpersistence+0<2 && (tpq_wait<0 || tpq_wait>=TPQ_WAIT_SAT)) notes[++nn]="thread-pool backlog was isolated to individual samples; the captured series does not establish sustained starvation.";
+     if (tpq_sat && !has(tpqpersistence)) notes[++nn]="thread-pool backlog persistence is unknown because fewer than two samples were captured; confidence is low.";
      if (nsatres>=2) notes[++nn]=sprintf("%d resources saturated at once (%s); primary bottleneck(s): %s. Address them together, not just the top-scored one; see resources.* for each.", nsatres, satreslist, primlist);
 
      # ----- reason line: describe the PRIMARY (top) resource; a composite verdict lists
@@ -311,12 +387,16 @@ json="$(awk \
      if (verdict=="insufficient-data") reason="no runtime resource signals were captured (black-box run, or metrics missing) -- cannot classify.";
      else if (bi==0) reason="no resource crossed a saturation threshold at this load.";
      else {
-       if (cand[bi]=="cpu-bound") reason=sprintf("CPU utilisation peaked at %.0f%% of %s core(s); ~%.0f%% of a typical request is on-CPU.", (cpu_util>=0?cpu_util*100:0), (has(cpucount)?sprintf("%d",cpucount+0):"?"), (cpu_share>=0?cpu_share*100:0));
+       if (cand[bi]=="cpu-bound") reason=sprintf("CPU utilisation peaked at %.0f%% of %s core(s); aggregate CPU cost is %.2f ms per completed operation.", (cpu_util>=0?cpu_util*100:0), (has(cpucount)?sprintf("%.3g",cpucount+0):"?"), (has(effcpu)?effcpu+0:0));
        else if (cand[bi]=="threadpool-starved") reason=sprintf("thread-pool queue peaked at %.0f work items waiting for a worker thread.", tpqpeak+0);
        else if (cand[bi]=="lock-bound") reason=sprintf("~%.1f Monitor lock contention(s) per request (%.0f/s peak).", lock_per_req, (has(lockrate)?lockrate+0:0));
        else if (cand[bi]=="gc-bound") reason=sprintf("the GC paused ~%.0f%% of wall-clock (peak); ~%.0f%% of a request is GC pause.", (gcpause+0)*100, (gc_share>=0?gc_share*100:0));
        else if (cand[bi]=="db-pool-saturated") reason=sprintf("%.0f request(s) peak waiting for a pooled DB connection (used %.0f/%.0f).", dbpending+0, (has(dbused)?dbused+0:0), (has(dbmax)?dbmax+0:0));
        else if (cand[bi]=="upstream-pool-saturated") reason=sprintf("a typical request waits ~%.0f ms for an upstream HTTP connection to %s (%.0f in flight against %.0f open connection(s)).", (upwait+0)*1000, (uppool==""?"the dependency":uppool), (has(upactive)?upactive+0:0), (has(upconns)?upconns+0:0));
+       # The share is a MEAN cost over the MEDIAN latency; a skewed distribution
+       # (S27: ~1 s deadlock aborts and ~5 s timeouts) pushes it past 100%, which
+       # cannot be read as "part of a typical request".
+       else if (cand[bi]=="dependency-bound-db" && db_share > 1) reason=sprintf("mean database time per request (%.1f ms) exceeds the median request latency (%.1f ms): the latency distribution is skewed and requests are dominated by DB execution time (pool not saturated -- not pool waiting).", effdb+0, p50+0);
        else if (cand[bi]=="dependency-bound-db") reason=sprintf("~%.0f%% of a typical request is spent in the database (pool not saturated -- it is DB execution time, not pool waiting).", db_share*100);
        else reason="";
        if (concurrent) reason=sprintf("Concurrent bottlenecks (%s). Primary -> ", primlist) reason;
@@ -330,7 +410,7 @@ json="$(awk \
      printf "\"kind\":\"bottleneck\",\"runId\":\"%s\",\"scenarioId\":\"%s\",\"captureStatus\":\"%s\",", runid, scen, status;
      printf "\"verdict\":\"%s\",\"confidence\":\"%s\",\"concurrent\":%s,\"contributors\":[%s],\"saturatedResources\":[%s],\"reason\":\"%s\",", verdict, conf, (concurrent?"true":"false"), contribjson, satresjson, reason;
      printf "\"resources\":{";
-     printf "\"cpu\":{\"coresBusyPeak\":%s,\"cpuCount\":%s,\"utilizationPct\":%s,\"msPerRequest\":%s,\"latencySharePct\":%s,\"saturated\":%s},", jnum(cpubusy), (has(cpucount)?sprintf("%d",cpucount+0):"null"), jpct(cpu_util), jnum(effcpu), jpct(cpu_share), (cpu_sat?"true":"false");
+     printf "\"cpu\":{\"coresBusyPeak\":%s,\"cpuCount\":%s,\"utilizationPct\":%s,\"msPerRequest\":%s,\"latencySharePct\":%s,\"saturated\":%s},", jnum(cpubusy), jnum(cpucount), jpct(cpu_util), jnum(effcpu), jpct(cpu_share), (cpu_sat?"true":"false");
      printf "\"threadPool\":{\"queuePeak\":%s,\"queueAvg\":%s,\"threadCountPeak\":%s,\"queueWaitSeconds\":%s,\"saturated\":%s},", jnum(tpqpeak), jnum(tpqavg), jnum(threadpeak), (tpq_wait>=0?sprintf("%.6f",tpq_wait):"null"), (tpq_sat?"true":"false");
      printf "\"upstreamPool\":{\"meanWaitSeconds\":%s,\"activeRequestsPeak\":%s,\"openConnectionsPeak\":%s,\"pool\":%s,\"latencySharePct\":%s,\"saturated\":%s},", jnum(upwait), jnum(upactive), jnum(upconns), (uppool==""?"null":"\"" uppool "\""), jpct(up_share), (up_sat?"true":"false");
      printf "\"retention\":{\"heapGrowthPct\":%s,\"source\":\"%s\",\"flagged\":%s},", (has(retaingrowth)?sprintf("%.1f",(retaingrowth+0)*100):"null"), (has(retaingrowth)?"analysis/runtime/diff-gcdump-before-after.txt":"not-captured"), (retain_sat?"true":"false");
@@ -354,7 +434,7 @@ read -r verdict conf reason < <(jqd -r '[.verdict,.confidence,.reason]|@tsv' < "
 echo "Bottleneck for ${scenario} (run ${run_id})"
 echo "  verdict:    ${verdict}  (confidence: ${conf})"
 echo "  reason:     ${reason}"
-jqd -r '.resources | "  cpu util:   \(.cpu.utilizationPct // "n/a")%  (\(.cpu.latencySharePct // "n/a")% of a request on-CPU)\n  tp queue:   peak \(.threadPool.queuePeak // "n/a")\n  gc pause:   peak \(.gc.pauseFractionPeak // "n/a")  (\(.gc.latencySharePct // "n/a")% of a request)\n  locks:      \(.locks.contentionsPerRequest // "n/a") / request\n  db pool:    pending peak \(.dbPool.pendingPeak // "n/a"), used \(.dbPool.usedPeak // "n/a")/\(.dbPool.max // "n/a")\n  db time:    \(.dependencyDb.latencySharePct // "n/a")% of a request"' \
+jqd -r '.resources | "  cpu util:   \(.cpu.utilizationPct // "n/a")%  (aggregate CPU cost / median latency: \(.cpu.latencySharePct // "n/a")%)\n  tp queue:   peak \(.threadPool.queuePeak // "n/a")\n  gc pause:   peak \(.gc.pauseFractionPeak // "n/a")  (\(.gc.latencySharePct // "n/a")% of a request)\n  locks:      \(.locks.contentionsPerRequest // "n/a") / request\n  db pool:    pending peak \(.dbPool.pendingPeak // "n/a"), used \(.dbPool.usedPeak // "n/a")/\(.dbPool.max // "n/a")\n  db time:    \(.dependencyDb.latencySharePct // "n/a")% of a request"' \
   < "${out}" 2>/dev/null || true
 jqd -r '.notes[]? | "  note: " + .' < "${out}" 2>/dev/null || true
 echo "  wrote ${out}"

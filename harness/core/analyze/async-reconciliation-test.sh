@@ -145,6 +145,23 @@ jq -e '.httpSuccessful == 4000' "${report}" >/dev/null \
 jq -e '(.findings | join(" ") | test("never enqueued")) | not' "${report}" >/dev/null \
   || fail "a gap was invented from requests that failed rather than being enqueued"
 
+# --- a weighted mix publishes from only some of its members -----------------
+# ScenarioLab's mixed-runtime sends 10% POST /api/orders; its 90% reads never
+# publish, so comparing every HTTP success with the publish count reported
+# 176,207 reads as "accepted and never enqueued". The comparison applies only
+# to a single-request workload.
+partial='[{"name":"perf.orders.created","messages":0,"messages_ready":0,"messages_unacknowledged":0,"message_stats":{"publish":500,"ack":500,"redeliver":0}},{"name":"perf.orders.dead","messages":0,"messages_ready":0}]'
+mixed="$(build mixed "${partial}")"
+printf '{"workload":{"method":"MIX"},"measurementStartedEpoch":1800000000,"measurementEndedEpoch":1800000060}\n' > "${mixed}/manifest.json"
+report="$(reconcile "${mixed}")"
+jq -e '.balanced == true and (.httpComparison | startswith("not-applicable")) and (.findings | length) == 0' "${report}" >/dev/null \
+  || fail "a mix's non-publishing reads were reported as lost: $(jq -c '{balanced,httpComparison,findings}' "${report}")"
+single="$(build single "${partial}")"
+printf '{"workload":{"method":"POST"},"measurementStartedEpoch":1800000000,"measurementEndedEpoch":1800000060}\n' > "${single}/manifest.json"
+report="$(reconcile "${single}")"
+jq -e '.httpComparison == "compared" and any(.findings[]; test("4500 request\\(s\\) succeeded over HTTP without a corresponding publish"))' "${report}" >/dev/null \
+  || fail "a single POST workload lost its HTTP-versus-publish check: $(jq -c '{httpComparison,findings}' "${report}")"
+
 # --- redelivery is an ATTEMPT, not a confirmed duplicate completion ----------
 jq -e '.duplicate.meaning | test("not confirmed duplicate completions")' \
   "$(reconcile "$(build dupmeaning "${duplicated}")")" >/dev/null \

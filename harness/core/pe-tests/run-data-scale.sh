@@ -59,11 +59,12 @@ for scale in "${scales[@]}"; do
     exit 1
   fi
   level_dir="${ds_dir}/scales/${scale}"
+  mkdir -p "${level_dir}"
   # A fresh volume + SEED_SCALE makes the app seed this size on startup.
   level_rc=0
   SEED_SCALE="${scale}" PERFLAB_ARTIFACT_DIR="${level_dir}" \
   PERFLAB_PACKAGE_RUN_ID="${ds_id}-${scale}" PERFLAB_TELEMETRY_RUN_ID="${ds_id}-${scale}" \
-    "${harness_core_dir}/run/run-scenario.sh" "${scenario_id}" "${duration}" >/dev/null 2>&1 || level_rc=$?
+    "${harness_core_dir}/run/run-scenario.sh" "${scenario_id}" "${duration}" > "${level_dir}/run.log" 2>&1 || level_rc=$?
 
   f="${level_dir}/facts.json"; [[ -s "$f" ]] || f="${level_dir}/benchmark/observations.json"
   if [[ "${level_rc}" -ne 0 || ! -s "$f" ]]; then

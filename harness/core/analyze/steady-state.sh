@@ -94,9 +94,16 @@ finish_early() { # <verdict> <reason>
   stamp_facts "{\"verdict\":\"$1\",\"recommendedTrimSeconds\":0,\"basis\":\"server-side windowed\",\"runId\":\"${run_id}\",\"scenarioId\":\"${scenario}\"}"
 }
 
+if [[ -s "${facts}" ]] && jqd -e 'any(.observations[]?; .name == "browser.visits.total")' < "${facts}" >/dev/null; then
+  finish_early "not-applicable" "browser synthetic metrics are separate from backend load-generator SLIs"
+  exit 0
+fi
+
 # A ramping/surging profile is non-steady BY DESIGN: a plateau check does not apply.
+# closed and open are the constant-VU and constant-arrival executors that steady
+# and arrival use, so they are plateaus too.
 case "${profile}" in
-  steady|arrival|soak|"" ) : ;;
+  steady|closed|arrival|open|soak|"" ) : ;;
   * )
     finish_early "not-applicable" "profile is intentionally non-steady (ramp/surge); a plateau check does not apply"
     echo "Steady-state: not applicable to a '${profile}' profile (non-steady by design). Wrote ${out}."

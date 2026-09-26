@@ -95,4 +95,13 @@ open="$(compile open)"
 [[ "$(executor "${open}")" != "$(executor "${closed}")" ]] \
   || fail "open and closed compiled to the same executor; the distinction is not real"
 
-echo "k6 profile shape (closed, breakpoint, spike) tests passed"
+# Metadata and sampler budgets must describe the executor that will run.
+# The separate warm-up command is not part of this measured duration.
+for profile in smoke load steady closed ramp breakpoint stress capacity knee spike open arrival soak; do
+  config="$(compile "${profile}")"
+  scheduled="$(jq -r '.scenarios.measure | if has("duration") then (.duration | sub("s$"; "") | tonumber) else [.stages[].duration | sub("s$"; "") | tonumber] | add end' "${config}")"
+  effective="$(k6_profile_effective_duration "${profile}" 64 60)"
+  [[ "${effective}" == "${scheduled}" ]] || fail "${profile}: reported ${effective}s but executor runs ${scheduled}s"
+done
+
+echo "k6 profile shape and effective-duration tests passed"

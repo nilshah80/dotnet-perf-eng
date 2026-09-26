@@ -23,5 +23,10 @@ curl -fsS --max-time 15 -u "${rabbit_user}:${RABBITMQ_PASSWORD:-perflab}" "${rab
     echo "WARNING: rabbitmq post-warm-up queue baseline failed; async reconciliation will report itself unscoped." >&2
     rm -f "${artifact_dir}/dependencies/rabbitmq-queues-preload.json"
   }
+# Node uptime with the baseline: a broker that restarts during the window starts
+# message_stats from zero, and the reconciliation must know its baseline is void.
+nodes="$(curl -fsS --max-time 15 -u "${rabbit_user}:${RABBITMQ_PASSWORD:-perflab}" "${rabbit_mgmt_url}/api/nodes" 2>/dev/null)" \
+  && printf '{"capturedAtEpoch":%s,"nodes":%s}\n' "$(date -u +%s)" "${nodes}" \
+    > "${artifact_dir}/dependencies/rabbitmq-nodes-preload.json" || true
 
 run_lab_dependency_hook rabbitmq reset-stats "${artifact_dir}"

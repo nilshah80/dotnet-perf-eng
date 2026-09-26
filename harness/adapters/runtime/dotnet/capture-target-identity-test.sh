@@ -36,6 +36,7 @@ diagnostics_url=http://monitor
 # C:/Program Files/Git/stacks and the lookup silently misses.
 jqd() { MSYS_NO_PATHCONV=1 jq "$@" | tr -d '\r'; return "${PIPESTATUS[0]}"; }
 diag_target() { printf 'Fixture.Api'; }
+diag_endpoint() { printf '%s' "${diagnostics_url}"; }
 json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s}"; }
 loadgen_warmup() { mkdir -p "$1"; printf '{}' > "$1/warmup.json"; }
 loadgen_measure() { mkdir -p "$1"; printf '{}' > "$1/diagnostic.json"; }

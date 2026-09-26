@@ -189,6 +189,10 @@ for profile_type in cpu wall allocation lock exception live-heap; do
 done
 grep -q '"profileTypes":\["cpu","wall","allocation","lock","exception","live-heap"\]' "${artifact}/telemetry/profiles/query.json" || fail "multi-type query manifest"
 
+PERFLAB_PROFILING_TYPES=lock run_case idle-lock missing ok "${stub}"
+jq -e '.captureState == "missing" and .services[0].required == false' "${test_root}/idle-lock/telemetry/profiles-signal.json" >/dev/null   || fail "an empty conditional profile was reported as captured or required"
+[[ "${profiles_incomplete}" == "0" ]] || fail "absence of optional lock events made the package incomplete"
+
 artifact="${test_root}/disabled"
 mkdir -p "${artifact}"
 artifact_dir="${artifact}" continuous_profiling=0 capture_telemetry=1 \

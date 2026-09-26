@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# Stage-by-stage analysis of a staged load profile (ramp, load, stress, breakpoint,
+# spike, capacity): the server-side throughput, p99 and 5xx ratio of every stage
+# of the k6 schedule that actually ran, and the conclusion each profile exists
+# to draw (Gate A cases 11 and 12):
+#
+#   ramp, load, stress, breakpoint, capacity
+#     levels are the rising stages up to the peak. The last healthy and the first
+#     failing level (errors above the error SLO, p99 above a p99 SLO, or an
+#     arrival stage delivering under 95% of its rate), and the first level whose
+#     throughput stopped following the load (the plateau).
+#   spike
+#     baseline hold, surge hold and the recovery: the surge's degradation and the
+#     seconds from the end of the surge until p99 and errors are back within 25%
+#     (+5 ms) and one point of the baseline, at 5 s resolution.
+#
+# The stage schedule is the executed benchmark/k6-profile.json, anchored at the
+# recorded measurement start; every number is a windowed query over one stage
+# (the same histogram and scoping as steady-state.sh). A stage shorter than
+# 10 s holds fewer than two metric exports and is reported, not judged.
+#
+#   analyze-stages.sh <run-dir>   ->   <run-dir>/analysis/stages.json
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+
+run_arg="${1:?analyze-stages.sh <run-dir>}"
+[[ -d "${run_arg}" ]] || { echo "analyze-stages: '${run_arg}' is not a run directory." >&2; exit 2; }
+manifest="${run_arg}/manifest.json"
+[[ -s "${manifest}" ]] || { echo "analyze-stages: no manifest.json under '${run_arg}'." >&2; exit 2; }
+mkdir -p "${run_arg}/analysis"
+out="${run_arg}/analysis/stages.json"
+
+run_id="$(jqd -r '.telemetryRunId // .runId' < "${manifest}")"
+scenario="$(jqd -r '.scenarioId // ""' < "${manifest}")"
+profile="$(jqd -r '.workload.profile // ""' < "${manifest}")"
+start="$(jqd -r '.measurementStartedEpoch // 0' < "${manifest}")"
+end="$(jqd -r '.measurementEndedEpoch // 0' < "${manifest}")"
+
+finish() { # finish <verdict> <reason>
+  printf '{"kind":"stages","runId":"%s","scenarioId":"%s","profile":"%s","verdict":"%s","reason":"%s"}\n' \
+    "$(json_escape "${run_id}")" "$(json_escape "${scenario}")" "$(json_escape "${profile}")" "$1" "$(json_escape "$2")" > "${out}"
+  echo "Stages: $1 -- $2."
+  exit 0
+}
+
+case "${profile}" in
+  ramp|load|stress|breakpoint|spike|capacity|knee) ;;
+  *) finish "not-applicable" "profile '${profile}' has no load stages" ;;
+esac
+schedule="${run_arg}/benchmark/k6-profile.json"
+[[ -s "${schedule}" ]] || finish "not-captured" "no executed k6 stage schedule (benchmark/k6-profile.json)"
+[[ "${start}" -gt 0 && "${end}" -gt "${start}" ]] || finish "not-captured" "the manifest has no measurement window"
+
+executor="$(jqd -r '.scenarios.measure.executor // ""' < "${schedule}")"
+unit="VUs"; [[ "${executor}" == "ramping-arrival-rate" ]] && unit="req/s"
+stages="$(jqd -r '.scenarios.measure.stages[]? | [(.duration | rtrimstr("s") | tonumber), .target] | @tsv' < "${schedule}")"
+[[ -n "${stages}" ]] || finish "not-captured" "the executed schedule has no stages"
+
+# Scope to this run's app instance(s), as steady-state.sh does.
+si=""
+for mf in request_duration process_cpu application_metrics; do
+  [[ -s "${run_arg}/telemetry/metrics/${mf}.json" ]] || continue
+  si="$(jqd -r '[.data.result[]?.metric.service_instance_id // .metric.instance // empty] | unique | join("|")' < "${run_arg}/telemetry/metrics/${mf}.json" 2>/dev/null || true)"
+  [[ -n "${si}" ]] && break
+done
+matchers='http_route!~"/health.*|"'
+[[ -n "${si}" ]] && matchers="service_instance_id=~\"${si}\",${matchers}"
+sel="{${matchers}}"
+sel5="{${matchers},http_response_status_code=~\"5..\"}"
+
+prom_instant() { # <query> <time-epoch> -> scalar or ""
+  local value="" attempt
+  for attempt in 1 2 3; do
+    value="$(curl -fsS -G "${prometheus_url}/api/v1/query" \
+      --data-urlencode "query=$1" --data-urlencode "time=$2" 2>/dev/null \
+      | jqd -r '.data.result[0].value[1] // empty' 2>/dev/null | head -1 || true)"
+    [[ -n "${value}" && "${value}" != "NaN" ]] && { printf '%s\n' "${value}"; return 0; }
+    (( attempt < 3 )) && sleep 1
+  done
+  return 0
+}
+window_stats() { # window_stats <from> <to> -> "rps p99ms errRatio" (empty fields as -)
+  local from="$1" to="$2" w rps p99 bad
+  w=$(( to - from )); (( w < 1 )) && w=1
+  rps="$(prom_instant "sum(rate(http_server_request_duration_seconds_count${sel}[${w}s]))" "${to}")"
+  p99="$(prom_instant "1000*histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket${sel}[${w}s])))" "${to}")"
+  bad="$(prom_instant "sum(rate(http_server_request_duration_seconds_count${sel5}[${w}s]))" "${to}")"
+  awk -v r="${rps}" -v p="${p99}" -v b="${bad:-0}" 'BEGIN {
+    if (r == "") { print "- - -"; exit }
+    printf "%s %s %s\n", r, (p == "" ? "-" : p), (r + 0 > 0 ? (b + 0) / (r + 0) : 0) }'
+}
+
+# SLO thresholds from the lab's slos.tsv: the scenario's own row, else default.
+slo() { # slo <metric>
+  local file="${lab_dir:-}/slos.tsv"
+  [[ -s "${file}" ]] || return 0
+  awk -F'\t' -v s="${scenario}" -v m="$1" '$0 !~ /^#/ && $2 == m && $3 == "max" {
+    if ($1 == s) own = $4; else if ($1 == "default") dflt = $4 }
+    END { if (own != "") print own; else if (dflt != "") print dflt }' "${file}"
+}
+p99_slo="$(slo http.latency.p99)"
+err_slo="$(slo http.error_rate)"; err_slo="${err_slo:-0.02}"
+
+# Stage windows from the recorded measurement start, clipped to the window end.
+rows=""; t="${start}"; index=0; previous_target="$(jqd -r '.scenarios.measure.startVUs // .scenarios.measure.startRate // 0' < "${schedule}")"
+while IFS=$'\t' read -r duration stage_target; do
+  [[ -n "${duration}" ]] || continue
+  s="${t}"; e=$(( t + ${duration%.*} )); (( e > end )) && e="${end}"; t=$(( t + ${duration%.*} ))
+  kind="ramp"; [[ "${stage_target}" == "${previous_target}" ]] && kind="hold"
+  if (( e - s >= 10 )); then read -r rps p99 err <<< "$(window_stats "${s}" "${e}")"; else rps="-"; p99="-"; err="-"; fi
+  rows+="${index}"$'\t'"${s}"$'\t'"${e}"$'\t'"${previous_target}"$'\t'"${stage_target}"$'\t'"${kind}"$'\t'"${rps}"$'\t'"${p99}"$'\t'"${err}"$'\n'
+  previous_target="${stage_target}"; index=$(( index + 1 ))
+done <<< "${stages}"
+
+# Judge each stage and derive the profile's conclusion in one awk pass.
+spike_mode=0; [[ "${profile}" == "spike" ]] && spike_mode=1
+summary="$(printf '%s' "${rows}" | awk -F'\t' -v unit="${unit}" -v p99slo="${p99_slo}" -v errslo="${err_slo}" -v spike="${spike_mode}" '
+  { i=$1+0; s[i]=$2; e[i]=$3; from[i]=$4+0; tg[i]=$5+0; kind[i]=$6; rps[i]=$7; p99[i]=$8; err[i]=$9; n=i+1 }
+  function judged(k) { return rps[k] != "-" }
+  function healthy(k,   ok) {
+    ok = (err[k] + 0 <= errslo + 0)
+    if (p99slo != "" && p99[k] != "-" && p99[k] + 0 > p99slo + 0) ok = 0
+    if (unit == "req/s" && rps[k] + 0 < 0.95 * tg[k]) ok = 0
+    return ok }
+  function why(k,   r) {
+    r = ""
+    if (err[k] + 0 > errslo + 0) r = r sprintf("5xx ratio %.3f > %s; ", err[k], errslo)
+    if (p99slo != "" && p99[k] != "-" && p99[k] + 0 > p99slo + 0) r = r sprintf("p99 %.1f ms > SLO %s ms; ", p99[k], p99slo)
+    if (unit == "req/s" && rps[k] + 0 < 0.95 * tg[k]) r = r sprintf("delivered %.1f of %d req/s; ", rps[k], tg[k])
+    return r }
+  END {
+    printf "{\"stages\":["
+    for (k = 0; k < n; k++) {
+      printf "%s{\"index\":%d,\"kind\":\"%s\",\"startEpoch\":%d,\"endEpoch\":%d,\"fromTarget\":%d,\"target\":%d,\"unit\":\"%s\",", (k ? "," : ""), k, kind[k], s[k], e[k], from[k], tg[k], unit
+      if (judged(k)) printf "\"judged\":true,\"servedRps\":%.4f,\"p99Ms\":%s,\"errorRatio\":%.6f,\"healthy\":%s,\"reasons\":\"%s\"}", rps[k], (p99[k] == "-" ? "null" : sprintf("%.3f", p99[k])), err[k], (healthy(k) ? "true" : "false"), why(k)
+      else printf "\"judged\":false,\"reason\":\"%s\"}", (e[k] - s[k] < 10 ? "stage shorter than 10 s: fewer than two metric exports" : "no server-side request samples in this stage window")
+    }
+    printf "]"
+    if (spike) {
+      base = -1; surge = -1; peak = -1
+      for (k = 0; k < n; k++) if (kind[k] == "hold" && judged(k)) { if (base < 0) base = k; if (tg[k] > peak) { peak = tg[k]; surge = k } }
+      if (base < 0 || surge < 0 || surge == base) { printf ",\"spike\":{\"captureState\":\"not-captured\",\"reason\":\"no judged baseline and surge hold stages\"}}"; exit }
+      bp = p99[base] + 0; be = err[base] + 0; sp = p99[surge] + 0; se = err[surge] + 0
+      degraded = (sp > bp * 1.25 + 5 || se > be + 0.01)
+      printf ",\"spike\":{\"captureState\":\"captured\",\"baselineStage\":%d,\"surgeStage\":%d,\"baselineP99Ms\":%.3f,\"baselineErrorRatio\":%.6f,\"surgeP99Ms\":%.3f,\"surgeErrorRatio\":%.6f,\"degraded\":%s,\"surgeEndEpoch\":%d,\"toleranceP99Ms\":%.3f,\"toleranceErrorRatio\":%.6f}", base, surge, bp, be, sp, se, (degraded ? "true" : "false"), e[surge], bp * 1.25 + 5, be + 0.01
+    } else {
+      last = -1; first = -1; plateau = -1; scaled = -1; prevk = -1
+      for (k = 0; k < n; k++) {
+        if (!judged(k) || (prevk >= 0 && tg[k] < tg[prevk])) continue
+        if (healthy(k)) { if (first < 0) last = k } else if (first < 0) first = k
+        if (plateau < 0 && prevk >= 0 && tg[k] >= 1.2 * tg[prevk] && rps[prevk] + 0 > 0 && rps[k] + 0 < 1.05 * rps[prevk]) { plateau = k; scaled = prevk }
+        prevk = k
+      }
+      printf ",\"levels\":{\"lastHealthyStage\":%s,\"lastHealthyTarget\":%s,\"firstFailingStage\":%s,\"firstFailingTarget\":%s,\"firstFailingReasons\":\"%s\",\"plateauStage\":%s,\"plateauTarget\":%s,\"scaledUpToTarget\":%s}", \
+        (last < 0 ? "null" : last), (last < 0 ? "null" : tg[last]), (first < 0 ? "null" : first), (first < 0 ? "null" : tg[first]), (first < 0 ? "" : why(first)), (plateau < 0 ? "null" : plateau), (plateau < 0 ? "null" : tg[plateau]), (scaled < 0 ? "null" : tg[scaled])
+    }
+    printf "}"
+  }')"
+
+# Spike recovery: 10 s windows every 5 s from the end of the surge.
+recovery='null'
+if [[ "${spike_mode}" == 1 ]] && jqd -e '.spike.captureState == "captured"' <<< "${summary}" >/dev/null 2>&1; then
+  surge_end="$(jqd -r '.spike.surgeEndEpoch' <<< "${summary}")"
+  tol_p99="$(jqd -r '.spike.toleranceP99Ms' <<< "${summary}")"; tol_err="$(jqd -r '.spike.toleranceErrorRatio' <<< "${summary}")"
+  degraded="$(jqd -r '.spike.degraded' <<< "${summary}")"
+  recovered="false"; seconds="null"; samples=""
+  if [[ "${degraded}" == "false" ]]; then
+    recovered="true"; seconds=0
+  else
+    for (( probe = surge_end + 10; probe <= end; probe += 5 )); do
+      read -r rps p99 err <<< "$(window_stats $(( probe - 10 )) "${probe}")"
+      samples+="${samples:+,}{\"atEpoch\":${probe},\"p99Ms\":$([[ "${p99}" == "-" ]] && echo null || echo "${p99}"),\"errorRatio\":$([[ "${err}" == "-" ]] && echo null || echo "${err}")}"
+      if [[ "${p99}" != "-" ]] && awk -v p="${p99}" -v tp="${tol_p99}" -v r="${err}" -v tr="${tol_err}" 'BEGIN { exit !(p + 0 <= tp + 0 && r + 0 <= tr + 0) }'; then
+        recovered="true"; seconds=$(( probe - surge_end )); break
+      fi
+    done
+  fi
+  recovery="{\"recovered\":${recovered},\"recoverySeconds\":${seconds},\"resolutionSeconds\":5,\"windowSeconds\":10,\"samples\":[${samples}]}"
+fi
+
+jqd --arg run "${run_id}" --arg scen "${scenario}" --arg prof "${profile}" --arg exec "${executor}" \
+  --arg p99slo "${p99_slo}" --arg errslo "${err_slo}" --argjson recovery "${recovery}" \
+  '{kind:"stages", runId:$run, scenarioId:$scen, profile:$prof, verdict:"captured", executor:$exec,
+    basis:"server-side windowed (http_server_request_duration histogram) per executed k6 stage",
+    thresholds:{p99SloMs:($p99slo|tonumber? // null), errorRatio:($errslo|tonumber)}} + .
+    | if .spike and $recovery != null then .spike += $recovery else . end' <<< "${summary}" > "${out}"
+
+jqd -r '"Stages (\(.profile), \(.executor)):",
+  (.stages[] | "  stage \(.index) \(.kind) \(.fromTarget)->\(.target) \(.unit): " +
+    (if .judged then "\(.servedRps|floor) rps, p99 \(.p99Ms // "?") ms, 5xx \(.errorRatio) -> \(if .healthy then "healthy" else "FAILING (\(.reasons))" end)" else .reason end)),
+  (if ([.stages[] | select(.judged)] | length) == 0 then "  no stage could be judged" elif .levels then "  last healthy: \(.levels.lastHealthyTarget // "none") ; first failing: \(.levels.firstFailingTarget // "none within the tested range") ; throughput \(if .levels.scaledUpToTarget then "stopped scaling above \(.levels.scaledUpToTarget) " + (.stages[0].unit) else "kept scaling" end)" else empty end),
+  (if .spike.captureState == "captured" then "  spike: baseline p99 \(.spike.baselineP99Ms) ms -> surge p99 \(.spike.surgeP99Ms) ms (degraded: \(.spike.degraded)); recovered: \(.spike.recovered) after \(.spike.recoverySeconds // "?") s" else empty end)' < "${out}"
+echo "wrote ${out}"

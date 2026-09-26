@@ -48,7 +48,7 @@ PERFLAB_DIAGNOSTICS_URL="http://127.0.0.1:18323"   # dotnet-monitor (runtime ada
 PERFLAB_LOAD_GENERATOR_DEFAULT="k6"
 PERFLAB_INTERNAL_BASE_URL="http://api:8080"   # app URL on the compose network (Docker load gens)
 PERFLAB_COMPOSE_NETWORK="perflab_default"     # compose network a Docker load gen joins
-PERFLAB_WRK_IMAGE=""                           # set to your wrk Docker image to enable wrk
+PERFLAB_WRK_IMAGE="${PERFLAB_WRK_IMAGE:-}"                           # set to your wrk Docker image to enable wrk
 # JMeter is container-only. Build the native image with
 # harness/adapters/loadgen/jmeter/package.sh, then pin PERFLAB_JMETER_IMAGE
 # to that digest. Leave unset unless PERFLAB_LOAD_GENERATOR=jmeter;

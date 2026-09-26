@@ -373,7 +373,7 @@ performance_measurement_window_finalize() {
     --arg startObserved "${start_observed}" --arg endObserved "${end_observed}" \
     --argjson startProcess "${start_process}" --argjson endProcess "${end_process}" '
       {schemaVersion:"measurement-window-v1",runId:$run,measurementWindowId:$window,
-       instanceIds:([$start,$end] | unique),restartDetected:($start != $end),
+       instanceIds:([$start,$end] | unique),restartDetected:($start != $end or $startProcess != $endProcess),
        scope:"exact-boundary-instance-set",
        start:{instanceId:$start,processStartedAtUnixMilliseconds:$startProcess,observedAt:$startObserved},
        end:{instanceId:$end,processStartedAtUnixMilliseconds:$endProcess,observedAt:$endObserved}}

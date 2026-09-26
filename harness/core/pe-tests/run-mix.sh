@@ -42,22 +42,33 @@ if jqd -e 'any(.[]; (.selector // "") != "")' < "${mix_file}" >/dev/null 2>&1; t
   export PERF_MIX_KIND="journey"
   export PERF_REQUIRES_MANAGED_PARTITION=1
 fi
+mix_writes=0
 if jqd -e 'any(.[]; (.method // "GET" | ascii_upcase) as $m | ($m != "GET" and $m != "HEAD" and $m != "OPTIONS"))' < "${mix_file}" >/dev/null 2>&1; then
-  export PERF_REQUIRES_MANAGED_PARTITION=1
+  mix_writes=1
 fi
-if [[ "${PERF_REQUIRES_MANAGED_PARTITION:-0}" == "1" ]]; then
-  if [[ "${target_mode}" == "local" ]]; then
+# The run partition exists only where the lab's API provides it
+# (PERFLAB_WRITE_SAFETY_CLASS=managed-reference, as PerfLab's writeSafetyClass).
+# On any other owned lab a write mix is an ordinary write workload under the
+# lab's per-run reset, like S16's POST /api/orders; requiring a partition there
+# built the whole stack and then died on the missing seed endpoint.
+lab_write_safety="${PERFLAB_WRITE_SAFETY_CLASS:-none}"
+if [[ "${target_mode}" == "local" ]]; then
+  if [[ "${PERF_MIX_KIND:-}" == "journey" && "${lab_write_safety}" != "managed-reference" ]]; then
+    echo "journey mix '${mix_name}' needs a run partition, which lab '${PERFLAB_LAB}' does not provide (writeSafety class '${lab_write_safety}')" >&2; exit 1
+  fi
+  [[ "${mix_writes}" == "1" && "${lab_write_safety}" == "managed-reference" ]] && export PERF_REQUIRES_MANAGED_PARTITION=1
+  if [[ "${PERF_REQUIRES_MANAGED_PARTITION:-0}" == "1" ]]; then
     [[ "${PERF_WRITE_ACK:-}" == "managed-reference" ]] || {
       echo "write-capable mix requires PERF_WRITE_ACK=managed-reference" >&2; exit 1;
     }
     [[ "${PERF_WRITE_BUDGET:-}" =~ ^[1-9][0-9]*$ ]] || {
       echo "write-capable mix requires a positive PERF_WRITE_BUDGET" >&2; exit 1;
     }
-  else
-    [[ "${PERF_WRITE_ACK:-}" == "i-understand-data-mutation" ]] || {
-      echo "remote write-capable mix requires PERF_WRITE_ACK=i-understand-data-mutation" >&2; exit 1;
-    }
   fi
+elif [[ "${mix_writes}" == "1" || "${PERF_MIX_KIND:-}" == "journey" ]]; then
+  [[ "${PERF_WRITE_ACK:-}" == "i-understand-data-mutation" ]] || {
+    echo "remote write-capable mix requires PERF_WRITE_ACK=i-understand-data-mutation" >&2; exit 1;
+  }
 fi
 export PERFLAB_CONNECTIONS="${connections}"
 echo "Workload mix '${mix_name}': ${connections} connections, ${duration}s, profile ${PERFLAB_PROFILE:-steady}"

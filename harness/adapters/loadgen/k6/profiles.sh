@@ -19,7 +19,7 @@ k6_profile_effective_duration() {
     ramp|breakpoint) printf '%s' "$((4 * q))" ;;
     stress|capacity|knee) printf '%s' "$((2 * half))" ;;
     spike) printf '%s' "$((15 + 3 * q))" ;;
-    open|arrival) printf '%s' "$((duration + $(k6_positive_step "${duration}" 10)))" ;;
+    open|arrival) printf '%s' "${duration}" ;;
     soak)
       soak="${PERFLAB_SOAK_DURATION_SECONDS:-600}"
       [[ "${soak}" =~ ^[1-9][0-9]*$ ]] || {

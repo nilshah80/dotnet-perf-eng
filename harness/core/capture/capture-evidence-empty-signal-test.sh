@@ -108,7 +108,13 @@ curl -fsS --max-time 5 "${base}/api/v1/query?query=up" >/dev/null || fail "fake 
 
 now="$(date +%s)"
 write_package() { # write_package <dir>
-  mkdir -p "$1"
+  mkdir -p "$1/benchmark"
+  # A measured package always carries the generator's observations and its
+  # compatibility envelope; facts.json is built from them, and the derived
+  # efficiency queries (whose provenance case 8 checks) run only after that.
+  printf '{"observations":[{"name":"http.requests_per_second","value":100,"unit":"rps"}]}\n' > "$1/benchmark/observations.json"
+  printf '{"generator":"k6","generatorFingerprint":"k6-fixture","workloadContentHash":"%s","configurationHash":"%s"}\n' \
+    "$(printf 'a%.0s' $(seq 1 64))" "$(printf 'b%.0s' $(seq 1 64))" > "$1/benchmark/compatibility.json"
   cat > "$1/manifest.json" <<JSON
 {"runId":"run-empty","telemetryRunId":"run-empty","scenarioId":"S01",
  "workload":{"loadGenerator":"k6"},"startedEpoch":$((now - 120)),
@@ -219,5 +225,32 @@ for role in telemetry_export_failures telemetry_queue_utilization telemetry_refu
      < "${pkg}/telemetry/queries.ndjson" >/dev/null \
     || fail "${role} must be a window query; an instant one cannot see a drop inside the window"
 done
+
+# 8. Query provenance (D-P2-7) must carry every parameter a replay needs. A
+#    range record without its step, an instant record without its evaluation
+#    time, or a slice without its retry history describes a request that was
+#    never made -- and the derived efficiency scalars had no record at all.
+queries="${pkg}/telemetry/queries.ndjson"
+jq -e 'select(.endpoint == "/api/v1/query_range" and .backend == "prometheus")
+       | select((.step // 0) != 5 or (.attempts // 0) < 1 or (.lastExit // 1) != 0)' \
+   < "${queries}" | grep -q . \
+  && fail "a Prometheus range record lacks step, attempts or lastExit"
+jq -e 'select(.artifact == "telemetry/metrics/cpu_count.json")
+       | select(.endpoint == "/api/v1/query" and .time == '"${now}"')' \
+   < "${queries}" | grep -q . \
+  || fail "the instant cpu_count record does not pin time= to the window end"
+jq -e 'select(.derived == true and (.artifact | startswith("facts.json#observations/efficiency.")))
+       | select(.endpoint == "/api/v1/query" and .time == '"${now}"' and .captureState == "empty")' \
+   < "${queries}" | grep -q . \
+  || fail "derived efficiency queries were not recorded with their pinned time and empty state"
+jq -e 'select(.backend == "tempo" and .endpoint == "/api/search" and (.page // 0) >= 1)
+       | select(.attempts == 1 and .lastExit == 0 and .captureState == "captured")' \
+   < "${queries}" | grep -q . \
+  || fail "Tempo slice records do not carry page, attempts and lastExit"
+jq -e 'select(.backend == "loki" and .page == 1)
+       | select(.direction == "backward" and .attempts == 1 and .lastExit == 0
+                and (.startNanos | type) == "string" and (.endNanos | type) == "string")' \
+   < "${queries}" | grep -q . \
+  || fail "Loki page records do not carry cursor bounds and retry history"
 
 echo "capture-evidence empty-signal tests passed"

@@ -338,7 +338,22 @@ Profiling and runtime diagnostics have two independent paths:
   stacks, process dump, Speedscope). These remain the default diagnose-mode
   workflow. EventPipe traces coexist with continuous profiling, but `/stacks`
   falls back to a CPU trace after a profiled measurement and a GC dump is
-  captured only after an owned app is recreated without Pyroscope.
+  captured only after an owned app is recreated without Pyroscope. Every
+  diagnostic first reads the monitor's `/info` and OpenAPI documents and refuses
+  a capture the monitor cannot serve before the target is perturbed. Live
+  runtime counters (`/livemetrics`) ride every trace capture, single-kind or
+  campaign, through the same authenticated client as the rest.
+- **Not supported**: kernel, native and off-CPU profiling (PerfCollect,
+  `collect-linux`, `dotnet-symbol`). Latency that remains after CPU, GC and
+  dependency time are explained is outside what these labs can attribute.
+
+Measured runs also record a bounded in-window resource series: every
+`PERFLAB_RESOURCE_SAMPLE_SECONDS` (default 15) the owned containers' `docker
+stats` rows and the app's TCP socket-state counts land in
+`dependencies/container-stats-series.ndjson`,
+`dependencies/<app>-sockets-series.ndjson` and `resource-series.json`, with
+every failed tick recorded as a gap. `PERFLAB_RESOURCE_SAMPLE_MAX` (default
+240) bounds the sample count; the cadence widens for long windows.
 
 Hold `PERFLAB_CONTINUOUS_PROFILING`, `PERFLAB_PROFILING_POLICY`, the resolved
 types, and `PERFLAB_PROFILING_KEEP_TIERING` constant between baseline and
@@ -416,8 +431,8 @@ so a spike on a latency panel links straight to the Tempo trace that produced it
 ## Prerequisites
 
 - **Docker + Docker Compose** (runs the whole stack; also hosts `jq` — no host jq needed).
-- **A load generator:** `k6` on the host (default), a **wrk Docker image**
-  (`PERFLAB_WRK_IMAGE`), or the **native JMeter adapter image**
+- **A load generator:** `k6` on the host (default), `wrk` on the host or a
+  **wrk Docker image** (`PERFLAB_WRK_IMAGE`), or the **native JMeter adapter image**
   (`PERFLAB_JMETER_IMAGE`, built with `harness/adapters/loadgen/jmeter/package.sh`).
   This machine uses k6 by default. JMeter is never installed on the host.
 - **`claude` CLI** — only for the optional AI diagnosis phase.
@@ -520,8 +535,9 @@ The AI-diagnosis commands are covered under **AI diagnosis** below.
 ## Load generators
 
 `k6` is the default (host binary; comparable to wrk's `-cN` via `--vus`). `wrk`
-is opt-in and runs **via Docker** on the compose network — set
-`PERFLAB_WRK_IMAGE` to a wrk image and select it per run:
+is opt-in: the host `wrk` on `PATH` runs against the published base URL, or set
+`PERFLAB_WRK_IMAGE` to run it **via Docker** on the compose network (the image's
+architecture must match the Docker host). Select it per run:
 
 ```bash
 PERFLAB_LOAD_GENERATOR=wrk ./harness/core/run/run-single.sh S01 30
@@ -596,7 +612,10 @@ converged repetitions.
 ## Load profiles
 
 By default a scenario runs a **steady** closed-loop load (constant VUs =
-`connections` for the duration) — a single-point smoke/load test. Set
+`connections` for the duration) — a single-point smoke/load test. A scenario
+whose catalog entry declares an open load model (the ecommerce `checkout`
+journey: open, 5 journeys/s) instead runs a constant arrival rate at its declared
+rate. Set
 `PERFLAB_PROFILE` (k6 only) to reshape the measure phase into other
 performance-engineering tests **without changing the scenario** — the profile is a
 run-time choice layered on any scenario:
@@ -654,11 +673,21 @@ produce.
 PERFLAB_LAB=ecommerce  ./harness/core/pe-tests/run-sweep.sh E05 30 --rates 100,250,500,1000,2000
 PERFLAB_LAB=ecommerce  ./harness/core/pe-tests/run-repeat.sh E00 30 --repeats 7   # then compare two:
 PERFLAB_LAB=ecommerce  ./harness/core/analyze/compare-runs.sh <baseline-dir> <candidate-dir>
-PERFLAB_LAB=ecommerce  ./harness/core/pe-tests/run-mix.sh browse-and-buy 60 --connections 64 --profile stress
+PERFLAB_LAB=ecommerce  PERF_WRITE_ACK=managed-reference PERF_WRITE_BUDGET=20000 \
+  ./harness/core/pe-tests/run-mix.sh browse-and-buy 60 --connections 64 --profile stress
 PERFLAB_LAB=ecommerce  ./harness/core/pe-tests/run-data-scale.sh E05 30 --scales smoke,demo
 PERFLAB_LAB=scenariolab ./harness/core/pe-tests/run-fault.sh S00 30 --dependency postgres --kind pause --at 10 --for 10
 PERFLAB_LAB=ecommerce  PERFLAB_PROFILE=soak ./harness/core/run/run-single.sh E14 600 --no-runtime  # soak (runs >=600s)
 ```
+
+A mix with a non-GET member writes. On ecommerce, which declares
+`PERFLAB_WRITE_SAFETY_CLASS=managed-reference`, it runs in a run partition that
+is seeded before warm-up, reset at the measurement boundary and cleaned up
+afterwards. That needs `PERF_WRITE_ACK=managed-reference` and a positive
+`PERF_WRITE_BUDGET`. On a lab without a partition, such as ScenarioLab's
+`mixed-runtime`, the writes run under the lab's per-run reset, like any write
+scenario. Journey mixes need a partition. Against a remote target, any write
+mix needs `PERF_WRITE_ACK=i-understand-data-mutation`.
 
 ## Gating, capacity, efficiency & trend
 
@@ -670,8 +699,9 @@ These turn the lab from "run and inspect" into a guardrail that **decides**.
 | `analyze/update-baseline.sh <run>` | Promote a run to `labs/<lab>/baselines/<scenario>.json`. Commit it so future gates compare against it. |
 | `analyze/find-knee.sh <capacity-run>` | **Capacity knee from one continuous ramp.** Reads the k6 remote-write series of a `--profile capacity` (ramping-arrival-rate) run and reports the max sustained RPS before p99 breaches the SLO. Complements `run-sweep.sh` (discrete rate steps) with a single-run, client-observed knee → `analysis/capacity.json`. |
 | `analyze/diff-profile.sh <baseline-run> <candidate-run>` | **Differential flame graph.** For each Speedscope profile (from `--with-runtime`), reports the methods whose share of CPU grew/shrank the most — the "which method got hotter" answer. Runs the differ in a `python:3-alpine` container (like `jqd`), so no host Python. |
-| `analyze/trend-report.sh --scenario ID --metric M` | **Cross-commit trend.** Shows a metric per scenario across commits from `perf-history/<lab>.jsonl` (auto-appended after every measure by `record-trend.sh`; skip with `PERFLAB_RECORD_TREND=0`). |
+| `analyze/trend-report.sh --scenario ID --metric M` | **Cross-commit trend.** Shows a metric per scenario across commits from `perf-history/<lab>.jsonl` (auto-appended after every measure by `record-trend.sh`; skip with `PERFLAB_RECORD_TREND=0`). Each row names its profile and load generator; `--profile` and `--generator` narrow the series, and a warning marks a series that mixes them. |
 | `analyze/steady-state.sh <run>` | **Steady-state validity.** Every reported number assumes the window was in steady state, but the harness only does a fixed warm-up. It buckets the window and, per bucket, reads genuinely window-local **server-side** metrics — `rate()` of the request count and `histogram_quantile` over the request-duration histogram (k6's remote-write percentiles are cumulative and can't be windowed). The verdict is **drift-based** (a systematic tail trend, not spread), reporting whether it settled (`steady` / `warming` / `unsteady`), the warm-up to trim, and the whole-vs-steady skew → `analysis/steady-state.json`. **Scope:** it certifies **server-side** steady state; client-side **p99 tail** steadiness is *not* independently verified (k6 client percentiles are cumulative/not windowable) — in a closed-loop run throughput tracks the client *mean*, not the tail (`clientLatencyCoupling`, `certifies`). Auto-run after every measure (skip `PERFLAB_STEADY_STATE=0`); enforce with `gate.sh --require-steady`. |
+| `analyze/analyze-stages.sh <run>` | **Stage-by-stage results for staged profiles** (ramp, load, stress, breakpoint, spike, capacity). Splits the run by the k6 stages that actually executed and reports each stage's server-side throughput, p99 and 5xx ratio; for rising levels the **last healthy and first failing level** (errors above the error SLO, p99 above a p99 SLO, or an arrival stage under 95% of its rate) and the level beyond which throughput stopped following the load; for a spike the baseline, the surge's degradation and the **recovery time** (5 s resolution). A stage under 10 s holds too few metric exports and is reported, not judged → `analysis/stages.json`. Auto-run after every measure; not applicable to constant-load profiles. |
 | `analyze/bottleneck.sh <run>` | **USE-method bottleneck classifier.** Decomposes a typical request into CPU / GC / DB / other time and combines it with per-resource saturation (thread-pool queue, DB-pool pending, GC-pause fraction, lock contention, CPU utilisation) to name the dominant bottleneck — `cpu-bound`, `threadpool-starved`, `gc-bound`, `lock-bound`, `db-pool-saturated`, `dependency-bound-db` — with a confidence and the evidence → `analysis/bottleneck.json`. A reproducible answer next to the AI phase's. Auto-run after every measure (skip `PERFLAB_BOTTLENECK=0`). |
 | `analyze/diff-gcdump.sh <run>` or `<base> <cand>` | **Differential heap (leak attribution).** The memory counterpart of `diff-profile`: diffs two `dotnet-gcdump report`s and lists the types that grew / shrank / appeared — the "which type grew" answer that turns `analyze-trends`'s *"the heap is growing"* into a cause. Retained bytes are `Object Bytes × Count` per row (bucketed rows list per-object size). One run dir diffs its own `before`/`after` gcdump (same process, bracketing the load); two run dirs compare cross-commit. Pure awk — no container. **Auto-run** by `normalize-runtime` whenever a gcdump before/after pair is present (a plain measure has no gcdump, so — unlike steady-state/bottleneck — it runs on a diagnostic capture, not every measure). |
 
@@ -766,11 +796,25 @@ For a deep CPU-plus-memory investigation, `--preset cpu-memory` reuses one app
 recreation and warm-up, then performs the ordered campaign: before GC dump,
 short recovery, CPU trace concurrent with one diagnostic load, and after GC
 dump. `cpu`, `memory`, `hang`, and `dump` are also accepted presets; there is
-intentionally no `all`. `hang` is trace-only unless `--include-dump` is added.
+intentionally no `all`. `hang` runs the CPU trace with the diagnostic load and
+takes `/stacks` (when allowed) at the middle of that load, while a load-induced
+hang is still present; `--include-dump` adds a process dump at the same point.
+The dump briefly suspends the process inside the trace window.
 Any process dump additionally requires
 `PERFLAB_DUMP_ACK=i-understand-sensitive-dump`. The `dump` preset takes only the
 process snapshot: it does not warm up, require a load-generator installation,
 run diagnostic traffic, or require the remote data-mutation acknowledgement.
+
+A process dump is a copy of process memory, connection strings and tokens
+included, so it never stays in the evidence package. As soon as it is
+downloaded it moves to `artifacts/sensitive/<package path>/`, readable by the
+owner only, and the package keeps `process.dmp.retained.json`: the dump's
+SHA-256, size, classification and a retention deadline
+(`PERFLAB_SENSITIVE_RETENTION_DAYS`, default 7). `dotnet-dump` analyses the
+retained file, and the text report stays in the package. CollectionRules Triage
+dumps are retained the same way, and normalizing an older package moves any
+dump it still holds. Delete `artifacts/sensitive/` once the deadline passes;
+nothing in it is evidence you share.
 
 Campaign output is independent and self-describing:
 
@@ -897,7 +941,7 @@ One healthy control (`S00`) plus 27 deliberately planted behaviors.
 | S24 | Redis pool—high | Pool endpoint (128) | 32 multiplexers + exclusive slots | `connected_clients`/socket inflation | trace + pool |
 | S25 | HTTP pool—low | Upstream call (64) | Handler limited to 2 conns vs 100 ms dep | `time_in_queue`, long tails | trace + HTTP |
 | S26 | HTTP pool—high | Upstream call (128) | Handler with 128 pooled conns | High open/idle TCP count | trace + HTTP |
-| S27 | DB deadlock | Deadlock endpoint (16) | Two txns lock rows 1 & 2 in opposite order (1→2 vs 2→1) | PG deadlock detector aborts one side (40P01) → ~half 409 | Stacks→trace |
+| S27 | DB deadlock | Deadlock endpoint (16) | Two txns lock rows 1 & 2 in opposite order (1→2 vs 2→1) | PG deadlock detector aborts transactions (40P01) → most requests fail with HTTP 500 | Stacks→trace |
 
 **S17/S18 — async loss.** Both push work onto RabbitMQ and return 200, so HTTP
 metrics look clean while the failure is on the broker: S17 fills the queue to its
@@ -919,12 +963,14 @@ fix is one right-sized long-lived client, not a bigger custom pool.
 **S27 — real deadlock (vs S10's convoy).** `GET /api/inventory/deadlock`
 alternates the lock order per request, so concurrent transactions lock inventory
 rows 1 and 2 as 1→2 and 2→1 and form a **circular wait**; PostgreSQL's detector
-aborts one side with `SQLSTATE 40P01`, surfaced as a `409`. This is the case S10
-cannot produce: S10's requests all lock a single row, which serializes into a
-convoy but never cycles. Evidence: the `deadlocks` counter in
-`dependencies/postgres-deadlocks.csv` (`pg_stat_database`) and a `degraded`
-health/error rate from the 409s — not `pg_stat_statements`, which shows only the
-`SELECT … FOR UPDATE` that ran.
+aborts one side with `SQLSTATE 40P01`. EF Core wraps that in an
+`InvalidOperationException`, so the request returns HTTP 500, not 409, and with
+16 concurrent requests on the same two rows about 95% of requests fail, not half.
+This is the case S10 cannot produce: S10's requests all lock a single row, which
+serializes into a convoy but never cycles. Evidence: the measured-window
+`deadlocks` delta in `dependencies/postgres-deadlocks-delta.json`
+(`pg_stat_database`) and a `degraded` health/error rate from the 500s — not
+`pg_stat_statements`, which shows only the `SELECT … FOR UPDATE` that ran.
 
 ### ecommerce — `labs/ecommerce/scenarios.tsv` (`E00`–`E14`)
 
@@ -983,11 +1029,12 @@ artifacts/runs/<run-id>/                 # a suite run
     │   ├── postgres-{statements,activity,connections,deadlocks,query-plan}.*   # + *-midload
     │   ├── redis-{info,latency,clients}.*                    # scenariolab only
     │   ├── rabbitmq-{queues,channels,connections,broker-metrics}.*   # scenariolab only
-    │   └── container-stats-midload.ndjson  api-net-tcp*.txt  docker-compose-ps.json
+    │   ├── container-stats-midload.ndjson  api-net-tcp*.txt  docker-compose-ps.json
+    │   └── container-stats-series.ndjson  api-sockets-series.ndjson  resource-series.json   # in-window series (D-P1-10)
     ├── runtime/                          # dotnet-monitor capture (on by default)
     │   ├── capture.json                  # requested vs effective diagnostic
     │   ├── processes.json  processes-diagnostic.json
-    │   └── api/ | worker/                # cpu.nettrace, before/after.gcdump, stacks.txt, process.dmp
+    │   └── api/ | worker/                # cpu.nettrace, before/after.gcdump, stacks.txt, process.dmp.retained.json
     ├── source/                           # tool-versions, git-status, git-diff-stat
     └── analysis/
         ├── trend-report.json            # leak/trend: least-squares slope + growth, GROWING flags
@@ -1108,8 +1155,8 @@ proposed fix:
 
 1. Same source revision except the fix; same lab, scenario, endpoint, request
    body, connection count, duration, and Docker resources.
-2. Same `SEED_SCALE` — and reseed (`down -v` + bring-up) when a write scenario or
-   a data-scale test has mutated the dataset.
+2. Same `SEED_SCALE`. The Postgres reset restores the seeded rows before every
+   run (see below); after a data-scale test, `down -v` and bring the lab up again.
 3. Same **load generator** — wrk, k6, and JMeter numbers are not comparable, so
    hold `PERFLAB_LOAD_GENERATOR` constant across the pair.
 4. Reset Redis, RabbitMQ queues, and `pg_stat_statements` before each measurement
@@ -1162,10 +1209,25 @@ docker compose -f labs/scenariolab/compose.yaml down -v    # full reset (deletes
 - Runtime diagnostics are **on by default** and ~double wall-clock per scenario;
   because profiling perturbs latency, use `--no-runtime` for the numbers in an A/B
   latency comparison and read the diagnostic run only for the mechanism.
-- Write scenarios (e.g. product/order create) mutate the seeded dataset and it
-  **persists in the DB volume across runs** — reset with `docker compose -f
-  labs/<lab>/compose.yaml down -v` before a run whose read scenarios need the
-  pristine seed, or their table sizes (and timings) will drift.
+- Write scenarios (e.g. product/order create) mutate the seeded dataset. The
+  Postgres reset restores it before every run: the first reset on a fresh volume
+  copies each table into a `perflab_seed` schema, and later resets reload from it
+  (`harness/adapters/dependency/postgres/restore-seed.sql`), undoing inserts and
+  updates. The snapshot lives in the volume, so `down -v` (which data-scale runs
+  per scale) takes a new one from the next seed.
+- The bottleneck classifier models CPU, GC, locks, the thread pool, the DB pool,
+  the upstream HTTP pool and DB time. A wait inside the application (a
+  `SemaphoreSlim`, a custom lease queue, row locks behind a single hot row)
+  shows up as `no-clear-bottleneck`, as in S03, S23 and S26. That is the prompt to
+  open the stacks or trace from the diagnose run, not a clean bill of health.
+- A connection-churning workload can exhaust the load generator's ephemeral
+  ports: on the loopback, P02's `TIME_WAIT` sockets toward the gateway plateaued at
+  about 16,350 of 16,384 and new connections failed with EOF before reaching it.
+  Failures that the target never logs, at a fixed success count, point at the
+  client host, not the application.
+- Pyroscope uploads profiles every 10 s, so a measured window shorter than about
+  30 s (a smoke run) yields a profile with only a few uploads. Use it to spot a
+  hot frame, not to size one.
 - `gcdump` forces a full collection; don't read it as steady-state heap. A
   profiled source requires an owned recreate without Pyroscope, and a normalized
   report with only `UNKNOWN 0x…` type names fails rather than masquerading as
