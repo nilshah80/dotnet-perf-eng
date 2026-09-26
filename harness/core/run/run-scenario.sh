@@ -158,11 +158,19 @@ if [[ "${continuous_profiling:-0}" == "1" ]]; then
     exit 1
   }
 fi
+# The measure phase can run longer than the requested duration (a soak stretches
+# to >=600s, a spike adds fixed surge/recover segments). Use one effective
+# duration for the manifest, the mid-load snapshot, and the fault window so they
+# cannot diverge from what actually ran.
+effective_duration="$(loadgen_effective_duration "${connections}" "${duration_seconds}")"
+# Refusals come before any artifact is written: a refused soak used to leave an
+# empty package that "newest package" lookups then picked up.
 if [[ "${load_profile}" == "soak" ]]; then
   performance_session_preflight "${load_generator}" || {
     echo "soak rejected before traffic: ${load_generator} does not supply Start/Snapshot/Stop" >&2
     exit 1
   }
+  performance_soak_cert_preflight "${effective_duration}" || exit 1
 fi
 performance_profile_preflight "${load_profile}" "${load_generator}" || {
   echo "canonical profile ${load_profile} rejected before traffic" >&2
@@ -200,14 +208,6 @@ fi
 # gone because the path no longer passes through a native jq.exe.
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 started_epoch="$(date -u +%s)"
-# The measure phase can run longer than the requested duration (a soak stretches
-# to >=600s, a spike adds fixed surge/recover segments). Use one effective
-# duration for the manifest, the mid-load snapshot, and the fault window so they
-# cannot diverge from what actually ran.
-effective_duration="$(loadgen_effective_duration "${connections}" "${duration_seconds}")"
-if [[ "${load_profile}" == "soak" ]]; then
-  performance_soak_cert_preflight "${effective_duration}" || exit 1
-fi
 dataset_identity="${PERFLAB_DATASET_IDENTITY:-seedScale=${SEED_SCALE:-default}}"
 # Record fault parameters (set by run-fault.sh) so the package is self-describing.
 fault_field=""
@@ -576,6 +576,7 @@ loadgen_warmup "${artifact_dir}" || {
   fi
   exit "${warmup_rc}"
 }
+performance_generator_recover "${generator_endpoints}" "${ready_url}" "${artifact_dir}/analysis/generator-ports.json"
 
 if [[ "${target_mode}" == "local" && "${managed_partition_required}" == "1" ]]; then
   bash "${harness_core_dir}/datafault/managed-reference.sh" "${telemetry_run_id}" "${base_url}" reset

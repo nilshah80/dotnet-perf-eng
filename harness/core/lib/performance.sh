@@ -439,6 +439,35 @@ performance_generator_settle() { # <host:port list> <out-json>
     "$(json_escape "$1")" "${range}" "$((range / 4))" "${before}" "${now}" "${waited}" "${state}" > "$2"
 }
 
+# After a warm-up, before the first measured request: a warm-up that opens a
+# connection per iteration (P02: 65,505 WebSockets in 20 s) can leave the
+# generator's path unusable for a while, and not only through host ports -- a
+# container port forwarder's own connections are invisible to this host's socket
+# table (the reading stayed 0) -- so the window probe got an empty reply and the
+# run was refused. Wait (bounded, recorded as afterWarmup) for the TIME_WAIT
+# toward the target to drain and for the readiness URL to answer again.
+performance_generator_recover() { # <host:port list> <ready-url> <generator-ports-json>
+  local range before now waited=0 cap="${PERFLAB_GENERATOR_SETTLE_SECONDS:-65}" ready=false
+  range="$(performance_ephemeral_range)"
+  before="$(performance_generator_time_wait "$1")"; now="${before}"
+  while (( now * 4 >= range && waited < cap )); do
+    sleep 1; waited=$((waited + 1)); now="$(performance_generator_time_wait "$1")"
+  done
+  while :; do
+    if target_curl -fsS --max-time 5 -o /dev/null "$2" >/dev/null 2>&1; then ready=true; break; fi
+    (( waited >= cap )) && break
+    sleep 1; waited=$((waited + 1))
+  done
+  if (( waited > 0 )); then
+    echo "generator path: waited ${waited}s after warm-up (TIME_WAIT toward $1: ${before} -> ${now}; target ready: ${ready})" >&2
+  fi
+  [[ "${ready}" == true ]] || echo "the target did not answer ${2} within ${cap}s after warm-up; a warm-up that churns connections can exhaust the generator's path (host ports or a container port forwarder), not the target" >&2
+  local tmp="$3.tmp"
+  jqd --argjson before "${before}" --argjson now "${now}" --argjson waited "${waited}" --argjson ready "${ready}" \
+    '. + {afterWarmup: {timeWaitBefore: $before, timeWaitAtStart: $now, waitedSeconds: $waited, targetReady: $ready}}' \
+    < "$3" > "${tmp}" 2>/dev/null && mv "${tmp}" "$3" || rm -f "${tmp}"
+}
+
 # A measurement-window attestation is target-owned evidence for the concrete
 # process generation that served a run at the load boundary. It is deliberately
 # separate from remote-correlation: correlation proves the run tag; this probe

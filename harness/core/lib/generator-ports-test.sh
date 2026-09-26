@@ -32,4 +32,20 @@ netstat() { cat "${work}/sockets"; }
 count="$(performance_generator_time_wait "${endpoints}")"
 [[ "${count}" == 3 ]] || fail "counted ${count} TIME_WAIT sockets toward ${endpoints}, want 3"
 
+# After a warm-up that churned connections (P02), measurement waits until the
+# target answers again, and records the wait; a target that never answers is
+# recorded as not ready rather than waited on without bound.
+printf 'tcp4 0 0 127.0.0.1.51000 127.0.0.1.9090 TIME_WAIT\n' > "${work}/sockets"
+printf '{"schemaVersion":"generator-ports-v1","state":"clear"}\n' > "${work}/ports.json"
+probes=0
+target_curl() { probes=$((probes + 1)); (( probes >= 3 )); }
+performance_generator_recover "${endpoints}" http://127.0.0.1:18080/health "${work}/ports.json" 2>/dev/null
+jq -e '.state == "clear" and .afterWarmup.targetReady == true and .afterWarmup.waitedSeconds == 2 and .afterWarmup.timeWaitAtStart == 0' "${work}/ports.json" >/dev/null \
+  || fail "the recovery after warm-up was not recorded: $(cat "${work}/ports.json")"
+target_curl() { return 7; }
+PERFLAB_GENERATOR_SETTLE_SECONDS=1 performance_generator_recover "${endpoints}" http://127.0.0.1:18080/health "${work}/ports.json" 2> "${work}/recover.err"
+jq -e '.afterWarmup.targetReady == false and .afterWarmup.waitedSeconds == 1' "${work}/ports.json" >/dev/null \
+  || fail "a target that never answered was not recorded: $(cat "${work}/ports.json")"
+grep -q "did not answer" "${work}/recover.err" || fail "a target that never answered was not reported"
+
 echo "generator ports tests passed"

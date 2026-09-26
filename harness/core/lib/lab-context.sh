@@ -290,6 +290,9 @@ else
   fi
 fi
 primary_app_service="${PERFLAB_PRIMARY_APP_SERVICE:-${app_services%% *}}"
+# Replica names describe the lab's own gateway topology; a remote target (a
+# standalone process or someone else's deployment) is attested as a whole.
+[[ "${target_mode}" == "local" ]] || PERFLAB_MEASUREMENT_WINDOW_REPLICAS=""
 run_id_attr="${PERFLAB_RUN_ID_ATTR:-perf.run.id}"
 # OTEL resource attribute perf.run.id becomes Prometheus label perf_run_id
 # (dots to underscores). Loki/Tempo keep the dotted attribute.

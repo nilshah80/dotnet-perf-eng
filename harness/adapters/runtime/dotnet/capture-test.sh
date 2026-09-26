@@ -100,7 +100,13 @@ case "${url}" in
     printf 'gcdump-%s' "${count}" ;;
   */trace) printf 'nettrace' ;;
   */stacks)
-    if [[ "${PERFLAB_TEST_STACKS_PROBLEM:-0}" == "1" ]]; then
+    if [[ -n "${PERFLAB_TEST_STACKS_FAIL_ONCE:-}" && ! -e "${PERFLAB_TEST_STACKS_FAIL_ONCE}" ]]; then
+      # S03: an intermittent HTTP 500 with an empty body.
+      : > "${PERFLAB_TEST_STACKS_FAIL_ONCE}"
+      headers=''; previous=''
+      for argument in "$@"; do [[ "${previous}" == '-D' ]] && headers="${argument}"; previous="${argument}"; done
+      [[ -n "${headers}" ]] && printf 'HTTP/1.1 500 Internal Server Error\r\n\r\n' > "${headers}"
+    elif [[ "${PERFLAB_TEST_STACKS_PROBLEM:-0}" == "1" ]]; then
       # dotnet-monitor answers a failed operation with HTTP 500 and ProblemDetails.
       headers=''; previous=''
       for argument in "$@"; do [[ "${previous}" == '-D' ]] && headers="${argument}"; previous="${argument}"; done
@@ -122,6 +128,10 @@ case "${url}" in
 esac
 EOF
 chmod +x "${test_root}/bin/curl"
+# No real container is consulted: a failed fetch looks up the monitor's container
+# for its log, and the fixture has none.
+printf '#!/usr/bin/env bash\nexit 0\n' > "${test_root}/bin/docker"
+chmod +x "${test_root}/bin/docker"
 
 run_case() {
   local name="$1" fail_before="$2" expected_rc="$3" output
@@ -399,6 +409,25 @@ grep -q 'HTTP 500: Unable to collect call stacks: profiler is not loaded' "${tes
   || { echo "stacks-problem: the failure lost dotnet-monitor's ProblemDetails: $(cat "${test_root}/stacks-problem.err")" >&2; exit 1; }
 [[ ! -e "${problem_output}/runtime/api/stacks.txt" ]] \
   || { echo 'stacks-problem: the error body was kept as stacks.txt' >&2; exit 1; }
+# /stacks is read-only, so a server error is retried before the capture fails.
+[[ "$(grep -c 'monitor_curl:.*/stacks' "${test_root}/stacks-problem-calls")" == 3 ]] \
+  || { echo "stacks-problem: a persistent 500 was not retried three times: $(cat "${test_root}/stacks-problem-calls")" >&2; exit 1; }
+
+# S03: one empty HTTP 500, then the stacks: the capture succeeds.
+flaky_output="${test_root}/stacks-flaky"
+mkdir -p "${flaky_output}"; : > "${test_root}/stacks-flaky-calls"
+PATH="${test_root}/bin:${PATH}" \
+  PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+  PERFLAB_TEST_CALLS="${test_root}/stacks-flaky-calls" \
+  PERFLAB_TEST_GCDUMP_COUNT="${test_root}/stacks-flaky-gcdumps" \
+  PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true PERFLAB_TEST_STACKS_FAIL_ONCE="${test_root}/stacks-flaky-failed" \
+  PERF_SCENARIO=S03 PERF_RUN_ID=run-source \
+  bash "${adapter_dir}/capture.sh" "${flaky_output}" stacks 1 api >/dev/null 2> "${test_root}/stacks-flaky.err" \
+  || { echo "stacks-flaky: a transient 500 failed the capture: $(cat "${test_root}/stacks-flaky.err")" >&2; exit 1; }
+grep -q 'Fixture.Api!Program.Main' "${flaky_output}/runtime/api/stacks.txt" \
+  || { echo 'stacks-flaky: the retried stacks were not kept' >&2; exit 1; }
+! grep -q 'No such file' "${test_root}/stacks-flaky.err" \
+  || { echo "stacks-flaky: the empty error body was read as a file: $(cat "${test_root}/stacks-flaky.err")" >&2; exit 1; }
 
 direct_stacks_output="${test_root}/direct-stacks"
 mkdir -p "${direct_stacks_output}"; : > "${test_root}/direct-stacks-calls"

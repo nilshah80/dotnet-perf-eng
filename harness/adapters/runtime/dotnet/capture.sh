@@ -432,7 +432,35 @@ diagnostic_download_budget() { # dest-file
 # failed request leaves <dest>.failure naming the HTTP status and dotnet-monitor's
 # ProblemDetails title/detail: `curl -f` used to discard that body, so a /stacks
 # 500 was recorded only as "request failed" and its cause was unrecoverable.
+# /stacks is a read-only request that dotnet-monitor intermittently answers with
+# an empty HTTP 500 (S03), so a server error there is retried; the other kinds
+# start sessions or freeze the process and are never repeated. A final server
+# error on a local target keeps the monitor's log lines beside the failure.
 try_pull() {
+  local dest="$1" attempt attempts=1 rc
+  [[ "${dest##*/}" == "stacks.txt" ]] && attempts=3
+  for (( attempt = 1; attempt <= attempts; attempt++ )); do
+    rc=0; try_pull_once "$@" || rc=$?
+    (( rc == 0 )) && return 0
+    grep -q '^HTTP 5' "${dest}.failure" 2>/dev/null || return "${rc}"
+    (( attempt < attempts )) && { echo "dotnet-monitor ${dest##*/}: $(cat "${dest}.failure"); retrying (${attempt}/${attempts})." >&2; sleep 2; }
+  done
+  keep_monitor_log "${dest}"
+  return "${rc}"
+}
+
+keep_monitor_log() { # dest-file -- the recent log of the local container publishing the monitor port
+  local port container
+  [[ "${target_mode:-local}" == "local" && "${PERFLAB_TARGET_KIND:-managed-compose}" == "managed-compose" ]] || return 0
+  port="$(printf '%s' "${diagnostics_url}" | sed -E 's#^[a-z]+://[^:/]+:?([0-9]*).*#\1#')"
+  [[ -n "${port}" ]] || return 0
+  container="$(docker ps --filter "publish=${port}" --format '{{.Names}}' 2>/dev/null | head -1)"
+  [[ -n "${container}" ]] || return 0
+  docker logs --since 2m "${container}" 2>&1 | tail -n 200 > "${dest}.monitor.log" || true
+  [[ -s "${dest}.monitor.log" ]] && printf ' (monitor log: %s)' "${dest##*/}.monitor.log" >> "${dest}.failure"
+}
+
+try_pull_once() {
   local dest="$1"; shift
   local budget limit copy_rc curl_rc statuses status detail
   budget="$(diagnostic_download_budget "${dest}")"
@@ -447,7 +475,8 @@ try_pull() {
   status="$(awk 'toupper($1) ~ /^HTTP\// { code = $2 } END { print code }' "${dest}.headers" 2>/dev/null || true)"
   rm -f "${dest}.headers"
   if [[ "${status}" =~ ^[0-9]+$ ]] && (( status >= 400 )); then
-    detail="$(jqd -r '[.title, .detail] | map(select(. != null and . != "")) | join(": ")' < "${dest}" 2>/dev/null | tr '\r\n' '  ' | head -c 300 || true)"
+    detail=""
+    [[ -s "${dest}" ]] && detail="$(jqd -r '[.title, .detail] | map(select(. != null and . != "")) | join(": ")' < "${dest}" 2>/dev/null | tr '\r\n' '  ' | head -c 300 || true)"
     printf 'HTTP %s%s\n' "${status}" "${detail:+: ${detail}}" > "${dest}.failure"
     rm -f "${dest}" "${dest}.tmp"
     return 1

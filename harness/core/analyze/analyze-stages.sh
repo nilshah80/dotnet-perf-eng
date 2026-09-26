@@ -175,23 +175,31 @@ done <<< "${stages}"
 
 # Judge each stage and derive the profile's conclusion in one awk pass.
 spike_mode=0; [[ "${profile}" == "spike" ]] && spike_mode=1
-summary="$(printf '%s' "${rows}" | awk -F'\t' -v unit="${unit}" -v p99slo="${p99_slo}" -v errslo="${err_slo}" -v spike="${spike_mode}" '
+# The generator is the authority on delivery: an arrival executor drops the
+# iterations it cannot start. The served rate is a rate() over 5 s exports of a
+# series that only begins with the load, so a first ramp stage under-reads
+# (S08, P07: "delivered 67.9 of 75.5" with 0 dropped); a shortfall counts only
+# when the run dropped iterations.
+dropped=0
+[[ -s "${run_arg}/facts.json" ]] && dropped="$(jqd -r '((.observations // [])[]? | select(.name == "http.dropped_iterations") | .value) // 0' < "${run_arg}/facts.json" 2>/dev/null | head -1 || true)"
+summary="$(printf '%s' "${rows}" | awk -F'\t' -v unit="${unit}" -v p99slo="${p99_slo}" -v errslo="${err_slo}" -v spike="${spike_mode}" -v dropped="${dropped:-0}" '
   { i=$1+0; s[i]=$2; e[i]=$3; from[i]=$4+0; tg[i]=$5+0; kind[i]=$6; rps[i]=$7; p99[i]=$8; err[i]=$9; tr[i]=$10; n=i+1 }
   function judged(k) { return rps[k] != "-" }
   # A linear ramp delivers its average rate, not its end target.
   function expected(k) { return (kind[k] == "ramp" ? (from[k] + tg[k]) / 2 : tg[k]) }
+  function short(k) { return unit == "req/s" && dropped + 0 > 0 && rps[k] + 0 < 0.95 * expected(k) }
   function transport_bad(k) { return tr[k] != "-" && tr[k] + 0 > errslo + 0 }
   function healthy(k,   ok) {
     ok = (err[k] + 0 <= errslo + 0) && !transport_bad(k)
     if (p99slo != "" && p99[k] != "-" && p99[k] + 0 > p99slo + 0) ok = 0
-    if (unit == "req/s" && rps[k] + 0 < 0.95 * expected(k)) ok = 0
+    if (short(k)) ok = 0
     return ok }
   function why(k,   r) {
     r = ""
     if (err[k] + 0 > errslo + 0) r = r sprintf("5xx ratio %.3f > %s; ", err[k], errslo)
     if (transport_bad(k)) r = r sprintf("client transport errors %.3f > %s (connections that never got a response); ", tr[k], errslo)
     if (p99slo != "" && p99[k] != "-" && p99[k] + 0 > p99slo + 0) r = r sprintf("p99 %.1f ms > SLO %s ms; ", p99[k], p99slo)
-    if (unit == "req/s" && rps[k] + 0 < 0.95 * expected(k)) r = r sprintf("delivered %.1f of %.1f req/s; ", rps[k], expected(k))
+    if (short(k)) r = r sprintf("delivered %.1f of %.1f req/s with %d iterations dropped; ", rps[k], expected(k), dropped)
     return r }
   END {
     printf "{\"stages\":["

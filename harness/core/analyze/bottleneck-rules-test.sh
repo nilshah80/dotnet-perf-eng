@@ -466,7 +466,7 @@ classify "${dir}"
 report="$(build_run held 40 0.5 0 "")"; dir="$(dirname "$(dirname "${report}")")"
 pool "${dir}" 2 2 46 0 1504 2 0
 classify "${dir}"
-notes "${report}" | grep -q "held outside database commands: 2 leased but at most 0 executing" \
+notes "${report}" | grep -q "held outside database commands: the pool held 2 of its 2 connections but at most 0 commands were executing" \
   || fail "a lease held across an await was not named: $(notes "${report}")"
 
 # P08/S05: allocation per request, gated on a real allocation rate.
@@ -538,14 +538,15 @@ spans "${dir}" dependency_calls 1217 SPAN_KIND_CLIENT:server_address=upstream:12
 mkdir -p "${dir}/environment/measurement-start"
 printf '[{"telemetryExporterAuthority":"lgtm:4318"}]\n' > "${dir}/environment/measurement-start/resource-limits.json"
 classify "${dir}"
-jq -e '.verdict == "dependency-bound-http" and (.reason | test("97% of server time is spent in HTTP upstream upstream calls \\(1.0 per request\\)"))
+jq -e '.verdict == "dependency-bound-http" and (.reason | test("HTTP upstream upstream spans cover ~97% of server time \\(1.0 calls per request\\)"))
        and .resources.dependency.system == "http:upstream"' "${report}" >/dev/null \
   || fail "an HTTP upstream holding the request was not named: $(jq -c '{verdict,reason,dependency:.resources.dependency}' "${report}")"
 report="$(build_run redis-time 980 7.8 0 "")"; dir="$(dirname "$(dirname "${report}")")"
 spans "${dir}" dependency_time 50 SPAN_KIND_CLIENT:db_system=redis:40
 spans "${dir}" dependency_calls 980 SPAN_KIND_CLIENT:db_system=redis:98000
 classify "${dir}"
-jq -e '.verdict == "cpu-bound" and any(.notes[]; test("80% of server time is spent in redis calls \\(100.0 per request\\), though cpu-bound ranks higher"))' "${report}" >/dev/null \
+jq -e '.verdict == "cpu-bound" and any(.notes[]; test("redis spans cover ~80% of server time \\(100.0 calls per request\\), though cpu-bound ranks higher"))
+       and any(.notes[]; test("dependency amplification: each request makes ~100 redis calls"))' "${report}" >/dev/null \
   || fail "dependency time behind a CPU verdict was not noted: $(jq -c '{verdict,notes}' "${report}")"
 
 # E01: a 12 s window read against a 20 s rate lookback is not classified from rates.
@@ -556,5 +557,144 @@ classify "${dir}"
 jq -e '.verdict != "cpu-bound" and .verdict != "wait-bound" and .resources.cpu.utilizationPct == null and .resources.gc.pauseFractionPeak == null
        and any(.notes[]; test("measured window \\(12 s\\) is shorter than the 20 s rate window"))' "${report}" >/dev/null \
   || fail "rates reaching before a short window were classified: $(jq -c '{verdict,notes}' "${report}")"
+
+# S02: a pool grown far past the cores at low CPU is threads blocked on work
+# (sync over async); the queue may only spike once the pool has grown.
+report="$(build_run blocked 294 0.48 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+for f in thread_count:140 cpu_count:1; do
+  jq --arg v "${f#*:}" '.data.result[0].values |= map(.[1] = $v)' "${dir}/telemetry/metrics/${f%%:*}.json" > "${dir}/m.json" \
+    && mv "${dir}/m.json" "${dir}/telemetry/metrics/${f%%:*}.json"
+done
+observe "${dir}" http.latency.p50 108
+classify "${dir}"
+jq -e '.verdict == "threadpool-starved" and .confidence == "high" and (.reason | test("grew to 140 threads on 1 core"))
+       and .resources.threadPool.blockedThreads == true and (.saturatedResources | index("threadPool"))' "${report}" >/dev/null \
+  || fail "blocked pool threads were not named: $(jq -c '{verdict,confidence,reason}' "${report}")"
+jq '.data.result[0].values |= map(.[1] = "5")' "${dir}/telemetry/metrics/thread_count.json" > "${dir}/m.json" && mv "${dir}/m.json" "${dir}/telemetry/metrics/thread_count.json"
+classify "${dir}"
+[[ "$(verdict "${report}")" != "threadpool-starved" ]] || fail "five threads on one core were called blocked"
+
+# S07: a query per item of a list (N+1), each on its own leased connection.
+report="$(build_run amplified 50 0.5 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+mkdir -p "${dir}/dependencies"
+printf '%s\n' 'queryid,calls,rows,total_exec_ms,mean_exec_ms,shared_blks_hit,shared_blks_read,temp_blks_written,query' \
+  '1,150000,1500000,9000.5,0.06,1,0,0,"SELECT o.product_id FROM order_items AS o WHERE o.order_id = $1"' \
+  '2,3000,150000,1300.2,0.43,1,0,0,"SELECT o.id FROM orders AS o WHERE o.customer_id = $1"' \
+  '3,153000,0,90.1,0.00,0,0,0,DISCARD ALL' > "${dir}/dependencies/postgres-statements.csv"
+observe "${dir}" http.requests.total 3000
+classify "${dir}"
+notes "${report}" | grep -qF 'query amplification: "SELECT o.product_id FROM order_items AS o WHERE o.order_id = $1" ran 50 times per request (150000 calls for 3000 requests), with 51 connection resets (DISCARD ALL) per request' \
+  || fail "query amplification was not stated: $(notes "${report}")"
+
+# Sampled spans per entry request (local lab, sampler ratio 0.25): S10 read 0.2
+# publishes per request against the unsampled rate; S26 served its own upstream,
+# two server spans per request.
+report="$(build_run entry 1000 1.0 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+printf '{"target":"local","traceSampler":"parentbased_traceidratio","traceSamplerArg":"0.25"}\n' > "${dir}/manifest.json"
+spans "${dir}" dependency_time 25 SPAN_KIND_PRODUCER:messaging_system=rabbitmq:20
+spans "${dir}" dependency_calls 500 SPAN_KIND_PRODUCER:messaging_system=rabbitmq:250
+classify "${dir}"
+jq -e '.resources.dependency.callsPerRequest == 1 and .resources.dependency.callsBasis == "entry-requests" and .resources.dependency.msPerRequest == 80
+       and .resources.dependency.nestedServerRequestsPerRequest == 1 and (.reason | test("also served 1.0 nested request"))' "${report}" >/dev/null \
+  || fail "spans were not counted per entry request: $(jq -c '{dependency:.resources.dependency,notes}' "${report}")"
+
+# S16: connections and channels opened per publish; nothing when the broker
+# restarted inside the window.
+report="$(build_run broker 1400 1.0 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+mkdir -p "${dir}/dependencies"
+printf 'rabbitmq_connections_opened_total 50\nrabbitmq_channels_opened_total 26\n' > "${dir}/dependencies/rabbitmq-broker-metrics-preload.txt"
+printf 'rabbitmq_connections_opened_total 84050\nrabbitmq_channels_opened_total 84026\n' > "${dir}/dependencies/rabbitmq-broker-metrics.txt"
+observe "${dir}" http.requests.total 84000
+classify "${dir}"
+notes "${report}" | grep -qF "84000 RabbitMQ connections and 84000 channels opened for 84000 requests (1.00 per request)" \
+  || fail "broker churn was not stated: $(notes "${report}")"
+printf '{"scope":"broker-restarted"}\n' > "${dir}/analysis/async-reconciliation.json"
+classify "${dir}"
+! notes "${report}" | grep -q "RabbitMQ connections" || fail "churn was computed across a broker restart"
+
+# S23: the wait is the lab's own pool, which the application measures.
+report="$(build_run app-pool 13 0.1 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+observe "${dir}" http.latency.p50 5000; observe "${dir}" efficiency.cpu_ms_per_request 2.9
+"${PYTHON}" - "${dir}" <<'PYAPP'
+import json, sys
+labels = {"pool_name": "redis-multiplexer", "pool_configured_size": "1"}
+def row(name, first, last):
+    return {"metric": dict({"__name__": name}, **labels), "values": [[1700000000, first], [1700000060, last]]}
+rows = [row("perflab_pool_wait_duration_milliseconds_sum", "1095784", "4857492"),
+        row("perflab_pool_wait_duration_milliseconds_count", "255", "1051"),
+        row("perflab_pool_active_leases", "0", "1")]
+json.dump({"status": "success", "data": {"resultType": "matrix", "result": rows}}, open(sys.argv[1] + "/telemetry/metrics/application_metrics.json", "w"))
+PYAPP
+classify "${dir}"
+jq -e '.verdict == "wait-bound" and (.reason | test("the application pool \"redis-multiplexer\" \\(configured size 1\\): 796 waits in the window averaged 4726 ms \\(95% of the median\\)"))
+       and .resources.appPool.holdsWait == true' "${report}" >/dev/null \
+  || fail "the pool holding the wait was not named: $(jq -c '{verdict,reason}' "${report}")"
+
+# S24/S26: connections the application holds open.
+report="$(build_run footprint 400 1.0 0 "" 0.001 128 128)"; dir="$(dirname "$(dirname "${report}")")"
+mkdir -p "${dir}/dependencies"
+printf 'connected_clients:34\r\n' > "${dir}/dependencies/redis-clients-midload.txt"
+jq '.data.result = [(.data.result[0] | .metric = {service_instance_id: "api"}), (.data.result[0] | .metric = {service_instance_id: "worker"})]' \
+  "${dir}/telemetry/metrics/process_cpu.json" > "${dir}/m.json" && mv "${dir}/m.json" "${dir}/telemetry/metrics/process_cpu.json"
+classify "${dir}"
+for expected in "Redis held 34 client connections mid-load for 2 application process(es)" "the application held 128 open connections to upstream at peak"; do
+  notes "${report}" | grep -qF "${expected}" || fail "missing footprint note '${expected}': $(notes "${report}")"
+done
+
+# S27: exceptions per request from the window means, the peak beside it.
+report="$(build_run exception-mean 10 0.5 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+printf '{"status":"success","data":{"resultType":"matrix","result":[{"metric":{"error_type":"PostgresException"},"values":[[1700000000,"400"],[1700000005,"100"]]}]}}\n' \
+  > "${dir}/telemetry/metrics/exceptions.json"
+classify "${dir}"
+notes "${report}" | grep -qF "exception pressure: ~25 exceptions per request (peak 400/s" \
+  || fail "exceptions per request mixed the peak with the mean: $(notes "${report}")"
+
+# E03: the database holds the request without a pool queue: its statement and
+# the rows its plan reads only to discard them.
+report="$(build_run deep-offset 80 0.1 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+mkdir -p "${dir}/dependencies"
+observe "${dir}" efficiency.db_ms_per_request 8
+printf '%s\n' 'queryid,calls,rows,total_exec_ms,mean_exec_ms,shared_blks_hit,shared_blks_read,temp_blks_written,query' \
+  '1,4801,120025,4428.6,0.92,1,0,0,"SELECT p.id FROM products AS p WHERE p.is_active ORDER BY p.id LIMIT $1 OFFSET $2"' > "${dir}/dependencies/postgres-statements.csv"
+printf '{"plan":[{"Plan":{"Node Type":"Limit","Actual Rows":25,"Actual Loops":1,"Plans":[{"Node Type":"Index Scan","Relation Name":"products","Actual Rows":12500,"Actual Loops":1,"Rows Removed by Filter":0}]}}]}\n' \
+  > "${dir}/dependencies/postgres-query-plan.json"
+classify "${dir}"
+for expected in 'the statement with the most database time is "SELECT p.id FROM products AS p WHERE p.is_active ORDER BY p.id LIMIT $1 OFFSET $2" (4801 calls, mean 0.92 ms)' \
+    "reads 12500 rows to return 25 (Index Scan on products)"; do
+  notes "${report}" | grep -qF "${expected}" || fail "missing database note '${expected}': $(notes "${report}")"
+done
+
+# E12/E14: a full pool reads its connections as used plus idle (a returned
+# connection counts idle until a waiter takes it); beside a saturated CPU, with
+# the database executing a sliver of each lease, the queue follows the CPU.
+report="$(build_run starved-client 3600 7.8 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+mkdir -p "${dir}/dependencies"
+pool "${dir}" 5 20 214 0 0 20 18 15
+observe "${dir}" efficiency.db_ms_per_request 2.4; observe "${dir}" http.requests.total 216000
+printf '%s\n' 'queryid,calls,rows,total_exec_ms,mean_exec_ms,shared_blks_hit,shared_blks_read,temp_blks_written,query' \
+  '1,216000,216000,2160.0,0.01,1,0,0,"SELECT u.id FROM users AS u WHERE u.id = $1"' > "${dir}/dependencies/postgres-statements.csv"
+classify "${dir}"
+jq -e '.verdict == "cpu-bound+db-pool-saturated" and .resources.dbPool.connectionsPeak == 20
+       and any(.notes[]; test("the pool queue follows the saturated CPU: the database server executes 0.01 ms of the 2.4 ms"))
+       and any(.notes[]; test("round trips and processing in the client"))' "${report}" >/dev/null \
+  || fail "a pool queue behind a starved client was not ranked after the CPU: $(jq -c '{verdict,notes}' "${report}")"
+
+# P02: requests the generator counted failed that the application never saw.
+report="$(build_run unreached 3600 0.2 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+observe "${dir}" http.requests.total 36009; observe "${dir}" http.error_rate 0.95
+printf '{"status":"success","data":{"resultType":"matrix","result":[{"metric":{"__name__":"http_server_request_duration_seconds_count","http_response_status_code":"101"},"values":[[1700000000,"0"],[1700000060,"1800"]]}]}}\n' \
+  > "${dir}/telemetry/metrics/request_duration.json"
+classify "${dir}"
+jq -e '.confidence == "low" and any(.notes[]; test("34209 of 36009 requests never reached the application \\(it recorded 1800\\)"))' "${report}" >/dev/null \
+  || fail "failures before the application were not attributed: $(jq -c '{confidence,notes}' "${report}")"
+
+# A fault inside the window explains the errors; nothing reads OVERLOADED.
+report="$(build_run faulted 1400 0.5 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+mkdir -p "${dir}/benchmark"
+printf '{"action":"kill","service":"rabbitmq","applied":true,"restored":true}\n' > "${dir}/benchmark/fault-proof.json"
+observe "${dir}" http.error_rate 0.09
+classify "${dir}"
+jq -e 'any(.notes[]; test("requests failed while a dependency fault was injected")) and all(.notes[]; contains("OVERLOADED") | not)' "${report}" >/dev/null \
+  || fail "the fault was not named as the cause of the errors: $(notes "${report}")"
 
 echo "bottleneck classifier rule tests passed"

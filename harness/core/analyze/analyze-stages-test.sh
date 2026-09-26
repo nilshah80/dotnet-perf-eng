@@ -47,6 +47,7 @@ break_start=1800001000
 capacity_start=1800002000
 transport_start=1800003000
 fault_start=1800004000
+delivery_start=1800005000
 # Absolute evaluation time -> {rps, p99 (ms), bad (5xx/s)}. Unlisted times answer
 # the default (1000 rps, 20 ms, no errors).
 cat > "${test_root}/values.json" <<JSON
@@ -66,7 +67,9 @@ cat > "${test_root}/values.json" <<JSON
   "$((fault_start + 20))": {"rps": 500, "p99": 20, "bad": 0},
   "$((fault_start + 28))": {"rps": 300, "p99": 900, "bad": 30},
   "$((fault_start + 38))": {"rps": 480, "p99": 300, "bad": 0},
-  "$((fault_start + 43))": {"rps": 500, "p99": 22, "bad": 0}
+  "$((fault_start + 43))": {"rps": 500, "p99": 22, "bad": 0},
+  "$((delivery_start + 30))": {"rps": 9.2, "p99": 10, "bad": 0},
+  "$((delivery_start + 60))": {"rps": 29, "p99": 12, "bad": 0}
 }
 JSON
 cat > "${test_root}/backend.py" <<'PY'
@@ -186,6 +189,20 @@ report="${capacity}/analysis/stages.json"
 jq -e '.stages[0].expectedRate == 10.5 and .stages[0].healthy == true and .stages[1].expectedRate == 30 and .stages[1].healthy == true
        and .levels.firstFailingTarget == null' "${report}" >/dev/null \
   || fail "a fully delivered arrival ramp was not judged against its average: $(jq -c '[.stages[] | {expectedRate,servedRps,healthy,reasons}]' "${report}")"
+
+# --- the generator decides delivery ---------------------------------------------
+# S08 and P07: the served rate is a rate() over a series that only begins with
+# the load, so the first ramp stage under-reads ("delivered 9.2 of 10.5") while
+# k6 dropped nothing. A shortfall counts only when iterations were dropped.
+delivery="${test_root}/delivery"
+package "${delivery}" capacity "${delivery_start}" '[{"duration":"30s","target":20},{"duration":"30s","target":40}]' ramping-arrival-rate
+run "${delivery}"
+jq -e '.stages[0].healthy == true and .levels.firstFailingTarget == null' "${delivery}/analysis/stages.json" >/dev/null \
+  || fail "an under-read first stage with no dropped iterations failed: $(jq -c '[.stages[] | {servedRps,healthy,reasons}]' "${delivery}/analysis/stages.json")"
+printf '{"observations":[{"name":"http.dropped_iterations","value":12}]}\n' > "${delivery}/facts.json"
+run "${delivery}"
+jq -e '.stages[0].healthy == false and (.stages[0].reasons | test("delivered 9.2 of 10.5 req/s with 12 iterations dropped"))' "${delivery}/analysis/stages.json" >/dev/null \
+  || fail "a shortfall with dropped iterations was not reported: $(jq -c '[.stages[] | {servedRps,healthy,reasons}]' "${delivery}/analysis/stages.json")"
 
 # --- client transport errors fail a stage the server never saw ---------------
 # P05: 221,657 connections were dropped before the application, so the server
