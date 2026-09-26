@@ -337,18 +337,126 @@ performance_baggage_probe() {
   echo "baggage contract ${version}: ${state}${reason:+ (${reason})}; phase-scoped queries: ${scoped}" >&2
 }
 
+# A lab whose endpoints need a bearer token declares its login; the harness
+# authenticates once before traffic and hands the token to every generator in
+# PERF_HEADERS, so k6, wrk and JMeter authenticate alike (JMeter and wrk used to
+# send no token at all: 100% HTTP 401). Credentials go to curl on stdin and the
+# token into PERF_HEADERS through stdin, never as process arguments; artifacts
+# record header names only.
+performance_workload_login() { # <base-url>
+  [[ -n "${PERFLAB_LOGIN_PATH:-}" ]] || return 0
+  if [[ -n "${PERF_HEADERS:-}" ]] && printf '%s' "${PERF_HEADERS}" | jqd -e 'has("Authorization")' >/dev/null 2>&1; then
+    return 0  # the operator supplied a token
+  fi
+  # The credentials go to the target origin only: an absolute path (never
+  # "//host" or "@host"), and curl follows no redirect without -L.
+  [[ "${PERFLAB_LOGIN_PATH}" =~ ^/([^/?#@\\][^?#@\\]*)?$ ]] || {
+    echo "PERFLAB_LOGIN_PATH '${PERFLAB_LOGIN_PATH}' must be an absolute path on the target origin" >&2
+    return 1
+  }
+  local response code token
+  response="$(mktemp "${TMPDIR:-/tmp}/perflab-login.XXXXXX")" || return 1
+  code="$(printf '{"username":"%s","password":"%s"}' "$(json_escape "${PERF_LOGIN_USER:-}")" "$(json_escape "${PERF_LOGIN_PASSWORD:-}")" \
+    | target_curl -sS --max-time 15 -o "${response}" -w '%{http_code}' -H 'Content-Type: application/json' \
+      --data-binary @- "${1%/}${PERFLAB_LOGIN_PATH}" 2>/dev/null || true)"
+  token="$(jqd -r --arg field "${PERFLAB_LOGIN_RESPONSE_FIELD:-token}" '.[$field] // empty' < "${response}" 2>/dev/null || true)"
+  rm -f "${response}"
+  if [[ "${code}" != "200" || ! "${token}" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; then
+    echo "login at ${PERFLAB_LOGIN_PATH} failed (HTTP ${code:-000}); the lab's protected endpoints cannot be measured without a token." >&2
+    return 1
+  fi
+  PERF_HEADERS="$(printf '%s\n"Bearer %s"\n' "${PERF_HEADERS:-{\}}" "${token}" | jqd -cs '.[0] + {Authorization: .[1]}')"
+  export PERF_HEADERS
+  echo "authenticated at ${PERFLAB_LOGIN_PATH}; generators send the bearer token in PERF_HEADERS" >&2
+}
+
+# Generator-side connection residue. Every connection the generator closes holds
+# its local port in TIME_WAIT for twice the MSL, so a connection-per-iteration
+# workload can fill the host's ephemeral range: new connections then fail on the
+# generator host, never reaching the target, and the next run inherits the tail.
+# The run's target endpoints as "host:port" (base URL, the secondary origin and
+# the gRPC target), hostnames resolved: netstat prints addresses, and counting
+# every TIME_WAIT toward the host included the target's own server side and
+# every other local service (Prometheus, Pyroscope, the monitors).
+performance_generator_endpoints() { # <base-url> -> space-separated host:port list
+  local url rest host port scheme endpoints=() python
+  for url in "$1" "${PERF_SECONDARY_BASE_URL:-}" "${PERF_GRPC_TARGET:+grpc://${PERF_GRPC_TARGET}}"; do
+    [[ -n "${url}" ]] || continue
+    scheme="${url%%://*}"; rest="${url#*://}"; rest="${rest%%/*}"; rest="${rest##*@}"
+    if [[ "${rest}" == \[* ]]; then host="${rest#\[}"; host="${host%%]*}"; port="${rest##*]:}"; [[ "${port}" == "${rest}" ]] && port=""
+    else host="${rest%%:*}"; port=""; [[ "${rest}" == *:* ]] && port="${rest##*:}"; fi
+    [[ -n "${port}" ]] || { [[ "${scheme}" == https ]] && port=443 || port=80; }
+    case "${host}" in localhost|::1) host=127.0.0.1 ;; esac
+    if [[ ! "${host}" =~ ^[0-9.]+$ && "${host}" != *:* ]] && python="$(perflab_python 2>/dev/null)"; then
+      host="$("${python}" -c 'import socket, sys; print(socket.gethostbyname(sys.argv[1]))' "${host}" 2>/dev/null || printf '%s' "${host}")"
+    fi
+    endpoints+=("${host}:${port}")
+  done
+  printf '%s' "${endpoints[*]}"
+}
+
+performance_generator_time_wait() { # <host:port list> -> generator TIME_WAIT sockets toward those endpoints
+  { netstat -an 2>/dev/null || ss -tan 2>/dev/null || true; } | awk -v targets="$1" '
+    BEGIN { n = split(targets, t, " "); for (i = 1; i <= n; i++) want[t[i]] = 1 }
+    { for (i = 1; i <= NF; i++) if ($i ~ /^TIME[_-]WAIT$/) {
+        peer = (i == 1 ? $5 : $(i - 1)); gsub(/[][]/, "", peer)
+        port = peer; sub(/^.*[.:]/, "", port); host = substr(peer, 1, length(peer) - length(port) - 1)
+        if (host == "::1" || host == "::ffff:127.0.0.1") host = "127.0.0.1"
+        if ((host ":" port) in want) c++
+      } }
+    END { print c + 0 }'
+}
+
+performance_ephemeral_range() { # -> ephemeral port count on the generator host
+  local first last
+  first="$(sysctl -n net.inet.ip.portrange.first 2>/dev/null || true)"
+  last="$(sysctl -n net.inet.ip.portrange.last 2>/dev/null || true)"
+  if [[ -z "${first}" && -r /proc/sys/net/ipv4/ip_local_port_range ]]; then
+    read -r first last < /proc/sys/net/ipv4/ip_local_port_range
+  fi
+  if [[ "${first}" =~ ^[0-9]+$ && "${last}" =~ ^[0-9]+$ ]] && (( last > first )); then
+    printf '%s' "$((last - first + 1))"
+  else
+    printf '16384'  # the IANA dynamic range, Windows' default
+  fi
+}
+
+# Before traffic, wait (bounded) until a previous run's TIME_WAIT toward the
+# target is below a quarter of the ephemeral range, and record what was seen.
+performance_generator_settle() { # <host:port list> <out-json>
+  local range before now waited=0 cap="${PERFLAB_GENERATOR_SETTLE_SECONDS:-65}" state=clear
+  range="$(performance_ephemeral_range)"
+  before="$(performance_generator_time_wait "$1")"; now="${before}"
+  while (( now * 4 >= range && waited < cap )); do
+    sleep 1; waited=$((waited + 1)); now="$(performance_generator_time_wait "$1")"
+  done
+  if (( waited > 0 )); then
+    state=drained; (( now * 4 >= range )) && state=still-high
+    echo "generator ports: waited ${waited}s for ${before} TIME_WAIT sockets toward $1 to drain (${now} of ${range} left)" >&2
+  fi
+  mkdir -p "$(dirname "$2")"
+  printf '{"schemaVersion":"generator-ports-v1","host":"%s","ephemeralRange":%s,"threshold":%s,"timeWaitBefore":%s,"timeWaitAtStart":%s,"waitedSeconds":%s,"state":"%s"}\n' \
+    "$(json_escape "$1")" "${range}" "$((range / 4))" "${before}" "${now}" "${waited}" "${state}" > "$2"
+}
+
 # A measurement-window attestation is target-owned evidence for the concrete
 # process generation that served a run at the load boundary. It is deliberately
 # separate from remote-correlation: correlation proves the run tag; this probe
 # proves the service instance and rejects a stale response before traffic.
 performance_measurement_window_probe() {
-  local base="$1" run_id="$2" window_id="$3" boundary="$4" output="$5"
+  local base="$1" run_id="$2" window_id="$3" boundary="$4" output="$5" replica="${6:-}"
   local probe_path="${PERFLAB_MEASUREMENT_WINDOW_PROBE_PATH:-}" origin url response bytes
   [[ -n "${probe_path}" ]] || return 0
   [[ "${run_id}" =~ ^[A-Za-z0-9._-]{1,128}$ && "${window_id}" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || {
     echo "measurement-window run and window IDs must be bounded tokens" >&2
     return 1
   }
+  [[ -z "${replica}" || "${replica}" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || {
+    echo "measurement-window replica must be a bounded token" >&2
+    return 1
+  }
+  local headers=(-H "X-Perf-Run-Id: ${run_id}" -H "X-Perf-Measurement-Window: ${window_id}")
+  [[ -z "${replica}" ]] || headers+=(-H "X-Perf-Replica: ${replica}")
   case "${boundary}" in start|end) ;; *) echo "measurement-window boundary must be start or end" >&2; return 1 ;; esac
   case "${probe_path}" in
     /*)
@@ -364,8 +472,7 @@ performance_measurement_window_probe() {
   response="${output}.response"
   mkdir -p "$(dirname "${output}")"
   rm -f "${response}" "${response}.tmp"
-  if ! target_curl -fsS --max-time 10 --max-filesize 65536 \
-      -H "X-Perf-Run-Id: ${run_id}" -H "X-Perf-Measurement-Window: ${window_id}" "${url}" \
+  if ! target_curl -fsS --max-time 10 --max-filesize 65536 "${headers[@]}" "${url}" \
       | performance_stream_copy_limit "${response}" 65536; then
     rm -f "${response}" "${response}.tmp"
     echo "measurement-window ${boundary} probe failed for ${url}" >&2
@@ -391,10 +498,11 @@ performance_measurement_window_probe() {
   process_started="$(jqd -r '.processStartedAtUnixMilliseconds' < "${response}")"
   if ! jqd -cn --arg run "${run_id}" --arg window "${window_id}" --arg boundary "${boundary}" \
       --arg url "${url}" --arg instance "${instance}" --arg observed "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      --argjson processStarted "${process_started}" '
+      --argjson processStarted "${process_started}" --arg replica "${replica}" '
         {schemaVersion:"measurement-window-v1",runId:$run,measurementWindowId:$window,
         boundary:$boundary,probeUrl:$url,instanceId:$instance,
         processStartedAtUnixMilliseconds:$processStarted,observedAt:$observed}
+        + (if $replica != "" then {replica:$replica} else {} end)
       ' > "${output}.tmp"; then
     rm -f "${response}" "${output}.tmp"
     return 1
@@ -427,13 +535,57 @@ performance_measurement_window_finalize() {
   mkdir -p "$(dirname "${output}")"
   jqd -cn --arg run "${run}" --arg window "${window}" --arg start "${start_instance}" --arg end "${end_instance}" \
     --arg startObserved "${start_observed}" --arg endObserved "${end_observed}" \
-    --argjson startProcess "${start_process}" --argjson endProcess "${end_process}" '
+    --argjson startProcess "${start_process}" --argjson endProcess "${end_process}" \
+    --arg replica "$(jqd -r '.replica // ""' < "${start}")" '
       {schemaVersion:"measurement-window-v1",runId:$run,measurementWindowId:$window,
        instanceIds:([$start,$end] | unique),restartDetected:($start != $end or $startProcess != $endProcess),
        scope:"exact-boundary-instance-set",
        start:{instanceId:$start,processStartedAtUnixMilliseconds:$startProcess,observedAt:$startObserved},
        end:{instanceId:$end,processStartedAtUnixMilliseconds:$endProcess,observedAt:$endObserved}}
+      + (if $replica != "" then {replica:$replica} else {} end)
     ' > "${output}.tmp" && mv "${output}.tmp" "${output}"
+}
+
+# Behind a gateway one probe reaches one replica, so a restart of another
+# replica went unseen, and a probe balanced to a different replica at each
+# boundary read as a restart. With PERFLAB_MEASUREMENT_WINDOW_REPLICAS each
+# named replica is attested at both boundaries (routed by X-Perf-Replica).
+performance_measurement_window_open() { # <base> <run> <window> <analysis-dir>
+  local replica
+  if [[ -z "${PERFLAB_MEASUREMENT_WINDOW_REPLICAS:-}" ]]; then
+    performance_measurement_window_probe "$1" "$2" "$3" start "$4/measurement-window-start.json"
+    return
+  fi
+  for replica in ${PERFLAB_MEASUREMENT_WINDOW_REPLICAS}; do
+    performance_measurement_window_probe "$1" "$2" "$3" start "$4/measurement-window-start-${replica}.json" "${replica}" || return 1
+  done
+}
+
+performance_measurement_window_close() { # <base> <run> <window> <analysis-dir> -> <analysis-dir>/measurement-window.json
+  local replica windows=()
+  if [[ -z "${PERFLAB_MEASUREMENT_WINDOW_REPLICAS:-}" ]]; then
+    performance_measurement_window_probe "$1" "$2" "$3" end "$4/measurement-window-end.json" || return 1
+    performance_measurement_window_finalize "$4/measurement-window-start.json" "$4/measurement-window-end.json" "$4/measurement-window.json"
+    return
+  fi
+  for replica in ${PERFLAB_MEASUREMENT_WINDOW_REPLICAS}; do
+    performance_measurement_window_probe "$1" "$2" "$3" end "$4/measurement-window-end-${replica}.json" "${replica}" || return 1
+    performance_measurement_window_finalize "$4/measurement-window-start-${replica}.json" "$4/measurement-window-end-${replica}.json" \
+      "$4/measurement-window-${replica}.json" || return 1
+    windows+=("$4/measurement-window-${replica}.json")
+  done
+  # Distinct replicas are distinct processes; one generation answering for two
+  # names means the gateway ignored X-Perf-Replica and nothing was attested.
+  if ! cat "${windows[@]}" | jqd -se '[.[].start | "\(.instanceId)/\(.processStartedAtUnixMilliseconds)"] | (unique | length) == length' >/dev/null; then
+    echo "measurement-window replicas answered with the same process: the gateway did not route by X-Perf-Replica" >&2
+    return 1
+  fi
+  cat "${windows[@]}" | jqd -cs '
+    {schemaVersion:"measurement-window-v1",runId:.[0].runId,measurementWindowId:.[0].measurementWindowId,
+     instanceIds:([.[].instanceIds[]] | unique),restartDetected:any(.[]; .restartDetected),
+     scope:"exact-boundary-replica-set",
+     replicas:map({replica,restartDetected,start,end})}' > "$4/measurement-window.json.tmp" \
+    && mv "$4/measurement-window.json.tmp" "$4/measurement-window.json" && rm -f "${windows[@]}"
 }
 
 performance_session_preflight() {

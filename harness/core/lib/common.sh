@@ -194,15 +194,11 @@ validate_target_headers() {
 }
 
 target_curl() {
-  local args=() header
   validate_target_headers || return 1
   if [[ -n "${PERF_HEADERS:-}" ]]; then
-    while IFS= read -r header; do
-      [[ -n "${header}" ]] && args+=(-H "${header}")
-    done < <(printf '%s' "${PERF_HEADERS}" | jqd -r 'to_entries[] | "\(.key): \(.value)"')
-  fi
-  if (( ${#args[@]} > 0 )); then
-    command curl "${args[@]}" "$@"
+    # Headers reach curl through a file descriptor (-H @file), never argv: a
+    # bearer token on the command line is visible to every local user in ps.
+    command curl -H @<(printf '%s' "${PERF_HEADERS}" | jqd -r 'to_entries[] | "\(.key): \(.value)"') "$@"
   else
     command curl "$@"
   fi

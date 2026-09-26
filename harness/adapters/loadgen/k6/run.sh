@@ -153,20 +153,17 @@ case "${phase}" in
       echo "PERFLAB_WARMUP_SECONDS must be between 1 and 600; received '${warmup_seconds}'." >&2
       exit 1
     fi
-    if [[ "${PERF_PROTOCOL:-}" == "browser-synthetic" ]]; then
-      source "${HARNESS_ROOT}/adapters/loadgen/k6/profiles.sh"
-      cfg="${artifact_dir}/benchmark/k6-browser-warmup.json"
-      k6_write_profile_config steady 1 "${warmup_seconds}" "${cfg}"
-      k6 run --config "${cfg}" \
-        --summary-export "${artifact_dir}/benchmark/k6-warmup.json" \
-        --quiet --no-color "${js}" \
-        > "${artifact_dir}/benchmark/k6-warmup.txt"
-    else
-      k6 run --vus 16 --duration "${warmup_seconds}s" \
-        --summary-export "${artifact_dir}/benchmark/k6-warmup.json" \
-        --quiet --no-color "${js}" \
-        > "${artifact_dir}/benchmark/k6-warmup.txt"
-    fi
+    # shellcheck disable=SC1091
+    source "${HARNESS_ROOT}/adapters/loadgen/k6/profiles.sh"
+    cfg="${artifact_dir}/benchmark/k6-warmup-profile.json"
+    k6_write_warmup_config "${PERFLAB_PROFILE:-steady}" "${PERFLAB_CONNECTIONS:?PERFLAB_CONNECTIONS not set}" "${warmup_seconds}" "${cfg}"
+    # Only the measured phase is judged. A script threshold crossed while warming
+    # (P04's protocol_failures count==0) aborted the run before measurement, so
+    # the failures it would have measured left no facts package at all.
+    k6 run --config "${cfg}" --no-thresholds \
+      --summary-export "${artifact_dir}/benchmark/k6-warmup.json" \
+      --quiet --no-color "${js}" \
+      > "${artifact_dir}/benchmark/k6-warmup.txt"
     strip_setup_data "${artifact_dir}/benchmark/k6-warmup.json"
     ;;
   measure | diagnostic)
@@ -188,6 +185,9 @@ case "${phase}" in
     [[ "${phase}" == "measure" ]] && k6_enable_prom_rw
 
     generator_rc=0
+    # A diagnostic load drives the process while it is captured; it is not judged.
+    judged=()
+    [[ "${phase}" == "measure" ]] || judged=(--no-thresholds)
     if [[ "${phase}" == "measure" && ( "${profile}" != "steady" || "${PERF_PROTOCOL:-}" == "browser-synthetic" ) ]]; then
       # shellcheck disable=SC1091
       source "${HARNESS_ROOT}/adapters/loadgen/k6/profiles.sh"
@@ -201,7 +201,7 @@ case "${phase}" in
         --quiet --no-color "${js}" \
         > "${artifact_dir}/benchmark/${txt}" || generator_rc=$?
     else
-      k6 run --vus "${conns}" --duration "${dur}s" \
+      k6 run --vus "${conns}" --duration "${dur}s" ${judged[@]+"${judged[@]}"} \
         --summary-trend-stats "avg,min,med,max,p(50),p(90),p(95),p(99)" \
         --summary-export "${artifact_dir}/benchmark/${summary}" \
         ${K6_RW_OUT[@]+"${K6_RW_OUT[@]}"} \

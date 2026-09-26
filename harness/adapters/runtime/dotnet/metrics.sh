@@ -10,6 +10,7 @@
 #            $JOB              -> descriptor telemetry.promJobRegex
 #            $RUN_ID           -> telemetry run id
 #            $SERVICE_INSTANCE -> service_instance_id regex derived from the run
+#            $SERVICE_NAME     -> descriptor telemetry service-name regex
 #
 # Single-quoted entries keep $JOB/$RUN_ID/$SERVICE_INSTANCE literal until the
 # core substitutes them.
@@ -66,4 +67,15 @@ PERFLAB_METRIC_ROLES=(
   'lock_contention|range|rate(dotnet_monitor_lock_contentions_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[$RATE_WINDOW])'
   'cpu_count|instant|dotnet_process_cpu_count{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
   'thread_count|range|dotnet_thread_pool_thread_count_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}'
+  # Exceptions thrown per second by type. Exception pressure otherwise reads only
+  # as its CPU cost (P11: ~500 InvalidOperationException per request, verdict
+  # cpu-bound); the exceptions profile names the call site but is sampled.
+  'exceptions|range|sum by(error_type) (rate(dotnet_exceptions_total{job=~"$JOB",service_instance_id=~"$SERVICE_INSTANCE"}[$RATE_WINDOW]))'
+  # Server and dependency time from Tempo span metrics, by the dependency a
+  # client or producer span calls (the lab Tempo config adds these dimensions).
+  # Npgsql metrics measure only PostgreSQL; a Redis, HTTP-upstream or broker
+  # wait had no time share (S13, S26). Span metrics carry no instance label, so
+  # the measured window scopes them.
+  'dependency_time|range|sum by(span_kind,db_system,db_system_name,messaging_system,server_address) (rate(traces_spanmetrics_latency_sum{service=~"$SERVICE_NAME",span_kind=~"SPAN_KIND_(SERVER|CLIENT|PRODUCER)"}[$RATE_WINDOW]))'
+  'dependency_calls|range|sum by(span_kind,db_system,db_system_name,messaging_system,server_address) (rate(traces_spanmetrics_calls_total{service=~"$SERVICE_NAME",span_kind=~"SPAN_KIND_(SERVER|CLIENT|PRODUCER)"}[$RATE_WINDOW]))'
 )

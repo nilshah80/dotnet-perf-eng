@@ -78,7 +78,11 @@ case "${phase}" in
       echo "PERFLAB_WARMUP_SECONDS must be between 1 and 600; received '${warmup_seconds}'." >&2
       exit 1
     fi
-    wrk_run -t2 -c16 -d"${warmup_seconds}s" -s "${lua}" "${url}" > "${artifact_dir}/benchmark/warmup.txt"
+    # The measured connection count, not a fixed 16: a warm-up hotter than the
+    # measurement changes the state the measurement starts from.
+    conns="${PERFLAB_CONNECTIONS:?PERFLAB_CONNECTIONS not set}"
+    threads=$(( conns < 2 ? conns : 2 ))
+    wrk_run -t"${threads}" -c"${conns}" -d"${warmup_seconds}s" -s "${lua}" "${url}" > "${artifact_dir}/benchmark/warmup.txt"
     ;;
   measure | diagnostic)
     conns="${PERFLAB_CONNECTIONS:?PERFLAB_CONNECTIONS not set}"
@@ -107,10 +111,16 @@ case "${phase}" in
     # total transport failure compute error_rate 1.0.
     total="$(awk -v c="${completed}" -v tr="${transport}" 'BEGIN { print c + tr }')"
     errrate="$(awk -v e="$((non2xx + transport))" -v t="${total}" 'BEGIN { if (t + 0 > 0) printf "%.6f", e / (t + 0); else print 0 }')"
-    # wrk latency percentiles are unit-suffixed strings (e.g. "1.23ms") -> tagged
-    # wrk-duration; the counts and rates are numeric.
-    printf '[{"name":"http.requests_per_second","value":%s,"unit":"request/s","source":"benchmark/wrk.txt"},{"name":"http.latency.p50","value":"%s","unit":"wrk-duration","source":"benchmark/wrk.txt"},{"name":"http.latency.p90","value":"%s","unit":"wrk-duration","source":"benchmark/wrk.txt"},{"name":"http.latency.p99","value":"%s","unit":"wrk-duration","source":"benchmark/wrk.txt"},{"name":"http.responses.non_2xx_3xx","value":%s,"unit":"response","source":"benchmark/wrk.txt"},{"name":"http.transport_errors","value":%s,"unit":"error","source":"benchmark/wrk.txt"},{"name":"http.requests.total","value":%s,"unit":"request","source":"benchmark/wrk.txt"},{"name":"http.error_rate","value":%s,"unit":"ratio","source":"benchmark/wrk.txt"}]\n' \
-      "${rps}" "$(json_escape "${p50:-unknown}")" "$(json_escape "${p90:-unknown}")" "$(json_escape "${p99:-unknown}")" "${non2xx}" "${transport}" "${total}" "${errrate}" \
+    # wrk prints unit-suffixed percentiles ("612.00us", "1.23ms", "2.10s"); they
+    # are recorded in ms like every other generator. A string read as a number
+    # took 612 us for 612 ms.
+    wrk_ms() {
+      awk -v v="$1" 'BEGIN {
+        if (v ~ /us$/) printf "%.4f", v / 1000; else if (v ~ /ms$/) printf "%.4f", v + 0
+        else if (v ~ /[0-9]s$/) printf "%.4f", v * 1000; else if (v ~ /[0-9]m$/) printf "%.4f", v * 60000; else print "null" }'
+    }
+    printf '[{"name":"http.requests_per_second","value":%s,"unit":"request/s","source":"benchmark/wrk.txt"},{"name":"http.latency.p50","value":%s,"unit":"ms","source":"benchmark/wrk.txt"},{"name":"http.latency.p90","value":%s,"unit":"ms","source":"benchmark/wrk.txt"},{"name":"http.latency.p99","value":%s,"unit":"ms","source":"benchmark/wrk.txt"},{"name":"http.responses.non_2xx_3xx","value":%s,"unit":"response","source":"benchmark/wrk.txt"},{"name":"http.transport_errors","value":%s,"unit":"error","source":"benchmark/wrk.txt"},{"name":"http.requests.total","value":%s,"unit":"request","source":"benchmark/wrk.txt"},{"name":"http.error_rate","value":%s,"unit":"ratio","source":"benchmark/wrk.txt"}]\n' \
+      "${rps}" "$(wrk_ms "${p50:-}")" "$(wrk_ms "${p90:-}")" "$(wrk_ms "${p99:-}")" "${non2xx}" "${transport}" "${total}" "${errrate}" \
       > "${artifact_dir}/benchmark/observations.json"
     ;;
   *)

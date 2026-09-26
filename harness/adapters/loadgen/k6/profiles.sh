@@ -39,7 +39,7 @@ k6_browser_options() {
 }
 
 k6_write_profile_config() {
-  local profile="$1" connections="$2" duration="$3" out="$4"
+  local profile="$1" connections="$2" duration="$3" out="$4" name="${5:-measure}"
   local q half tenth max_vus spike_vus target_rps start_rps soak browser
   q="$(k6_positive_step "${duration}" 4)"
   half="$(k6_positive_step "${duration}" 2)"
@@ -96,6 +96,25 @@ k6_write_profile_config() {
     *) echo "unknown profile '${profile}'" >&2; return 1 ;;
   esac
 
-  printf '%s\n' "{\"scenarios\":{\"measure\":${scenario}},\"summaryTrendStats\":[\"avg\",\"min\",\"med\",\"max\",\"p(50)\",\"p(90)\",\"p(95)\",\"p(99)\"],\"discardResponseBodies\":true}" \
+  printf '%s\n' "{\"scenarios\":{\"${name}\":${scenario}},\"summaryTrendStats\":[\"avg\",\"min\",\"med\",\"max\",\"p(50)\",\"p(90)\",\"p(95)\",\"p(99)\"],\"discardResponseBodies\":true}" \
     | jqd '.' > "${out}"
+}
+
+# Warm-up drives the measured workload's own shape at its initial steady level,
+# only shorter: a fixed 16 unthrottled VUs was far hotter than a 10 req/s arrival
+# run, and against a connection-per-iteration workload it churned thousands of
+# connections a second and exhausted the generator's ephemeral ports before the
+# measurement began.
+k6_write_warmup_config() {
+  local profile="$1" connections="$2" seconds="$3" out="$4" rate
+  case "${profile}" in
+    open|arrival) k6_write_profile_config open "${connections}" "${seconds}" "${out}" warmup ;;
+    capacity|knee)
+      rate="${PERFLAB_TARGET_RPS:-$((connections * 10))}"
+      rate=$((rate / 2 > 0 ? rate / 2 : 1))
+      PERFLAB_TARGET_RPS="${rate}" k6_write_profile_config open "${connections}" "${seconds}" "${out}" warmup
+      ;;
+    smoke) k6_write_profile_config closed 1 "${seconds}" "${out}" warmup ;;
+    *) k6_write_profile_config closed "${connections}" "${seconds}" "${out}" warmup ;;
+  esac
 }

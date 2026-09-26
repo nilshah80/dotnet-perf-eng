@@ -4,6 +4,6 @@
   "manifestSha256": "033fa27700df50600740586fee5d4b9647297b235c7eb32021d1c0b57c04cdb3",
   "aggregateSha256": "3d4bd019d95daa5949121ae6289b7fa81772b99db1f542cc20cc7e555bd0bdc3",
   "contractIndexSha256": "4ce63e6b798822cbcf53cf21324caa0b624e0e834e0012038bd28f9b5b0851d0",
-  "perflabInventorySha256": "cc3ff222798c4578127d211bf9a6a04ce2b5411a6f49f9dae3e005932c3d0263",
-  "dotnetPerfEngInventorySha256": "9c053d4c83f9207698f107d5e0dbb11df456fffe5f28b439359c4e2c697cfd1d"
+  "perflabInventorySha256": "3275b5dd8ee931597bdde5a76fe9f5d6ff4dbedd96ca488c4fc8348c94d8b806",
+  "dotnetPerfEngInventorySha256": "cc8a588e8f1e2de0a1d3ba8b6a18d4607350f7aa24c4c989811a3149b0b08ea6"
 }

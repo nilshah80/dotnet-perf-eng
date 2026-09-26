@@ -287,6 +287,13 @@ rate_start_epoch=$(( start_epoch + rate_window_seconds ))
 # A window too short to hold one lookback keeps its last point rather than none.
 (( rate_start_epoch <= end_epoch - prometheus_range_step )) || rate_start_epoch=$(( end_epoch - prometheus_range_step ))
 (( rate_start_epoch >= start_epoch )) || rate_start_epoch="${start_epoch}"
+# A measured window shorter than the rate lookback reads its rates partly from
+# before the window (E01's 12 s smoke against the 20 s window put warm-up CPU
+# into every rate). The classifier treats rate-derived resources as not
+# established for such a window.
+mkdir -p "${artifact_dir}/telemetry"
+printf '{"rateWindowSeconds":%s,"measuredSeconds":%s,"established":%s}\n' "${rate_window_seconds}" "$(( end_epoch - start_epoch ))" \
+  "$( (( end_epoch - start_epoch >= rate_window_seconds )) && echo true || echo false)" > "${artifact_dir}/telemetry/rate-window.json"
 capture_prometheus_range() { # capture_prometheus_range <file> <query> [start-epoch]
   local state=captured rc=0 range_start="${3:-${start_epoch}}"
   backend_curl -fsS --max-time 30 --get --data-urlencode "query=$2" \
@@ -403,6 +410,7 @@ if [[ -f "${metrics_map}" ]]; then
     q="${m_promql//\$JOB/${prom_job_regex}}"
     q="${q//\$RUN_ID/${telemetry_run_id}}"
     q="${q//\$SERVICE_INSTANCE/${service_instance_regex}}"
+    q="${q//\$SERVICE_NAME/${service_name_regex}}"
     q="${q//\$PHASE/${prom_phase_selector}}"
     role_start="${start_epoch}"
     if [[ "${q}" == *'$RATE_WINDOW'* ]]; then
@@ -706,6 +714,15 @@ if [[ "${target_mode}" == "local" ]]; then
   compose exec -T "${primary_app_service}" sh -c 'cat /proc/net/tcp /proc/net/tcp6' \
     > "${artifact_dir}/dependencies/${primary_app_service}-net-tcp.txt" 2>/dev/null || true
   compose ps --format json | jqd -s '.' > "${artifact_dir}/dependencies/docker-compose-ps.json" 2>/dev/null || true
+  # A service with no OTel logs (the protocol lab's nginx gateway) keeps its own
+  # warning and error lines for the measured window: P05's gateway dropped
+  # 221,657 connections and said so only in its container log. Bounded, and
+  # query strings are redacted (SignalR carries a connection token in the URL).
+  for service in ${PERFLAB_CONTAINER_LOG_SERVICES:-}; do
+    compose logs --no-color --no-log-prefix --since "${start_epoch}" --until "${end_epoch}" "${service}" 2>/dev/null \
+      | grep -Ei '\b(warn|error|crit|alert|emerg|fatal)\b' | sed -E 's/\?[^ "]*/?<redacted>/g' | head -n 2000 \
+      > "${artifact_dir}/dependencies/${service}-log-findings.txt" || true
+  done
 
   # Final boundary: what the run left behind (leaked containers, a restarted
   # dependency, residual host load).

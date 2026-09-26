@@ -184,7 +184,14 @@ if [[ "${capture_mode}" == "preset" && "${load_generator}" != "${manifest_genera
   echo "Diagnostic campaigns must replay the measured generator '${manifest_generator}'; override '${load_generator}' was refused." >&2
   exit 1
 fi
-if [[ "${capture_mode}" == "preset" && "${requested_preset}" != "dump" ]]; then
+# Only a remote target -- never recreated, so its process already holds the state
+# to inspect -- takes a dump without diagnostic load. A local target is recreated
+# in diagnose mode first; dumping it before any traffic showed a fresh, idle
+# process (S04's retained arrays were absent), so a local dump replays the load.
+dump_only=0
+[[ "${capture_mode}" == "preset" && "${requested_preset}" == "dump" && "${target_mode:-local}" == "remote" ]] && dump_only=1
+export PERFLAB_CAMPAIGN_DUMP_ONLY="${dump_only}" # the runtime adapter acts on this decision
+if [[ "${capture_mode}" == "preset" && "${dump_only}" == "0" ]]; then
   if [[ "${load_generator}" != "k6" && "${load_generator}" != "jmeter" ]]; then
     echo "Load-bearing diagnostic campaigns require a measured k6 or JMeter workload; '${load_generator}' cannot provide replay provenance." >&2
     exit 1
@@ -208,7 +215,7 @@ if [[ "${capture_mode}" == "preset" && "${requested_preset}" != "dump" ]]; then
     exit 1
   fi
 fi
-if [[ "${capture_mode}" != "preset" || "${requested_preset}" != "dump" ]]; then
+if [[ "${dump_only}" == "0" ]]; then
   require_loadgen
 fi
 export PERFLAB_LOAD_GENERATOR="${load_generator}"
@@ -362,6 +369,9 @@ fi
 # runs pointed at the same process must still collide.
 acquire_diagnostic_lease "${PERFLAB_LAB:-lab}/${target}/${diagnostics_url}" || exit 1
 arm_diagnostic_lease_release
+
+# The diagnostic load needs the same bearer token as the measurement.
+performance_workload_login "${PERF_BASE_URL}" || exit 1
 
 capture="${runtime_adapter_dir}/capture.sh"
 if [[ ! -f "${capture}" ]]; then

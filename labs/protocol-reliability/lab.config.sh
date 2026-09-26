@@ -6,6 +6,8 @@ PERFLAB_RUNTIME="dotnet"
 PERFLAB_COMPOSE_FILE="labs/protocol-reliability/compose.yaml"
 PERFLAB_APP_SERVICES="api-a api-b gateway"
 PERFLAB_PRIMARY_APP_SERVICE="api-a"
+# App services without OTel logs; their warning/error lines are kept per run.
+PERFLAB_CONTAINER_LOG_SERVICES="gateway"
 PERFLAB_BASE_URL="${PERFLAB_BASE_URL:-http://127.0.0.1:18080}"
 PERFLAB_READY_URL="${PERFLAB_READY_URL:-http://127.0.0.1:18080/health/ready}"
 PERF_SECONDARY_BASE_URL="${PERF_SECONDARY_BASE_URL:-http://127.0.0.1:18084}"
@@ -38,6 +40,9 @@ PERFLAB_REMOTE_CORRELATION_TEMPO_ATTRIBUTE="span.perf.run.id"
 # start/end; a restart becomes evidence, not a stale instance merge.
 PERFLAB_MEASUREMENT_WINDOW_PROBE_PATH="/api/reliability/window"
 PERFLAB_MEASUREMENT_WINDOW_VERSION="perflab-measurement-window-v1"
+# The gateway balances both replicas; each is attested by name at both
+# boundaries (nginx routes the probe by X-Perf-Replica).
+PERFLAB_MEASUREMENT_WINDOW_REPLICAS="api-a api-b"
 # Measurement default: /stacks injects ICorProfiler and cannot share that slot
 # with Pyroscope. Diagnose-mode capture-runtime.sh overrides this to true after
 # recreating the owned app with PERFLAB_CONTINUOUS_PROFILING=0; the runtime

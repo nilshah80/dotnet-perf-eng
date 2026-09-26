@@ -104,4 +104,28 @@ for profile in smoke load steady closed ramp breakpoint stress capacity knee spi
   [[ "${effective}" == "${scheduled}" ]] || fail "${profile}: reported ${effective}s but executor runs ${scheduled}s"
 done
 
+# Warm-up drives the measured shape at its initial steady level, never a fixed
+# unthrottled population: an arrival run warms at its rate, a VU run at its
+# declared concurrency, smoke with one VU.
+warmup() { # warmup <profile> -> options JSON path
+  local out="${test_root}/warmup-${1}.json"
+  PERFLAB_MAX_VUS=256 PERFLAB_TARGET_RPS=400 k6_write_warmup_config "$1" 64 20 "${out}" \
+    || fail "warm-up for '${1}' failed to compile"
+  printf '%s' "${out}"
+}
+for profile in open arrival; do
+  jq -e '.scenarios.warmup | .executor == "constant-arrival-rate" and .rate == 400 and .duration == "20s"' "$(warmup "${profile}")" >/dev/null \
+    || fail "${profile} warm-up is not the arrival executor at the target rate: $(cat "$(warmup "${profile}")")"
+done
+for profile in capacity knee; do
+  jq -e '.scenarios.warmup | .executor == "constant-arrival-rate" and .rate == 200' "$(warmup "${profile}")" >/dev/null \
+    || fail "${profile} warm-up does not hold the first stage's rate: $(cat "$(warmup "${profile}")")"
+done
+for profile in steady closed load ramp stress breakpoint spike soak; do
+  jq -e '.scenarios.warmup | .executor == "constant-vus" and .vus == 64 and .duration == "20s"' "$(warmup "${profile}")" >/dev/null \
+    || fail "${profile} warm-up is not the declared concurrency: $(cat "$(warmup "${profile}")")"
+done
+jq -e '.scenarios.warmup | .executor == "constant-vus" and .vus == 1' "$(warmup smoke)" >/dev/null \
+  || fail "smoke warm-up is not a single VU"
+
 echo "k6 profile shape and effective-duration tests passed"

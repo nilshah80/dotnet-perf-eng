@@ -55,6 +55,7 @@ services:
       - "127.0.0.1:4040:4040"
     volumes:
       - lgtm-data:/data
+      - ../../harness/adapters/observability/lgtm/tempo-config.yaml:/otel-lgtm/tempo-config.yaml:ro
       # Provision the whole dashboards/ folder -- one JSON per focused board
       # (overview, runtime, http, dependencies). Regenerate with
       # harness/adapters/observability/grafana/generate-dashboards.py.

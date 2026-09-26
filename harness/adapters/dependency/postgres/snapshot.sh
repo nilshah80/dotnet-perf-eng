@@ -22,4 +22,21 @@ compose exec -T "${pg_service}" psql -U "${pg_user}" -d "${pg_db}" -c \
 # Project-specific query-plan probes (EXPLAIN of a named query, checks of a named
 # table/index) live in the LAB, not here: <lab>/dependencies/postgres/snapshot.sh.
 # The three generic captures above work for any postgres-backed lab.
+# Transaction, rollback and deadlock counters, plus the server's connection
+# limit. The counters are cumulative since the last stats reset, so the raw file
+# carries every earlier run on this stack; postgres-deadlocks-delta.json
+# subtracts the post-warm-up baseline written by reset-stats.sh and is the count
+# for this measured window (S27's planted deadlock, in any lab).
+compose exec -T "${pg_service}" psql -U "${pg_user}" -d "${pg_db}" -c \
+  "COPY (SELECT datname, numbackends, xact_commit, xact_rollback, deadlocks, current_setting('max_connections')::int AS max_connections FROM pg_stat_database WHERE datname='${pg_db}') TO STDOUT WITH CSV HEADER" \
+  > "${dep}/postgres-deadlocks.csv" 2>/dev/null || rm -f "${dep}/postgres-deadlocks.csv"
+if [[ -s "${dep}/postgres-deadlocks-preload.csv" && -s "${dep}/postgres-deadlocks.csv" ]]; then
+  # A negative difference means the counters were reset in between: no delta.
+  awk -F, 'NR == FNR { if (FNR == 2) { c = $3; r = $4; d = $5 } next }
+    FNR == 2 {
+      if ($3 < c || $4 < r || $5 < d) print "{\"scope\":\"not-comparable\",\"reason\":\"pg_stat_database counters were reset during the run\"}"
+      else printf "{\"scope\":\"measured-window\",\"xactCommit\":%d,\"xactRollback\":%d,\"deadlocks\":%d}\n", $3 - c, $4 - r, $5 - d
+    }' "${dep}/postgres-deadlocks-preload.csv" "${dep}/postgres-deadlocks.csv" > "${dep}/postgres-deadlocks-delta.json" || true
+fi
+
 run_lab_dependency_hook postgres snapshot "${artifact_dir}"

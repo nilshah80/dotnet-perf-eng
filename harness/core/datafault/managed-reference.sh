@@ -5,12 +5,12 @@
 set -euo pipefail
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/performance.sh"
 
 run_id="${1:?managed-reference.sh <run-id> <base-url> [cleanup]}"
 base_url="${2:?base-url required}"
 action="${3:-seed}"
-user="${PERF_LOGIN_USER:-user1}"
-password="${PERF_LOGIN_PASSWORD:-Password123!}"
 
 [[ "${PERF_WRITE_ACK:-}" == "managed-reference" ]] || {
   echo "managed-reference acknowledgement is required" >&2
@@ -21,16 +21,17 @@ password="${PERF_LOGIN_PASSWORD:-Password123!}"
   exit 1
 }
 
-login_json="$(curl -fsS -X POST "${base_url}/api/auth/login" \
-  -H 'Content-Type: application/json' \
-  -H "X-Perf-Run-Id: ${run_id}" \
-  --data "{\"username\":\"${user}\",\"password\":\"${password}\"}")"
-token="$(printf '%s' "${login_json}" | jqd -r '.token // empty')"
-[[ -n "${token}" ]] || { echo "managed-reference login failed" >&2; exit 1; }
-
-auth=(-H "Authorization: Bearer ${token}" -H "X-Perf-Run-Id: ${run_id}" -H 'Content-Type: application/json')
+# The lab's own login (a no-op when the run already exported the token); the
+# password and token reach curl through stdin and a header file descriptor,
+# never its arguments.
+performance_workload_login "${base_url}" || exit 1
+printf '%s' "${PERF_HEADERS:-}" | jqd -e 'has("Authorization")' >/dev/null 2>&1 || {
+  echo "managed-reference requires the lab login (PERFLAB_LOGIN_PATH)" >&2
+  exit 1
+}
+auth=(-H "X-Perf-Run-Id: ${run_id}" -H 'Content-Type: application/json')
 if [[ "${action}" == "cleanup" ]]; then
-  cleanup_json="$(curl -fsS -X POST "${base_url}/api/perf/runs/${run_id}/cleanup" "${auth[@]}" --data '{}')"
+  cleanup_json="$(target_curl -fsS -X POST "${base_url}/api/perf/runs/${run_id}/cleanup" "${auth[@]}" --data '{}')"
   [[ "$(printf '%s' "${cleanup_json}" | jqd -r '.cleaned // false')" == "true" ]] || {
     echo "managed-reference cleanup did not complete" >&2
     exit 1
@@ -44,7 +45,7 @@ if [[ "${action}" == "cleanup" ]]; then
 fi
 
 if [[ "${action}" == "reset" ]]; then
-  reset_json="$(curl -fsS -X POST "${base_url}/api/perf/runs/${run_id}/reset" "${auth[@]}" --data '{}')"
+  reset_json="$(target_curl -fsS -X POST "${base_url}/api/perf/runs/${run_id}/reset" "${auth[@]}" --data '{}')"
   [[ "$(printf '%s' "${reset_json}" | jqd -r '.ready // false')" == "true" ]] || {
     echo "managed-reference partition did not reset after warm-up" >&2
     exit 1
@@ -53,8 +54,8 @@ if [[ "${action}" == "reset" ]]; then
   exit 0
 fi
 
-curl -fsS -X POST "${base_url}/api/perf/runs/${run_id}/seed?budget=${PERF_WRITE_BUDGET}" "${auth[@]}" --data '{}' >/dev/null
-reset_json="$(curl -fsS -X POST "${base_url}/api/perf/runs/${run_id}/reset" "${auth[@]}" --data '{}')"
+target_curl -fsS -X POST "${base_url}/api/perf/runs/${run_id}/seed?budget=${PERF_WRITE_BUDGET}" "${auth[@]}" --data '{}' >/dev/null
+reset_json="$(target_curl -fsS -X POST "${base_url}/api/perf/runs/${run_id}/reset" "${auth[@]}" --data '{}')"
 [[ "$(printf '%s' "${reset_json}" | jqd -r '.ready // false')" == "true" ]] || {
   echo "managed-reference partition did not become ready" >&2
   exit 1

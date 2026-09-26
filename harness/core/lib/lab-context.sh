@@ -434,23 +434,9 @@ wrk_image="${PERFLAB_WRK_IMAGE:-}"
 # the harness answers capacity/limits/endurance questions instead of a single
 # point -- ramp/stress/spike/soak are closed-model VU shapes, capacity/arrival
 # are open-model arrival-rate. k6 implements every profile, JMeter implements
-# its declared subset, and wrk is intentionally limited to simple closed load.
-# Tuning knobs (all optional, k6 adapter reads them): PERFLAB_MAX_VUS,
+# its declared subset, and wrk is intentionally limited to simple closed load;
+# performance_profile_preflight (run-scenario.sh) is the one place those rules
+# live. Tuning knobs (all optional, k6 adapter reads them): PERFLAB_MAX_VUS,
 # PERFLAB_SPIKE_VUS, PERFLAB_TARGET_RPS, PERFLAB_START_RPS,
 # PERFLAB_SOAK_DURATION_SECONDS.
 load_profile="${PERFLAB_PROFILE:-steady}"
-case " smoke load steady ramp stress breakpoint capacity knee spike open closed soak arrival " in
-  *" ${load_profile} "*) : ;;
-  *) echo "PERFLAB_PROFILE must be one of: smoke load steady ramp stress breakpoint capacity knee spike open closed soak arrival; received '${load_profile}'." >&2; exit 1 ;;
-esac
-case "${load_generator}" in
-  wrk)
-    case "${load_profile}" in steady|smoke|load) : ;; *) echo "PERFLAB_PROFILE='${load_profile}' requires k6; wrk supports steady, smoke, and load only." >&2; exit 1 ;; esac
-    ;;
-  jmeter)
-    case "${load_profile}" in
-      steady|smoke|load|closed|open|arrival|capacity|knee) : ;;
-      *) echo "PERFLAB_PROFILE='${load_profile}' is not implemented by JMeter." >&2; exit 1 ;;
-    esac
-    ;;
-esac

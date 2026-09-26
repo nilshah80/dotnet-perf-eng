@@ -14,6 +14,12 @@ PYROSCOPE_PROFILE_CATEGORY="cpu"
 PYROSCOPE_MAX_NODES="${PYROSCOPE_MAX_NODES:-16384}"
 PYROSCOPE_CAPTURE_ATTEMPTS="${PYROSCOPE_CAPTURE_ATTEMPTS:-6}"
 PYROSCOPE_CAPTURE_SLEEP="${PYROSCOPE_CAPTURE_SLEEP:-5}"
+# The profiler uploads every 10 s, so the window's last samples arrive up to one
+# upload period after it ends. A CPU profile holding less than the floor share
+# of the process CPU in the window cannot rank frames (E01's 12 s smoke sampled
+# 0.018 s of ~12 s of CPU, and its "top frame" rested on one or two samples).
+PYROSCOPE_UPLOAD_SECONDS="${PYROSCOPE_UPLOAD_SECONDS:-10}"
+PERFLAB_PROFILE_COVERAGE_FLOOR="${PERFLAB_PROFILE_COVERAGE_FLOOR:-0.05}"
 
 pyroscope_record_endpoint() {
   printf '%s' "${1:-}" | sed -E 's#(https?://)[^/@]+@#\1#'
@@ -99,7 +105,7 @@ pyroscope_probe_ready() {
 # pyroscope_last_http.
 pyroscope_query_service() {
   local service="$1"
-  local selector file attempt reachable=0 names=0 levels=0 http_code=""
+  local selector file attempt reachable=0 names=0 levels=0 http_code="" ticks previous_ticks=""
   selector="$(pyroscope_query_selector "${service}")"
   file="${artifact_dir}/telemetry/profiles/${service}-${PYROSCOPE_PROFILE_CATEGORY}.json"
   : > "${file}"
@@ -111,6 +117,8 @@ pyroscope_query_service() {
   pyroscope_last_http=""
   pyroscope_last_symbolized=0
   pyroscope_last_symbolization="unknown"
+  pyroscope_last_coverage=""
+  pyroscope_last_sufficient=true
   for attempt in $(seq 1 "${PYROSCOPE_CAPTURE_ATTEMPTS}"); do
     pyroscope_last_attempts="${attempt}"
     # No -f: a 4xx/5xx is a REACHABLE backend rejecting the query, which must be
@@ -126,16 +134,26 @@ pyroscope_query_service() {
         [[ "${names}" =~ ^[0-9]+$ ]] || names=0
         [[ "${levels}" =~ ^[0-9]+$ ]] || levels=0
         # A reachable empty window is a flamebearer with only the synthetic
-        # "total" node. That is not captured content.
+        # "total" node. That is not captured content. Content is accepted once
+        # it stops growing: ingestion lags the window by up to an upload period.
         if [[ "${names}" -gt 1 && "${levels}" -gt 0 ]]; then
-          break
+          ticks="$(jqd -r '.flamebearer.numTicks // 0' < "${file}" 2>/dev/null || echo 0)"
+          [[ "${ticks}" == "${previous_ticks}" ]] && break
+          previous_ticks="${ticks}"
         fi
         ;;
       ""|000)
         rm -f "${file}.tmp"
+        [[ -z "${previous_ticks}" ]] || break
         ;;
       *)
         reachable=1
+        # A re-read that fails after content arrived keeps the content: the
+        # profile was only being checked for growth.
+        if [[ -n "${previous_ticks}" ]]; then
+          rm -f "${file}.tmp"
+          break
+        fi
         pyroscope_last_http="${http_code}"
         # Keep the error body for provenance; it is not a flamebearer.
         mv "${file}.tmp" "${file}"
@@ -194,6 +212,25 @@ pyroscope_query_service() {
   pyroscope_last_reason=""
   if [[ "${pyroscope_last_symbolization}" == "unknown" ]]; then
     pyroscope_last_reason="profile contains no symbolized frames (only Unknown-Type.Unknown-Method); samples exist but cannot be attributed to code"
+  fi
+  pyroscope_coverage "${service}" "${file}"
+}
+
+# CPU sample coverage: profiled CPU seconds over the service's process CPU
+# seconds in the same window (process_cpu is a per-mode, per-instance rate).
+pyroscope_coverage() {
+  local service="$1" file="$2" cpu="${artifact_dir}/telemetry/metrics/process_cpu.json"
+  [[ "${PYROSCOPE_PROFILE_CATEGORY}" == "cpu" && -s "${cpu}" ]] || return 0
+  pyroscope_last_coverage="$(cat "${file}" "${cpu}" | jqd -rs --arg service "${service}" --argjson window "$(( end_epoch - start_epoch ))" '
+    ((.[0].flamebearer.numTicks // 0) / (.[0].metadata.sampleRate // 1000000000)) as $profiled |
+    [.[1].data.result[]? | select(.metric.service_name == $service) | (.values // [])[] | {t: .[0], v: (.[1] | tonumber)}]
+    | group_by(.t) | map(map(.v) | add) | if length == 0 then empty else (add / length) * $window end
+    | if . > 0 then $profiled / . else empty end' 2>/dev/null || true)"
+  [[ -n "${pyroscope_last_coverage}" ]] || return 0
+  if awk -v c="${pyroscope_last_coverage}" -v f="${PERFLAB_PROFILE_COVERAGE_FLOOR}" 'BEGIN { exit !(c < f) }'; then
+    pyroscope_last_sufficient=false
+    pyroscope_last_reason="$(awk -v c="${pyroscope_last_coverage}" -v f="${PERFLAB_PROFILE_COVERAGE_FLOOR}" 'BEGIN {
+      printf "thin profile: it holds %.2f%% of the process CPU in the window (floor %.0f%%); too few samples to rank frames", c * 100, f * 100 }')"
   fi
 }
 
@@ -255,6 +292,9 @@ pyroscope_capture_profiles() {
   fi
   pyroscope_ready=false
   pyroscope_probe_ready
+  local upload_due now
+  upload_due=$(( end_epoch + PYROSCOPE_UPLOAD_SECONDS )); now="$(date -u +%s)"
+  (( now >= upload_due )) || sleep $(( upload_due - now ))
   old_ifs="${IFS}"
   IFS=','
   for profile_type in ${PERFLAB_PROFILING_TYPES}; do
@@ -268,10 +308,11 @@ pyroscope_capture_profiles() {
     if [[ "${pyroscope_last_state}" == "captured" || "${pyroscope_last_state}" == "truncated" ]] && [[ "${pyroscope_last_symbolization}" != "symbolized" ]]; then
       echo "WARNING: Pyroscope profile for ${service} is ${pyroscope_last_symbolization} (${pyroscope_last_symbolized} symbolized of ${pyroscope_last_nodes} frames). On aarch64 hosts pyroscope-dotnet 1.5.1 is an unsupported build that loses every frame of tiered-up (re-jitted) methods; the lab entrypoint disables tiered compilation there unless PERFLAB_PROFILING_KEEP_TIERING=1 was set. Check the profile's dotnet_tiered_compilation label." >&2
     fi
-      service_json="$(printf '{"service":"%s","profileCategory":"%s","profileType":"%s","captureState":"%s","reason":"%s","nodes":%s,"symbolizedNodes":%s,"symbolization":"%s","truncated":%s,"required":%s,"attempts":%s,"httpStatus":"%s","selector":"%s"}' \
+      service_json="$(printf '{"service":"%s","profileCategory":"%s","profileType":"%s","captureState":"%s","reason":"%s","nodes":%s,"symbolizedNodes":%s,"symbolization":"%s","coverage":%s,"sufficientCoverage":%s,"truncated":%s,"required":%s,"attempts":%s,"httpStatus":"%s","selector":"%s"}' \
       "$(json_escape "${service}")" "$(json_escape "${profile_type}")" "$(json_escape "${PYROSCOPE_PROFILE_TYPE}")" \
       "$(json_escape "${pyroscope_last_state}")" "$(json_escape "${pyroscope_last_reason}")" \
       "${pyroscope_last_nodes}" "${pyroscope_last_symbolized}" "$(json_escape "${pyroscope_last_symbolization}")" \
+      "${pyroscope_last_coverage:-null}" "${pyroscope_last_sufficient}" \
       "$([[ "${pyroscope_last_state}" == "truncated" ]] && echo true || echo false)" \
       "$(pyroscope_service_required "${service}" && pyroscope_type_required "${profile_type}" && echo true || echo false)" \
       "${pyroscope_last_attempts}" "$(json_escape "${pyroscope_last_http}")" "$(json_escape "${selector}")")"

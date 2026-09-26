@@ -55,10 +55,14 @@ PERFLAB_WRK_IMAGE="${PERFLAB_WRK_IMAGE:-}"
 # PERFLAB_JMETER_IMAGE="sha256:<local-image-id>"
 # PERFLAB_JMETER_PLAN="labs/ecommerce/loadgen/test-plan.jmx"
 # PERFLAB_JMETER_FILES='[]'
-# The workload is this lab's own loadgen/k6.js: it authenticates once in setup()
-# and sends the bearer token on every request, so protected scenarios need no
-# harness change. JMeter and wrk do not run that setup() login, so protected
-# endpoints need a pre-minted token via PERF_HEADERS (or stay on k6).
+# The endpoints are JWT-protected: the harness logs in once before traffic and
+# hands the bearer token to k6, wrk and JMeter alike in PERF_HEADERS. The default
+# credentials are the seeded fixture user; override PERF_LOGIN_USER/PASSWORD, or
+# pass a pre-minted PERF_HEADERS Authorization to skip the login.
+PERFLAB_LOGIN_PATH="/api/auth/login"
+PERFLAB_LOGIN_RESPONSE_FIELD="token"
+PERF_LOGIN_USER="${PERF_LOGIN_USER:-user1}"
+PERF_LOGIN_PASSWORD="${PERF_LOGIN_PASSWORD:-Password123!}"
 
 # --- Dependencies (postgres only) ---
 PERFLAB_DEPENDENCIES="postgres"

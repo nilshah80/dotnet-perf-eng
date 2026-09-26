@@ -70,7 +70,8 @@ if [[ "${2:-}" == "${LIFECYCLE_SLOW_PHASE:-}" ||
   # LIFECYCLE_PHASE_SLEEP shortens the stall for cases that let it finish.
   sleep "${LIFECYCLE_PHASE_SLEEP:-30}"
 fi
-if [[ "${2:-}" == "measure" && "${LIFECYCLE_FAIL_MEASURE:-0}" == "1" ]]; then exit 99; fi
+# 107 is k6's script error; 99 is its crossed-thresholds exit.
+if [[ "${2:-}" == "measure" && -n "${LIFECYCLE_FAIL_MEASURE:-}" ]]; then exit "${LIFECYCLE_FAIL_MEASURE}"; fi
 if [[ "${2:-}" == "warmup" && "${PERFLAB_TEST_FAIL_WARMUP:-0}" == "1" ]]; then
   echo "simulated warm-up interruption" >&2
   exit 1
@@ -406,11 +407,25 @@ printf '{"status":"%s"}\n' "${PERFLAB_CAPTURE_INCOMPLETE:-0}" > "$1/facts.json"
 EOF
 failed_pkg="${test_root}/failed-measure"
 rc=0
-env LIFECYCLE_SLOW_PHASE=measure LIFECYCLE_PHASE_SLEEP=3 LIFECYCLE_FAIL_MEASURE=1   PERFLAB_RESOURCE_SAMPLE_SECONDS=1 PERFLAB_BOTTLENECK=0 PERFLAB_STEADY_STATE=0 PERFLAB_RECORD_TREND=0   PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${lab_config}"   PERFLAB_TEST_CALLS="${calls}" PERFLAB_ARTIFACT_DIR="${failed_pkg}" PERFLAB_WARMUP_SECONDS=0   bash "${test_root}/harness/core/run/run-scenario.sh" S01 3 > "${failed_pkg}.out" 2>&1 || rc=$?
-[[ "${rc}" == 99 ]] || fail "failed measurement did not retain its exit: ${rc}"
+env LIFECYCLE_SLOW_PHASE=measure LIFECYCLE_PHASE_SLEEP=3 LIFECYCLE_FAIL_MEASURE=107   PERFLAB_RESOURCE_SAMPLE_SECONDS=1 PERFLAB_BOTTLENECK=0 PERFLAB_STEADY_STATE=0 PERFLAB_RECORD_TREND=0   PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${lab_config}"   PERFLAB_TEST_CALLS="${calls}" PERFLAB_ARTIFACT_DIR="${failed_pkg}" PERFLAB_WARMUP_SECONDS=0   bash "${test_root}/harness/core/run/run-scenario.sh" S01 3 > "${failed_pkg}.out" 2>&1 || rc=$?
+[[ "${rc}" == 107 ]] || fail "failed measurement did not retain its exit: ${rc}"
 jq -e '.status == "1"' "${failed_pkg}/facts.json" >/dev/null || fail "failed measurement skipped partial capture"
 jq -e '.samples == .expected and .samples == (.captured + .partial + .failed)'   "${failed_pkg}/dependencies/resource-series.json" >/dev/null || fail "failed measurement lost scheduled ticks"
 [[ ! -e "${failed_pkg}/dependencies/.resource-series-tick.pid" ]] || fail "failed measurement left a tick process"
+
+# Crossed k6 thresholds (exit 99) are a failed run with complete evidence: the
+# package is captured in full and the run still exits 99. P04's
+# protocol_failures threshold used to leave no facts package at all.
+threshold_pkg="${test_root}/threshold-measure"
+rc=0
+env LIFECYCLE_FAIL_MEASURE=99 PERFLAB_BOTTLENECK=0 PERFLAB_STEADY_STATE=0 PERFLAB_RECORD_TREND=0 \
+  PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${lab_config}" PERFLAB_TEST_CALLS="${calls}" \
+  PERFLAB_ARTIFACT_DIR="${threshold_pkg}" PERFLAB_WARMUP_SECONDS=0 \
+  bash "${test_root}/harness/core/run/run-scenario.sh" S01 3 > "${threshold_pkg}.out" 2>&1 || rc=$?
+[[ "${rc}" == 99 ]] || fail "crossed thresholds did not fail the run: ${rc}"
+jq -e '.status == "0"' "${threshold_pkg}/facts.json" >/dev/null || fail "crossed thresholds marked a complete measurement partial"
+jq -e '.exitCode == 99 and .captureState == "captured"' "${threshold_pkg}/benchmark/generator-exit.json" >/dev/null \
+  || fail "crossed thresholds were not recorded"
 
 # Losing the end attestation must retain the successful load's partial package.
 window_pkg="${test_root}/failed-window"

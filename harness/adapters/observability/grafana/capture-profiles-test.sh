@@ -189,6 +189,70 @@ for profile_type in cpu wall allocation lock exception live-heap; do
 done
 grep -q '"profileTypes":\["cpu","wall","allocation","lock","exception","live-heap"\]' "${artifact}/telemetry/profiles/query.json" || fail "multi-type query manifest"
 
+# CPU coverage: profiled CPU over the process CPU in the window (1 core for the
+# 29 s window here). 0.1 s of samples is partial; 29 s is complete.
+coverage_case() { # coverage_case <name> <numTicks at sampleRate 100> -> signal file
+  local artifact="${test_root}/$1" bin="${test_root}/bin-$1"
+  mkdir -p "${artifact}/telemetry/metrics"
+  printf '{"data":{"result":[{"metric":{"service_name":"perflab-api","cpu_mode":"user"},"values":[[10,"0.75"],[20,"0.75"]]},{"metric":{"service_name":"perflab-api","cpu_mode":"system"},"values":[[10,"0.25"],[20,"0.25"]]}]}}\n' \
+    > "${artifact}/telemetry/metrics/process_cpu.json"
+  install_curl "${bin}" ok "$("${PYTHON}" -c 'import json,sys; names=["total"]+["Frame%d"%i for i in range(40)]; print(json.dumps({"flamebearer":{"names":names,"levels":[[0,1,2,1]],"numTicks":int(sys.argv[1])},"metadata":{"sampleRate":100}}))' "$2")"
+  PATH="${bin}:${PATH}" artifact_dir="${artifact}" continuous_profiling=1 capture_telemetry=1 pyroscope_url="http://127.0.0.1:4040" \
+    pyroscope_services="perflab-api" pyroscope_required_services="perflab-api" start_epoch=1 end_epoch=30 telemetry_run_id="run-1" \
+    target_mode="local" PYROSCOPE_CAPTURE_ATTEMPTS=1 PYROSCOPE_CAPTURE_SLEEP=0 pyroscope_capture_profiles
+  printf '%s' "${artifact}/telemetry/profiles-signal.json"
+}
+signal="$(coverage_case thin 10)"
+jq -e '.services[0] | .captureState == "captured" and .sufficientCoverage == false and (.coverage * 1000 | round) == 3
+       and (.reason | test("thin profile: it holds 0.34% of the process CPU in the window \\(floor 5%\\)"))' "${signal}" >/dev/null \
+  || fail "a thin CPU profile was not marked partial: $(cat "${signal}")"
+signal="$(coverage_case covered 2900)"
+jq -e '.services[0] | .sufficientCoverage == true and .coverage == 1 and .reason == ""' "${signal}" >/dev/null \
+  || fail "a covered CPU profile was marked partial: $(cat "${signal}")"
+
+# Ingestion lags the window: content is re-read until it stops growing.
+growing_bin="${test_root}/bin-growing"; mkdir -p "${growing_bin}"
+cat > "${growing_bin}/curl" <<CURL
+#!/usr/bin/env bash
+out=""; url=""
+while [[ \$# -gt 0 ]]; do case "\$1" in -o) out="\$2"; shift 2 ;; -w|--data-urlencode|--max-time) shift 2 ;; http*) url="\$1"; shift ;; *) shift ;; esac; done
+[[ "\${url}" == */ready ]] && exit 0
+calls="\$(cat "${test_root}/growing-calls" 2>/dev/null || echo 0)"; calls=\$((calls + 1)); echo "\${calls}" > "${test_root}/growing-calls"
+ticks=\$(( calls < 3 ? calls * 100 : 300 ))
+printf '{"flamebearer":{"names":["total","Frame"],"levels":[[0,1,1,1]],"numTicks":%s},"metadata":{"sampleRate":100}}\n' "\${ticks}" > "\${out}"
+printf '200'
+CURL
+chmod +x "${growing_bin}/curl"
+artifact="${test_root}/growing"; mkdir -p "${artifact}"
+PATH="${growing_bin}:${PATH}" artifact_dir="${artifact}" continuous_profiling=1 capture_telemetry=1 pyroscope_url="http://127.0.0.1:4040" \
+  pyroscope_services="perflab-api" pyroscope_required_services="perflab-api" start_epoch=1 end_epoch=30 telemetry_run_id="run-1" \
+  target_mode="local" PYROSCOPE_CAPTURE_ATTEMPTS=6 PYROSCOPE_CAPTURE_SLEEP=0 pyroscope_capture_profiles
+jq -e '.services[0].attempts == 4' "${artifact}/telemetry/profiles-signal.json" >/dev/null && jq -e '.flamebearer.numTicks == 300' "${artifact}/telemetry/profiles/perflab-api-cpu.json" >/dev/null \
+  || fail "a growing profile was accepted before it settled: $(jq -c '.services[0].attempts' "${artifact}/telemetry/profiles-signal.json")"
+
+# A re-read that fails after content arrived keeps the content.
+flaky_bin="${test_root}/bin-flaky"; mkdir -p "${flaky_bin}"
+cat > "${flaky_bin}/curl" <<CURL
+#!/usr/bin/env bash
+out=""; url=""; want=0
+while [[ \$# -gt 0 ]]; do case "\$1" in -o) out="\$2"; shift 2 ;; -w) want=1; shift 2 ;; --data-urlencode|--max-time) shift 2 ;; http*) url="\$1"; shift ;; *) shift ;; esac; done
+[[ "\${url}" == */ready ]] && exit 0
+calls="\$(cat "${test_root}/flaky-calls" 2>/dev/null || echo 0)"; calls=\$((calls + 1)); echo "\${calls}" > "${test_root}/flaky-calls"
+if (( calls == 1 )); then
+  printf '{"flamebearer":{"names":["total","Frame"],"levels":[[0,1,1,1]],"numTicks":100},"metadata":{"sampleRate":100}}\n' > "\${out}"; printf '200'
+else
+  printf '{"code":"internal"}\n' > "\${out}"; printf '503'; exit 22
+fi
+CURL
+chmod +x "${flaky_bin}/curl"
+artifact="${test_root}/flaky"; mkdir -p "${artifact}"
+PATH="${flaky_bin}:${PATH}" artifact_dir="${artifact}" continuous_profiling=1 capture_telemetry=1 pyroscope_url="http://127.0.0.1:4040" \
+  pyroscope_services="perflab-api" pyroscope_required_services="perflab-api" start_epoch=1 end_epoch=30 telemetry_run_id="run-1" \
+  target_mode="local" PYROSCOPE_CAPTURE_ATTEMPTS=6 PYROSCOPE_CAPTURE_SLEEP=0 pyroscope_capture_profiles
+jq -e '.services[0] | .captureState == "captured" and .httpStatus == "200"' "${artifact}/telemetry/profiles-signal.json" >/dev/null \
+  && jq -e '.flamebearer.numTicks == 100' "${artifact}/telemetry/profiles/perflab-api-cpu.json" >/dev/null \
+  || fail "a failed re-read discarded a captured profile: $(cat "${artifact}/telemetry/profiles-signal.json")"
+
 PERFLAB_PROFILING_TYPES=lock run_case idle-lock missing ok "${stub}"
 jq -e '.captureState == "missing" and .services[0].required == false' "${test_root}/idle-lock/telemetry/profiles-signal.json" >/dev/null   || fail "an empty conditional profile was reported as captured or required"
 [[ "${profiles_incomplete}" == "0" ]] || fail "absence of optional lock events made the package incomplete"

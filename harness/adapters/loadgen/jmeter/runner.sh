@@ -62,7 +62,7 @@ format_epoch_ms() {
   local millis="$1" seconds remainder prefix
   seconds=$((millis / 1000))
   remainder=$((millis % 1000))
-  prefix="$(date -u -d "@${seconds}" '+%Y-%m-%dT%H:%M:%S')"
+  prefix="$(date -u -r "${seconds}" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || date -u -d "@${seconds}" '+%Y-%m-%dT%H:%M:%S')"
   printf '%s.%03dZ' "${prefix}" "${remainder}"
 }
 
@@ -85,10 +85,10 @@ percentile() {
 
 parse_jtl() {
   local jtl="$1" scratch="$2"
-  local elapsed_file="${scratch}/request-elapsed.txt"
+  local elapsed_file="${scratch}/request-elapsed.txt" journey_file="${scratch}/journey-elapsed.txt"
   local stats_file="${scratch}/jtl-stats.txt"
-  : > "${elapsed_file}"
-  awk -v elapsed_file="${elapsed_file}" '
+  : > "${elapsed_file}"; : > "${journey_file}"
+  awk -v elapsed_file="${elapsed_file}" -v journey_file="${journey_file}" '
     function csvsplit(text, values,    i, ch, next_ch, count, field, quoted) {
       delete values
       count = 1
@@ -175,6 +175,8 @@ parse_jtl() {
       if (finished > (ended + 0)) ended = finished
       if (kind == "parent") {
         iterations++
+        # The duration of every journey, as k6 records completed, failed and aborted ones.
+        print elapsed >> journey_file
         complete = index(message, "Number of samples in transaction : ") == 1 && index(message, "number of failing samples : ") > 0
         if (!complete) journey_aborted++
         else if (success == "true") journey_succeeded++
@@ -227,6 +229,7 @@ parse_jtl() {
     }
   ' "${jtl}" > "${stats_file}" || return "${exit_exec}"
   LC_ALL=C sort -n "${elapsed_file}" -o "${elapsed_file}"
+  LC_ALL=C sort -n "${journey_file}" -o "${journey_file}"
 }
 
 read_stat() {
@@ -246,7 +249,7 @@ publish_summary() {
 
   local requests iterations journey_succeeded journey_failed journey_aborted
   local succeeded failed status_errors non2xx transport_errors started ended elapsed_sum
-  local retries child_ops window_ms rps error_rate mean p50 p90 p95 p99
+  local retries child_ops window_ms rps error_rate mean p50 p90 p95 p99 journey_p95
   requests="$(read_stat "${stats}" requests)"
   iterations="$(read_stat "${stats}" iterations)"
   journey_succeeded="$(read_stat "${stats}" journey_succeeded)"
@@ -276,6 +279,8 @@ publish_summary() {
   p90="$(percentile "${elapsed}" 90)"
   p95="$(percentile "${elapsed}" 95)"
   p99="$(percentile "${elapsed}" 99)"
+  journey_p95=null
+  [[ -s "${scratch}/journey-elapsed.txt" ]] && journey_p95="$(percentile "${scratch}/journey-elapsed.txt" 95)"
 
   local summary_name="jmeter-summary-v1.json" jtl_name="results.jtl" write_observations=true
   case "${phase}" in
@@ -294,7 +299,7 @@ publish_summary() {
   jq -n \
     --arg script_hash "${script_hash}" \
     --arg jtl_hash "$(sha256_file "${jtl}")" \
-    --argjson jtl_bytes "$(stat -c %s "${jtl}")" \
+    --argjson jtl_bytes "$(wc -c < "${jtl}" | tr -d " ")" \
     --argjson requests "${requests}" \
     --argjson iterations "${iterations}" \
     --argjson journey_succeeded "${journey_succeeded}" \
@@ -312,6 +317,7 @@ publish_summary() {
     --argjson p50 "${p50}" --argjson p90 "${p90}" \
     --argjson p95 "${p95}" --argjson p99 "${p99}" \
     --argjson mean "${mean}" \
+    --argjson journey_p95 "${journey_p95}" \
     --arg started "$(format_epoch_ms "${started}")" \
     --arg finished "$(format_epoch_ms "${ended}")" \
     --arg adapter_id "${adapter_id}" --arg adapter_version "${adapter_version}" '
@@ -320,7 +326,7 @@ publish_summary() {
         requests:$requests,iterations:$iterations,
         journeySucceeded:$journey_succeeded,journeyFailed:$journey_failed,
         journeyAborted:$journey_aborted,journeyChildOps:$child_ops,
-        journeyWireRequests:$requests,journeyRetries:$retries,
+        journeyWireRequests:$requests,journeyRetries:$retries,journeyDurationP95Ms:$journey_p95,
         succeeded:$succeeded,failed:$failed,statusErrors:$status_errors,
         non2xx:$non2xx,transportErrors:$transport,droppedIterations:0,
         errorRate:$error_rate,requestsPerSecond:$rps,
@@ -355,7 +361,9 @@ publish_summary() {
       {name:"journey.wire_requests",value:.journeyWireRequests,unit:"request",source:"benchmark/jmeter-summary-v1.json"},
       {name:"journey.retries",value:.journeyRetries,unit:"request",source:"benchmark/jmeter-summary-v1.json"},
       {name:"journey.request_amplification",value:(if .iterations > 0 then .journeyWireRequests / .iterations else 0 end),unit:"request/iteration",source:"benchmark/jmeter-summary-v1.json"}
-    ] else [] end)' "${summary_path}" > "${observations}.tmp"
+    ] + (if .journeyDurationP95Ms != null then [
+      {name:"journey.duration.p95",value:.journeyDurationP95Ms,unit:"ms",source:"benchmark/jmeter-summary-v1.json"}
+    ] else [] end) else [] end)' "${summary_path}" > "${observations}.tmp"
     mv "${observations}.tmp" "${observations}"
   fi
 

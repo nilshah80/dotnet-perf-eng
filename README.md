@@ -702,7 +702,7 @@ These turn the lab from "run and inspect" into a guardrail that **decides**.
 | `analyze/trend-report.sh --scenario ID --metric M` | **Cross-commit trend.** Shows a metric per scenario across commits from `perf-history/<lab>.jsonl` (auto-appended after every measure by `record-trend.sh`; skip with `PERFLAB_RECORD_TREND=0`). Each row names its profile and load generator; `--profile` and `--generator` narrow the series, and a warning marks a series that mixes them. |
 | `analyze/steady-state.sh <run>` | **Steady-state validity.** Every reported number assumes the window was in steady state, but the harness only does a fixed warm-up. It buckets the window and, per bucket, reads genuinely window-local **server-side** metrics — `rate()` of the request count and `histogram_quantile` over the request-duration histogram (k6's remote-write percentiles are cumulative and can't be windowed). The verdict is **drift-based** (a systematic tail trend, not spread), reporting whether it settled (`steady` / `warming` / `unsteady`), the warm-up to trim, and the whole-vs-steady skew → `analysis/steady-state.json`. **Scope:** it certifies **server-side** steady state; client-side **p99 tail** steadiness is *not* independently verified (k6 client percentiles are cumulative/not windowable) — in a closed-loop run throughput tracks the client *mean*, not the tail (`clientLatencyCoupling`, `certifies`). Auto-run after every measure (skip `PERFLAB_STEADY_STATE=0`); enforce with `gate.sh --require-steady`. |
 | `analyze/analyze-stages.sh <run>` | **Stage-by-stage results for staged profiles** (ramp, load, stress, breakpoint, spike, capacity). Splits the run by the k6 stages that actually executed and reports each stage's server-side throughput, p99 and 5xx ratio; for rising levels the **last healthy and first failing level** (errors above the error SLO, p99 above a p99 SLO, or an arrival stage under 95% of its rate) and the level beyond which throughput stopped following the load; for a spike the baseline, the surge's degradation and the **recovery time** (5 s resolution). A stage under 10 s holds too few metric exports and is reported, not judged → `analysis/stages.json`. Auto-run after every measure; not applicable to constant-load profiles. |
-| `analyze/bottleneck.sh <run>` | **USE-method bottleneck classifier.** Decomposes a typical request into CPU / GC / DB / other time and combines it with per-resource saturation (thread-pool queue, DB-pool pending, GC-pause fraction, lock contention, CPU utilisation) to name the dominant bottleneck — `cpu-bound`, `threadpool-starved`, `gc-bound`, `lock-bound`, `db-pool-saturated`, `dependency-bound-db` — with a confidence and the evidence → `analysis/bottleneck.json`. A reproducible answer next to the AI phase's. Auto-run after every measure (skip `PERFLAB_BOTTLENECK=0`). |
+| `analyze/bottleneck.sh <run>` | **USE-method bottleneck classifier.** Decomposes a typical request into CPU / GC / DB / other time and combines it with per-resource saturation (thread-pool queue, DB-pool pending, GC-pause fraction, lock contention, CPU utilisation) to name the dominant bottleneck — `cpu-bound`, `threadpool-starved`, `gc-bound`, `lock-bound`, `db-pool-saturated`, `db-lock-contention`, `db-deadlock`, `upstream-pool-saturated`, `dependency-bound-db` (or `-redis`, `-http`, `-rabbitmq` from span metrics), `wait-bound`, or `generator-limited` / `client-errors` when the run itself is the limit — with a confidence and the evidence → `analysis/bottleneck.json`. A reproducible answer next to the AI phase's. Auto-run after every measure (skip `PERFLAB_BOTTLENECK=0`). |
 | `analyze/diff-gcdump.sh <run>` or `<base> <cand>` | **Differential heap (leak attribution).** The memory counterpart of `diff-profile`: diffs two `dotnet-gcdump report`s and lists the types that grew / shrank / appeared — the "which type grew" answer that turns `analyze-trends`'s *"the heap is growing"* into a cause. Retained bytes are `Object Bytes × Count` per row (bucketed rows list per-object size). One run dir diffs its own `before`/`after` gcdump (same process, bracketing the load); two run dirs compare cross-commit. Pure awk — no container. **Auto-run** by `normalize-runtime` whenever a gcdump before/after pair is present (a plain measure has no gcdump, so — unlike steady-state/bottleneck — it runs on a diagnostic capture, not every measure). |
 
 > **Significance-aware gating (repeat vs repeat).** `compare-runs.sh` only uses statistical significance when *both* sides carry per-metric spread (`n>1`), i.e. both are `run-repeat` `stats.json`. So for a significance-aware gate: baseline **and** candidate must be repeat runs — promote a `run-repeat` directory as the baseline, and gate a `run-repeat` candidate directory (`gate.sh` resolves `stats.json` and now covers `efficiency.*` too). A single `facts.json` candidate (`n=1`) against any baseline falls back to the relative `--threshold`.
@@ -767,6 +767,24 @@ so it is always surfaced as its own dimension with the artifact that produced
 it. With no `gcdump` pair, retention reports `not-captured` — which must not be
 read as "no growth".
 
+**The database finding names its cause.** Deadlocks in the measured window
+(`postgres-deadlocks-delta.json`) are `db-deadlock`, ahead of the database time
+they cause. When most active sessions in the mid-load sample wait on a row lock,
+the verdict is `db-lock-contention` with the holder, and the saturated pool is
+its consequence. A saturated pool is explained by its acquisition timeouts and
+created connections (a leak reads "used 0/20"), and by whether the leased
+connections were executing: leased but idle means the lease spans non-database
+work; busy means the slowest statement is the fix. A request that is almost all
+waiting with nothing saturated (3 ms of CPU in a 5 s request) is `wait-bound`:
+an async lock, a delay or an external call that no pool measures. Time spent in
+a dependency other than PostgreSQL comes from Tempo span metrics, which the
+labs' Tempo config (`harness/adapters/observability/lgtm/tempo-config.yaml`)
+keys by `db.system`, `messaging.system` and `server.address`: a dependency that
+holds most of the server time is `dependency-bound-<system>`. Allocation
+pressure, cache health (hit ratio, eviction without TTLs, a database refresh per
+miss, a new connection per request) and exceptions per request are notes,
+never verdicts.
+
 Confidence is capped by evidence completeness: an uncaptured CPU series or
 dropped generator iterations cap every verdict at `low`, because "not CPU-bound"
 is part of every other conclusion and dropped iterations mean the generator, not
@@ -801,9 +819,13 @@ takes `/stacks` (when allowed) at the middle of that load, while a load-induced
 hang is still present; `--include-dump` adds a process dump at the same point.
 The dump briefly suspends the process inside the trace window.
 Any process dump additionally requires
-`PERFLAB_DUMP_ACK=i-understand-sensitive-dump`. The `dump` preset takes only the
-process snapshot: it does not warm up, require a load-generator installation,
-run diagnostic traffic, or require the remote data-mutation acknowledgement.
+`PERFLAB_DUMP_ACK=i-understand-sensitive-dump`. The `dump` preset against a
+local lab warms up and replays the scenario's diagnostic load first, then takes
+the dump at the end of that load: the app is recreated in diagnose mode, so a
+dump taken before any traffic would show a fresh, idle process rather than the
+state the scenario builds. Against a remote target, which is never recreated,
+it takes only the process snapshot: no warm-up, no load-generator installation,
+no diagnostic traffic and no remote data-mutation acknowledgement.
 
 A process dump is a copy of process memory, connection strings and tokens
 included, so it never stays in the evidence package. As soon as it is

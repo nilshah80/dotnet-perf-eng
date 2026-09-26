@@ -3,20 +3,22 @@ import { Counter, Trend } from 'k6/metrics';
 import { mixEnabled, pickRequest } from '../../../harness/adapters/loadgen/k6/mix.js';
 import { withPerfBaggage } from '../../../harness/adapters/loadgen/k6/baggage.js';
 
-// eCommerce k6 workload. The endpoints are JWT-protected, so this per-lab script
-// authenticates ONCE in setup() and sends the bearer token on every request.
-// Auth therefore lives in the lab's own workload, not in the shared harness:
-// run.sh (the measurement + observations contract) and the shared default.js are
-// untouched. Keeping login in setup() (not the measured loop) means a protected
-// scenario measures that endpoint, not the login/KDF cost -- which is instead
-// measured directly by the public login scenario (E01).
+// eCommerce k6 workload. The endpoints are JWT-protected; the harness logs in
+// once before traffic (the lab's PERFLAB_LOGIN_PATH) and hands the bearer token
+// to every generator in PERF_HEADERS, so k6, wrk and JMeter authenticate the same
+// way and a protected scenario measures its endpoint, not the login/KDF cost --
+// which the public login scenario (E01) measures directly.
 const baseUrl = __ENV.PERF_BASE_URL || 'http://127.0.0.1:8080';
 const method = (__ENV.PERF_METHOD || 'GET').toUpperCase();
 const path = __ENV.PERF_PATH || '/';
 const body = __ENV.PERF_BODY || '';
 const runId = __ENV.PERF_RUN_ID || 'k6-manual';
-const loginUser = __ENV.PERF_LOGIN_USER || 'user1';
-const loginPassword = __ENV.PERF_LOGIN_PASSWORD || 'Password123!';
+let extraHeaders = {};
+try {
+  extraHeaders = JSON.parse(__ENV.PERF_HEADERS || '{}');
+} catch (e) {
+  throw new Error(`PERF_HEADERS must be a JSON object of header name/value pairs: ${e}`);
+}
 
 // Same counter names the shared k6/run.sh reads for its observations -- the
 // evidence contract every lab's k6 workload must honor.
@@ -40,36 +42,17 @@ export const options = {
   summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(50)', 'p(90)', 'p(99)'],
 };
 
-// Runs once before the load. discardResponseBodies is global, so this one request
-// opts back into a readable body to extract the token.
-export function setup() {
-  const res = http.post(
-    `${baseUrl}/api/auth/login`,
-    JSON.stringify({ username: loginUser, password: loginPassword }),
-    { headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, responseType: 'text' });
-
-  if (res.status !== 200) {
-    throw new Error(`login failed in setup(): status ${res.status} body ${res.body}`);
-  }
-  const token = res.json('token');
-  if (!token) {
-    throw new Error('login response contained no token');
-  }
-  return { token };
-}
-
-export default function (data) {
+export default function () {
   // One request from the PERF_* contract, unless PERF_MIX blends several
-  // endpoints (weighted). The bearer token below applies to every mix request.
+  // endpoints (weighted). The harness-minted bearer token applies to every one.
   let m = method, p = path, b = body;
   if (mixEnabled) { const r = pickRequest(); m = r.method; p = r.path; b = r.body; }
   const sendsBody = m === 'POST' || m === 'PUT' || m === 'PATCH';
   const params = {
-    headers: withPerfBaggage({
+    headers: withPerfBaggage(Object.assign({
       Accept: 'application/json',
       'X-Perf-Run-Id': runId,
-      Authorization: `Bearer ${data.token}`,
-    }, runId),
+    }, extraHeaders), runId),
   };
   if (sendsBody) {
     params.headers['Content-Type'] = 'application/json';

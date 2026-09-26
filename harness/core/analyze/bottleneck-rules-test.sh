@@ -129,6 +129,11 @@ PY
 }
 
 verdict()  { jq -r '.verdict' < "$1"; }
+classify() { # re-classify a fixture directory after editing its evidence
+  PATH="${test_root}/bin:${PATH}" PERFLAB_LAB=scenariolab \
+    bash "${repo}/harness/core/analyze/bottleneck.sh" "$1" > "$1/run.out" 2>&1 \
+    || fail "$(basename "$1"): bottleneck.sh failed: $(cat "$1/run.out")"
+}
 notes()    { jq -r '(.notes // [])[]' < "$1"; }
 
 # 1. The S04 shape: a queue that is DEEP but drains fast. Depth 20 at 2000 rps is
@@ -319,5 +324,237 @@ PATH="${test_root}/bin:${PATH}" PERFLAB_LAB=scenariolab bash "${repo}/harness/co
   || fail "dbshare: bottleneck.sh failed"
 jq -e '.verdict == "dependency-bound-db" and (.reason | test("\\(2\\.2 ms\\) exceeds the median request latency \\(1\\.8 ms\\)"))' "${report}" >/dev/null \
   || fail "DB-share wording lost its decimals: $(jq -r .reason "${report}")"
+
+# --- Generator-host port exhaustion is the generator's limit ----------------
+# P02 churned a new WebSocket per iteration: host TIME_WAIT toward the target
+# reached 10,190 of 16,384 ephemeral ports and new connections failed on the
+# generator. Blaming the target (or calling it overload) would be wrong.
+for peak in 10190 3000; do
+  report="$(build_run "generator-ports-${peak}" 800 0.3 0 "")"
+  dir="$(dirname "$(dirname "${report}")")"
+  mkdir -p "${dir}/dependencies"
+  printf '{"schemaVersion":"generator-ports-v1","host":"127.0.0.1","ephemeralRange":16384,"threshold":4096,"timeWaitBefore":300,"timeWaitAtStart":300,"waitedSeconds":0,"state":"clear"}\n' > "${dir}/analysis/generator-ports.json"
+  printf '{"atEpoch":1,"sequence":1,"captureState":"captured","generatorTimeWait":300}\n{"atEpoch":2,"sequence":2,"captureState":"captured","generatorTimeWait":%s}\n' "${peak}" > "${dir}/dependencies/api-sockets-series.ndjson"
+  classify "${dir}"
+  if [[ "${peak}" == 10190 ]]; then
+    jq -e '.verdict == "generator-limited" and .confidence == "high" and .resources.generatorPorts.exhausted == true
+           and (.reason | test("10190 sockets in TIME_WAIT toward 127.0.0.1"))' "${report}" >/dev/null \
+      || fail "generator port exhaustion was not reported as the generator's limit: $(jq -c '{verdict,reason}' "${report}")"
+  else
+    jq -e '.verdict != "generator-limited" and .resources.generatorPorts.exhausted == false' "${report}" >/dev/null \
+      || fail "normal generator port use was reported as exhaustion"
+  fi
+done
+
+# --- Response classes: client errors are not overload; shedding is by design --
+# E03 over JMeter got HTTP 401 on every request (no token) and was explained as
+# an overloaded system; P04's explicit 429 backpressure read the same way.
+responses() { # responses <dir> <code:count>...  -> request_duration.json with cumulative counts
+  local dir="$1"; shift
+  "${PYTHON}" - "${dir}" "$@" <<'PYRESP'
+import json, sys
+rows = []
+for spec in sys.argv[2:]:
+    code, count = spec.split(":")
+    rows.append({"metric": {"__name__": "http_server_request_duration_seconds_count", "http_route": "/api/x",
+                            "http_response_status_code": code},
+                 "values": [[1700000000, "0"], [1700000060, count]]})
+json.dump({"status": "success", "data": {"resultType": "matrix", "result": rows}},
+          open(sys.argv[1] + "/telemetry/metrics/request_duration.json", "w"))
+PYRESP
+}
+report="$(build_run client-errors 20 0.1 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+responses "${dir}" 401:1237
+jq '(.observations[] | select(.name == "http.error_rate") | .value) = 1' "${dir}/facts.json" > "${dir}/facts.json.tmp" && mv "${dir}/facts.json.tmp" "${dir}/facts.json"
+classify "${dir}"
+jq -e '.verdict == "client-errors" and .confidence == "high" and (.reason | test("HTTP 401 on 100% of 1237 requests"))
+       and all(.notes[]; contains("OVERLOADED") | not)' "${report}" >/dev/null \
+  || fail "a run of HTTP 401s was not reported as an invalid workload: $(jq -c '{verdict,reason,notes}' "${report}")"
+# A status series that first appears inside the window counts from zero.
+report="$(build_run late-401 20 0.1 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+responses "${dir}" 200:100
+jq '.data.result += [{"metric":{"__name__":"http_server_request_duration_seconds_count","http_route":"/api/x","http_response_status_code":"401"},"values":[[1700000030,"5000"]]}]' \
+  "${dir}/telemetry/metrics/request_duration.json" > "${dir}/rd.json" && mv "${dir}/rd.json" "${dir}/telemetry/metrics/request_duration.json"
+classify "${dir}"
+jq -e '.resources.responses.clientErrors == 5000 and .verdict == "client-errors"' "${report}" >/dev/null \
+  || fail "a status series that appeared mid-window was not counted: $(jq -c '.resources.responses' "${report}")"
+report="$(build_run shedding 13000 7.6 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+responses "${dir}" 202:4000 429:776000
+jq '(.observations[] | select(.name == "http.error_rate") | .value) = 0.995' "${dir}/facts.json" > "${dir}/facts.json.tmp" && mv "${dir}/facts.json.tmp" "${dir}/facts.json"
+classify "${dir}"
+jq -e '.verdict == "cpu-bound" and any(.notes[]; test("shed load explicitly")) and all(.notes[]; contains("OVERLOADED") | not)' "${report}" >/dev/null \
+  || fail "explicit 429 backpressure was not reported as load shedding: $(jq -c '{verdict,notes}' "${report}")"
+
+# --- Database server, pool cause, waiting, allocation, cache, exceptions -----
+observe() { # observe <dir> <name> <value>: set (or add) one facts observation
+  jq --arg n "$2" --argjson v "$3" 'if any(.observations[]; .name == $n) then (.observations[] | select(.name == $n) | .value) = $v
+    else .observations += [{name: $n, value: $v}] end' "$1/facts.json" > "$1/facts.json.tmp" && mv "$1/facts.json.tmp" "$1/facts.json"
+}
+pool() { # pool <dir> <used> <max> <pending> <timeouts-first> <timeouts-last> <created> <executing> [idle] [created-first]
+  "${PYTHON}" - "$@" <<'PYPOOL'
+import json, sys
+d, used, mx, pend, t0, t1, made, execing = sys.argv[1:9]
+idle = sys.argv[9] if len(sys.argv) > 9 else "0"
+made0 = sys.argv[10] if len(sys.argv) > 10 else made
+name = "Host=postgres;Maximum Pool Size=" + mx
+def row(metric, first, last=None, **labels):
+    return {"metric": dict({"__name__": metric, "db_client_connection_pool_name": name}, **labels),
+            "values": [[1700000000, first], [1700000060, last if last is not None else first]]}
+rows = [row("db_client_connection_count", used, db_client_connection_state="used"),
+        row("db_client_connection_count", idle, db_client_connection_state="idle"),
+        row("db_client_connection_max", mx), row("db_client_connection_npgsql_pending_requests", "0", pend),
+        row("db_client_connection_npgsql_timeouts_total", t0, t1), row("db_client_connection_npgsql_create_time_seconds_count", made0, made),
+        row("db_client_operation_npgsql_executing", execing)]
+json.dump({"status": "success", "data": {"resultType": "matrix", "result": rows}}, open(d + "/telemetry/metrics/database_pool_metrics.json", "w"))
+PYPOOL
+}
+
+# S03/S23: 3.5 ms of CPU in a 5 s request, nothing saturated -- waiting.
+report="$(build_run waiting 18 0.1 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+observe "${dir}" http.latency.p50 5277; observe "${dir}" efficiency.cpu_ms_per_request 3.5
+classify "${dir}"
+jq -e '.verdict == "wait-bound" and .confidence == "medium" and (.reason | test("spent waiting, not computing"))' "${report}" >/dev/null \
+  || fail "a serialized wait was not reported as wait-bound: $(jq -c '{verdict,reason}' "${report}")"
+[[ "$(verdict "$(build_run fast 18 0.1 0 "")")" != "wait-bound" ]] || fail "a 12 ms request was called wait-bound"
+
+# S27: deadlocks outrank the DB time they cause.
+report="$(build_run deadlock 40 0.5 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+mkdir -p "${dir}/dependencies"
+printf '{"scope":"measured-window","xactCommit":465,"xactRollback":367,"deadlocks":322}\n' > "${dir}/dependencies/postgres-deadlocks-delta.json"
+observe "${dir}" http.latency.p50 1022; observe "${dir}" efficiency.db_ms_per_request 2570; observe "${dir}" http.requests.total 383
+classify "${dir}"
+jq -e '.verdict == "db-deadlock" and (.reason | test("322 PostgreSQL deadlock")) and .resources.dbServer.deadlocked == true' "${report}" >/dev/null \
+  || fail "deadlocks were not the verdict: $(jq -c '{verdict,reason}' "${report}")"
+
+# One deadlock in 1,000 transactions is a note, not the bottleneck.
+report="$(build_run stray-deadlock 40 0.5 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+mkdir -p "${dir}/dependencies"
+printf '{"scope":"measured-window","xactCommit":999,"xactRollback":1,"deadlocks":1}\n' > "${dir}/dependencies/postgres-deadlocks-delta.json"
+classify "${dir}"
+jq -e '.verdict != "db-deadlock" and any(.notes[]; test("1 PostgreSQL deadlock\\(s\\) in the measured window \\(0.10% of 1000 transactions\\)"))' "${report}" >/dev/null \
+  || fail "a stray deadlock became the verdict: $(jq -c '{verdict,notes}' "${report}")"
+
+# S10/E08: sessions waiting on a row lock behind an idle-in-transaction holder
+# saturate the pool; the lock is the finding, the pool its consequence.
+report="$(build_run rowlock 40 0.5 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+mkdir -p "${dir}/dependencies"
+pool "${dir}" 20 20 44 0 0 20 19
+printf '%s\n' 'application_name,state,wait_event_type,wait_event,connections,blocked' 'perflab-api,active,Lock,transactionid,18,18' \
+  'perflab-api,active,,,1,0' 'perflab-api,idle in transaction,Client,ClientRead,1,0' 'psql,active,,,1,0' > "${dir}/dependencies/postgres-connections-midload.csv"
+printf '%s\n' 'pid,application_name,state,xact_age_ms,waiters,last_query' '412,perflab-api,idle in transaction,245,18,"UPDATE products SET stock = $1 WHERE id = $2"' \
+  > "${dir}/dependencies/postgres-lock-holders-midload.csv"
+classify "${dir}"
+jq -e '.verdict == "db-lock-contention" and (.reason | test("18 of 19 active database sessions wait on a row lock"))
+       and (.reason | test("idle in transaction for 245 ms")) and (.saturatedResources | index("dbPool"))' "${report}" >/dev/null \
+  || fail "row-lock contention was not reported as the cause of the pool saturation: $(jq -c '{verdict,reason}' "${report}")"
+
+# S09: a leaked pool reads used 0/20; the timeouts and created count explain it.
+report="$(build_run leak 40 0.5 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+pool "${dir}" 0 20 64 48 752 20 0 1
+classify "${dir}"
+jq -e '.verdict == "db-pool-saturated" and (.reason | test("all 20 connections were created before the window, none since, and at most 0 in use and 1 idle"))
+       and (.reason | test("704 connection acquisition timeout"))' "${report}" >/dev/null \
+  || fail "a leaked pool was explained by its used gauge: $(jq -r '.reason' "${report}")"
+
+# Normal churn re-creates connections in the window: no leak is claimed.
+report="$(build_run churn 40 0.5 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+pool "${dir}" 5 20 3 0 0 540 5 2 500
+classify "${dir}"
+! jq -e '.reason | test("held outside the pool")' "${report}" >/dev/null || fail "connection churn was called a leak: $(jq -r '.reason' "${report}")"
+
+# S21/S22: connections leased across non-database work.
+report="$(build_run held 40 0.5 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+pool "${dir}" 2 2 46 0 1504 2 0
+classify "${dir}"
+notes "${report}" | grep -q "held outside database commands: 2 leased but at most 0 executing" \
+  || fail "a lease held across an await was not named: $(notes "${report}")"
+
+# P08/S05: allocation per request, gated on a real allocation rate.
+report="$(build_run allocating 300 1.0 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+observe "${dir}" efficiency.alloc_bytes_per_request 4550000
+classify "${dir}"
+notes "${report}" | grep -q "allocation pressure: 4.3 MB allocated per request (peak 381 MB/s)" \
+  || fail "allocation pressure was not noted: $(notes "${report}")"
+jq '.data.result[0].values |= map(.[1] = "12000000")' "${dir}/telemetry/metrics/gc_allocation_rate.json" > "${dir}/rate.json" \
+  && mv "${dir}/rate.json" "${dir}/telemetry/metrics/gc_allocation_rate.json"
+classify "${dir}"
+! notes "${report}" | grep -q "allocation pressure" || fail "12 MB/s was called allocation pressure"
+
+# S15/S12/S14: cache health and connection churn.
+report="$(build_run cache 865 1.0 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+mkdir -p "${dir}/dependencies"
+printf 'keyspace_hits:0\r\nkeyspace_misses:51906\r\nevicted_keys:51907\r\ntotal_connections_received:51910\r\ndb0:keys=4645,expires=0,avg_ttl=0\r\ndb0_distrib_strings_sizes:32K=4645\r\n' \
+  > "${dir}/dependencies/redis-info.txt"
+printf '%s\n' 'queryid,calls,rows,total_exec_ms,mean_exec_ms,shared_blks_hit,shared_blks_read,temp_blks_written,query' \
+  '1,51906,51906,90000.5,1.73,1,0,0,"SELECT p.id, p.name FROM products AS p WHERE p.category_id = $1"' \
+  '2,1,2,2.62,2.62,498,0,0,"COPY (SELECT application_name FROM pg_stat_activity) TO STDOUT WITH CSV HEADER"' > "${dir}/dependencies/postgres-statements.csv"
+observe "${dir}" http.requests.total 51906
+classify "${dir}"
+for expected in "the Redis cache is ineffective: 0 hits against 51906 misses" "Redis evicted 51907 keys while none of its 4645 keys has a TTL" \
+    "51910 new Redis connections for 51906 requests (1.00 per request)"; do
+  notes "${report}" | grep -qF "${expected}" || fail "missing dependency-health note '${expected}': $(notes "${report}")"
+done
+# Eviction thrash is not a stampede: no key expired.
+! notes "${report}" | grep -q "stampede" || fail "eviction was called a stampede"
+# S12: 2,058 misses for 13 expirations, each refreshed -- a stampede. Plain
+# cache-aside (one read per miss, one miss per expiry) is not.
+stampede() { # stampede <name> <hits> <misses> <expired> -> report
+  local report dir; report="$(build_run "$1" 2296 1.0 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+  mkdir -p "${dir}/dependencies"
+  printf 'keyspace_hits:%s\r\nkeyspace_misses:%s\r\nexpired_keys:%s\r\nevicted_keys:0\r\n' "$2" "$3" "$4" > "${dir}/dependencies/redis-info.txt"
+  printf '%s\n' 'queryid,calls,rows,total_exec_ms,mean_exec_ms,shared_blks_hit,shared_blks_read,temp_blks_written,query' \
+    "1,$3,$3,900.5,0.4,1,0,0,\"SELECT p.id FROM products AS p WHERE p.category_id = \$1\"" > "${dir}/dependencies/postgres-statements.csv"
+  classify "${dir}"; printf '%s' "${report}"
+}
+notes "$(stampede stampede 136638 2058 13)" | grep -q "cache stampede: 2058 misses for 13 expired keys (~158 per expiry)" \
+  || fail "a stampede was not named"
+! notes "$(stampede cache-aside 9000 1000 1000)" | grep -q "stampede" || fail "plain cache-aside was called a stampede"
+
+# P11: ~500 exceptions per request.
+report="$(build_run exceptions 8 0.5 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+printf '{"status":"success","data":{"resultType":"matrix","result":[{"metric":{"error_type":"System.InvalidOperationException"},"values":[[1700000000,"4000"]]},{"metric":{"error_type":"System.FormatException"},"values":[[1700000000,"20"]]}]}}\n' \
+  > "${dir}/telemetry/metrics/exceptions.json"
+classify "${dir}"
+notes "${report}" | grep -q "exception pressure: ~502 exceptions per request (peak 4020/s, mostly System.InvalidOperationException)" \
+  || fail "exception pressure was not noted: $(notes "${report}")"
+
+# S26/S13: dependency time from span metrics, by the system a client span calls.
+spans() { # spans <dir> <file> <server> <kind:system-label=value:rate>...
+  "${PYTHON}" - "$@" <<'PYSPANS'
+import json, sys
+d, name, server = sys.argv[1:4]
+rows = [{"metric": {"span_kind": "SPAN_KIND_SERVER"}, "values": [[1700000000 + i * 5, server] for i in range(12)]}]
+for spec in sys.argv[4:]:
+    kind, label, rate = spec.split(":")
+    key, value = label.split("=")
+    rows.append({"metric": {"span_kind": kind, key: value}, "values": [[1700000000 + i * 5, rate] for i in range(12)]})
+json.dump({"status": "success", "data": {"resultType": "matrix", "result": rows}}, open(d + "/telemetry/metrics/" + name + ".json", "w"))
+PYSPANS
+}
+report="$(build_run upstream-time 1217 0.4 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+observe "${dir}" http.latency.p50 104; observe "${dir}" efficiency.cpu_ms_per_request 0.1
+spans "${dir}" dependency_time 126 SPAN_KIND_CLIENT:server_address=upstream:122 SPAN_KIND_CLIENT:server_address=lgtm:40 SPAN_KIND_CLIENT:db_system=postgresql:120
+spans "${dir}" dependency_calls 1217 SPAN_KIND_CLIENT:server_address=upstream:1217
+mkdir -p "${dir}/environment/measurement-start"
+printf '[{"telemetryExporterAuthority":"lgtm:4318"}]\n' > "${dir}/environment/measurement-start/resource-limits.json"
+classify "${dir}"
+jq -e '.verdict == "dependency-bound-http" and (.reason | test("97% of server time is spent in HTTP upstream upstream calls \\(1.0 per request\\)"))
+       and .resources.dependency.system == "http:upstream"' "${report}" >/dev/null \
+  || fail "an HTTP upstream holding the request was not named: $(jq -c '{verdict,reason,dependency:.resources.dependency}' "${report}")"
+report="$(build_run redis-time 980 7.8 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+spans "${dir}" dependency_time 50 SPAN_KIND_CLIENT:db_system=redis:40
+spans "${dir}" dependency_calls 980 SPAN_KIND_CLIENT:db_system=redis:98000
+classify "${dir}"
+jq -e '.verdict == "cpu-bound" and any(.notes[]; test("80% of server time is spent in redis calls \\(100.0 per request\\), though cpu-bound ranks higher"))' "${report}" >/dev/null \
+  || fail "dependency time behind a CPU verdict was not noted: $(jq -c '{verdict,notes}' "${report}")"
+
+# E01: a 12 s window read against a 20 s rate lookback is not classified from rates.
+report="$(build_run short-window 300 7.8 0 "")"; dir="$(dirname "$(dirname "${report}")")"
+[[ "$(verdict "${report}")" == "cpu-bound" ]] || fail "the short-window fixture should be cpu-bound before the guard"
+printf '{"rateWindowSeconds":20,"measuredSeconds":12,"established":false}\n' > "${dir}/telemetry/rate-window.json"
+classify "${dir}"
+jq -e '.verdict != "cpu-bound" and .verdict != "wait-bound" and .resources.cpu.utilizationPct == null and .resources.gc.pauseFractionPeak == null
+       and any(.notes[]; test("measured window \\(12 s\\) is shorter than the 20 s rate window"))' "${report}" >/dev/null \
+  || fail "rates reaching before a short window were classified: $(jq -c '{verdict,notes}' "${report}")"
 
 echo "bottleneck classifier rule tests passed"

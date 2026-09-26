@@ -11,12 +11,13 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${here}/../lib/common.sh"
 
-run_arg="${1:?update-baseline.sh <run-dir|facts.json|stats.json> [--scenario ID] [--allow-partial]}"; shift || true
-scenario_override=""; allow_partial="false"
+run_arg="${1:?update-baseline.sh <run-dir|facts.json|stats.json> [--scenario ID] [--allow-partial] [--allow-unsteady]}"; shift || true
+scenario_override=""; allow_partial="false"; allow_unsteady="false"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --scenario) scenario_override="${2:?--scenario needs an id}"; shift 2 ;;
     --allow-partial) allow_partial="true"; shift ;;
+    --allow-unsteady) allow_unsteady="true"; shift ;;
     *) echo "Unknown option '$1'." >&2; exit 2 ;;
   esac
 done
@@ -39,6 +40,17 @@ if [[ "${src_status}" == "unknown" && -d "${run_arg}" && -s "${run_arg}/manifest
 fi
 if [[ "${src_status}" != "captured" && "${allow_partial}" != "true" ]]; then
   echo "update-baseline: refusing to promote a '${src_status}' (not 'captured') package as a baseline. Promote a captured run, or pass --allow-partial to override." >&2
+  exit 2
+fi
+
+# A baseline measured while the target was still warming up (or never settled)
+# biases every later comparison: E11's 30 s repetitions read 15-19% below the
+# steady 60 s ones. A source that did not settle is refused unless overridden.
+src_steady="$(jqd -r '.steadyState.verdict // "unknown"' < "${src}" 2>/dev/null || echo unknown)"
+# Only a measurement that did not settle is refused. A profile that varies the
+# load by design (ramp, spike, stress, capacity) is not-applicable, not unsteady.
+if [[ "${src_steady}" =~ ^(warming|unsteady|insufficient-data)$ && "${allow_unsteady}" != "true" ]]; then
+  echo "update-baseline: refusing to promote a source whose steady-state verdict is '${src_steady}': the measurement did not settle. Measure long enough to settle (longer warm-up or duration), or pass --allow-unsteady to override." >&2
   exit 2
 fi
 

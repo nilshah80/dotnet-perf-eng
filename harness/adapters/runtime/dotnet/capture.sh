@@ -401,31 +401,15 @@ performance_stream_copy_limit() {
 }
 
 pull() {  # pull <dest-file> <curl-arg>...
-  local dest="$1"; shift
-  local budget limit copy_rc curl_rc statuses
-  budget="$(diagnostic_download_budget "${dest}")"
-  limit=$((budget + 1))
-  rm -f "${dest}.tmp"
-  set +o pipefail
-  monitor_curl -fsS --max-filesize "${limit}" "$@" | performance_stream_copy_limit "${dest}" "${budget}"
-  statuses=("${PIPESTATUS[@]}")
-  curl_rc="${statuses[0]:-1}"
-  copy_rc="${statuses[1]:-1}"
-  set -o pipefail
-  if (( copy_rc == 2 )); then
-    echo "Diagnostic artifact ${dest##*/} reached more than ${budget} bytes, exceeding the ${budget}-byte budget; it was discarded rather than left in the package." >&2
+  try_pull "$@" || {
+    echo "Diagnostic fetch failed for ${target} (${1##*/})$(monitor_failure "$1" | sed 's/^/: /'); the capture is incomplete." >&2
     exit 1
-  fi
-  if (( copy_rc != 0 )); then
-    rm -f "${dest}.tmp" "${dest}"
-    echo "Diagnostic fetch failed for ${target} (${dest##*/}); the capture is incomplete." >&2
-    exit 1
-  fi
-  if (( curl_rc != 0 && curl_rc != 18 && curl_rc != 23 && curl_rc != 63 )); then
-    rm -f "${dest}"
-    echo "Diagnostic fetch failed for ${target} (${dest##*/}); the capture is incomplete." >&2
-    exit 1
-  fi
+  }
+}
+
+monitor_failure() { # monitor_failure <dest-file> -> the recorded failure, consumed
+  [[ -s "$1.failure" ]] || return 0
+  cat "$1.failure"; rm -f "$1.failure"
 }
 
 diagnostic_download_budget() { # dest-file
@@ -444,18 +428,30 @@ diagnostic_download_budget() { # dest-file
   printf '%s' "${budget}"
 }
 
-try_pull() { # try_pull <dest-file> <curl-arg>...
+# try_pull <dest-file> <curl-arg>... -- fetches into dest within its budget. A
+# failed request leaves <dest>.failure naming the HTTP status and dotnet-monitor's
+# ProblemDetails title/detail: `curl -f` used to discard that body, so a /stacks
+# 500 was recorded only as "request failed" and its cause was unrecoverable.
+try_pull() {
   local dest="$1"; shift
-  local budget limit copy_rc curl_rc statuses
+  local budget limit copy_rc curl_rc statuses status detail
   budget="$(diagnostic_download_budget "${dest}")"
   limit=$((budget + 1))
-  rm -f "${dest}.tmp"
+  rm -f "${dest}.tmp" "${dest}.headers" "${dest}.failure"
   set +o pipefail
-  monitor_curl -fsS --max-filesize "${limit}" "$@" | performance_stream_copy_limit "${dest}" "${budget}"
+  monitor_curl -sS -D "${dest}.headers" --max-filesize "${limit}" "$@" | performance_stream_copy_limit "${dest}" "${budget}"
   statuses=("${PIPESTATUS[@]}")
   curl_rc="${statuses[0]:-1}"
   copy_rc="${statuses[1]:-1}"
   set -o pipefail
+  status="$(awk 'toupper($1) ~ /^HTTP\// { code = $2 } END { print code }' "${dest}.headers" 2>/dev/null || true)"
+  rm -f "${dest}.headers"
+  if [[ "${status}" =~ ^[0-9]+$ ]] && (( status >= 400 )); then
+    detail="$(jqd -r '[.title, .detail] | map(select(. != null and . != "")) | join(": ")' < "${dest}" 2>/dev/null | tr '\r\n' '  ' | head -c 300 || true)"
+    printf 'HTTP %s%s\n' "${status}" "${detail:+: ${detail}}" > "${dest}.failure"
+    rm -f "${dest}" "${dest}.tmp"
+    return 1
+  fi
   if (( copy_rc == 2 )); then
     echo "Diagnostic artifact ${dest##*/} reached more than ${budget} bytes, exceeding the ${budget}-byte budget; it was discarded rather than left in the package." >&2
     return 1
@@ -525,7 +521,7 @@ if [[ -n "${campaign_preset}" ]]; then
       campaign_successes=$((campaign_successes + 1))
     else
       completed="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      write_campaign_capture "${stage_id}" "${sequence}" "${requested}" "${requested}" failed "${started}" "${completed}" "dotnet-monitor ${endpoint} request failed" ""
+      write_campaign_capture "${stage_id}" "${sequence}" "${requested}" "${requested}" failed "${started}" "${completed}" "dotnet-monitor ${endpoint} request failed$(monitor_failure "${stage_dir}/${filename}" | sed 's/^/ (/; s/$/)/')" ""
       campaign_failures=$((campaign_failures + 1))
       echo "Campaign stage ${stage_id} failed; continuing so independent evidence is retained." >&2
     fi
@@ -549,12 +545,12 @@ if [[ -n "${campaign_preset}" ]]; then
         --data-urlencode "durationSeconds=${duration_seconds}" --data-urlencode "profile=cpu" "${diagnostics_url}/trace" & trace_pid=$!
       sleep "$(( duration_seconds / 2 > 0 ? duration_seconds / 2 : 1 ))"
       "${mid_load_hook}"
-      if wait "${trace_pid}"; then trace_ok=1; else reason="dotnet-monitor trace request failed"; fi
+      if wait "${trace_pid}"; then trace_ok=1; else reason="dotnet-monitor trace request failed$(monitor_failure "${stage_dir}/cpu.nettrace" | sed 's/^/ (/; s/$/)/')"; fi
     elif try_pull "${stage_dir}/cpu.nettrace" --get --data-urlencode "uid=${runtime_uid}" \
       --data-urlencode "durationSeconds=${duration_seconds}" --data-urlencode "profile=cpu" "${diagnostics_url}/trace"; then
       trace_ok=1
     else
-      reason="dotnet-monitor trace request failed"
+      reason="dotnet-monitor trace request failed$(monitor_failure "${stage_dir}/cpu.nettrace" | sed 's/^/ (/; s/$/)/')"
     fi
     if wait "${load_pid}"; then
       load_ok=1; campaign_load_state="captured"
@@ -583,7 +579,10 @@ if [[ -n "${campaign_preset}" ]]; then
 
   # The warm-up and diagnostic generator output live below runtime/campaign-load,
   # never in benchmark/, so measurement facts and observations remain immutable.
-  if [[ "${campaign_preset}" != "dump" ]]; then
+  # Only a remote dump (a process never recreated) skips the load; the core
+  # capture-runtime.sh decides and exports it.
+  dump_only="${PERFLAB_CAMPAIGN_DUMP_ONLY:-0}"
+  if [[ "${dump_only}" == "0" ]]; then
     export PERFLAB_WARMUP_SECONDS="${PERFLAB_WARMUP_SECONDS:-5}"
     if loadgen_warmup "${campaign_load_dir}"; then
       warmup_state="captured"
@@ -623,6 +622,10 @@ if [[ -n "${campaign_preset}" ]]; then
       campaign_trace 1 hang_snapshots
       ;;
     dump)
+      # The dump follows the load, so it holds what the scenario built up.
+      if [[ "${dump_only}" == "0" ]]; then
+        if run_load; then campaign_load_state="captured"; else campaign_load_state="failed"; campaign_load_reason="diagnostic load generator failed"; campaign_failures=$((campaign_failures + 1)); fi
+      fi
       campaign_snapshot dump 1 dump process.dmp dump --data-urlencode "type=WithHeap"
       ;;
   esac

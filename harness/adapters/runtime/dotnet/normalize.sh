@@ -111,6 +111,13 @@ while IFS= read -r trace_file; do
     dotnet-trace convert "/artifacts/${rel}" --format Speedscope \
     --output "/artifacts/${rel%/*}/${name}" </dev/null; then
     write_capture_normalization "${trace_file}" captured "${normalized}" ""
+    # The readable answer beside the flame graph: the methods that held the CPU
+    # (dotnet-trace's CPU_TIME attributed to its frame), self and inclusive.
+    if trace_python="$(perflab_python)"; then
+      "${trace_python}" "${harness_core_dir}/analyze/diff-speedscope.py" --report "${normalized}" --top 25 \
+        > "${artifact_dir}/analysis/runtime/$(basename "$(dirname "${trace_file}")")-${name}-trace-top.txt" \
+        || echo "WARNING: the on-CPU method report for ${trace_file} failed; the Speedscope file is still valid." >&2
+    fi
   else
     echo "Failed to normalize ${trace_file}; continuing with other campaign captures." >&2
     write_capture_normalization "${trace_file}" partial "" "dotnet-trace conversion failed"

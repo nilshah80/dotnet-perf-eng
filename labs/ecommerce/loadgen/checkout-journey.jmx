@@ -95,6 +95,21 @@ if (sampler != null && "op::login".equals(sampler.getName())) {
           </collectionProp>
         </HeaderManager>
         <hashTree/>
+        <!-- Arrival pacing sits OUTSIDE the journey transaction: with includeTimers
+             it would count the wait for the next start as journey time (JMeter
+             journeys read ~1 s against k6's 283 ms). Think time stays inside. -->
+        <TestAction guiclass="TestActionGui" testclass="TestAction" testname="journey-arrival-pacing" enabled="true">
+          <intProp name="ActionProcessor.action">1</intProp>
+          <intProp name="ActionProcessor.target">0</intProp>
+          <stringProp name="ActionProcessor.duration">0</stringProp>
+        </TestAction>
+        <hashTree>
+          <ConstantThroughputTimer guiclass="TestBeanGUI" testclass="ConstantThroughputTimer" testname="Stable v1 journey arrival pacing" enabled="true">
+            <stringProp name="throughput">${__groovy(((props.get('perf.profile') ?: '') ==~ /open|arrival|capacity|knee/) ? ((props.get('perf.target_rps') ?: '1') as double) * 60 : 600000000)}</stringProp>
+            <intProp name="calcMode">4</intProp>
+          </ConstantThroughputTimer>
+          <hashTree/>
+        </hashTree>
         <TransactionController guiclass="TransactionControllerGui" testclass="TransactionController" testname="journey::checkout" enabled="true">
           <boolProp name="TransactionController.includeTimers">true</boolProp>
           <boolProp name="TransactionController.parent">true</boolProp>
@@ -124,11 +139,6 @@ if (sampler != null && "op::login".equals(sampler.getName())) {
             </elementProp>
           </HTTPSamplerProxy>
           <hashTree>
-            <ConstantThroughputTimer guiclass="TestBeanGUI" testclass="ConstantThroughputTimer" testname="Stable v1 journey arrival pacing" enabled="true">
-              <stringProp name="throughput">${__groovy(((props.get('perf.profile') ?: '') ==~ /open|arrival|capacity|knee/) ? ((props.get('perf.target_rps') ?: '1') as double) * 60 : 600000000)}</stringProp>
-              <intProp name="calcMode">4</intProp>
-            </ConstantThroughputTimer>
-            <hashTree/>
             <JSONPostProcessor guiclass="JSONPostProcessorGui" testclass="JSONPostProcessor" testname="extract-token" enabled="true">
               <stringProp name="JSONPostProcessor.referenceNames">perf.token</stringProp>
               <stringProp name="JSONPostProcessor.jsonPathExprs">$.token</stringProp>

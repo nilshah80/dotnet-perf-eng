@@ -44,6 +44,9 @@ chmod +x "${test_root}/bin/docker"
 
 spike_start=1800000000
 break_start=1800001000
+capacity_start=1800002000
+transport_start=1800003000
+fault_start=1800004000
 # Absolute evaluation time -> {rps, p99 (ms), bad (5xx/s)}. Unlisted times answer
 # the default (1000 rps, 20 ms, no errors).
 cat > "${test_root}/values.json" <<JSON
@@ -55,7 +58,15 @@ cat > "${test_root}/values.json" <<JSON
   "$((break_start + 15))": {"rps": 1000, "p99": 10,  "bad": 0},
   "$((break_start + 30))": {"rps": 2000, "p99": 20,  "bad": 0},
   "$((break_start + 45))": {"rps": 2050, "p99": 80,  "bad": 102.5},
-  "$((break_start + 60))": {"rps": 1900, "p99": 90,  "bad": 0}
+  "$((break_start + 60))": {"rps": 1900, "p99": 90,  "bad": 0},
+  "$((capacity_start + 30))": {"rps": 10, "p99": 12, "bad": 0},
+  "$((capacity_start + 60))": {"rps": 29, "p99": 14, "bad": 0},
+  "$((transport_start + 30))": {"rps": 900, "p99": 8, "bad": 0, "sent": 30000, "failed": 0},
+  "$((transport_start + 60))": {"rps": 500, "p99": 9, "bad": 0, "sent": 50000, "failed": 20000},
+  "$((fault_start + 20))": {"rps": 500, "p99": 20, "bad": 0},
+  "$((fault_start + 28))": {"rps": 300, "p99": 900, "bad": 30},
+  "$((fault_start + 38))": {"rps": 480, "p99": 300, "bad": 0},
+  "$((fault_start + 43))": {"rps": 500, "p99": 22, "bad": 0}
 }
 JSON
 cat > "${test_root}/backend.py" <<'PY'
@@ -67,7 +78,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         promql = query.get("query", [""])[0]
         at = query.get("time", ["0"])[0].split(".")[0]
         row = values.get(at, {"rps": 1000, "p99": 20, "bad": 0})
-        if "histogram_quantile" in promql:
+        if "k6_http_reqs_total" in promql:
+            # k6 remote-write is optional: no row means it was not enabled.
+            if "sent" not in row:
+                body = {"status": "success", "data": {"resultType": "vector", "result": []}}
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            value = row["failed"] if 'status="0"' in promql else row["sent"]
+        elif "histogram_quantile" in promql:
             value = row["p99"]
         elif "http_response_status_code" in promql:
             value = row["bad"]
@@ -106,11 +129,15 @@ sed -e "s|^PERFLAB_PROMETHEUS_URL=.*|PERFLAB_PROMETHEUS_URL=\"${base}\"|" \
 grep -q "^PERFLAB_PROMETHEUS_URL=\"${base}\"$" "${lab_config}" \
   || fail "PERFLAB_PROMETHEUS_URL was not redirected to the fixture backend"
 
-package() { # package <dir> <profile> <start> <stages-json>
+package() { # package <dir> <profile> <start> <stages-json> [ramping-arrival-rate]
   mkdir -p "$1/benchmark"
   printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"E06","workload":{"profile":"%s"},"measurementStartedEpoch":%s,"measurementEndedEpoch":%s,"target":"local"}\n' \
     "$(basename "$1")" "$(basename "$1")" "$2" "$3" "$(( $3 + 60 ))" > "$1/manifest.json"
-  printf '{"scenarios":{"measure":{"executor":"ramping-vus","startVUs":0,"stages":%s}}}\n' "$4" > "$1/benchmark/k6-profile.json"
+  if [[ "${5:-}" == "ramping-arrival-rate" ]]; then
+    printf '{"scenarios":{"measure":{"executor":"ramping-arrival-rate","startRate":1,"stages":%s}}}\n' "$4" > "$1/benchmark/k6-profile.json"
+  else
+    printf '{"scenarios":{"measure":{"executor":"ramping-vus","startVUs":0,"stages":%s}}}\n' "$4" > "$1/benchmark/k6-profile.json"
+  fi
 }
 run() { # run <dir>
   PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${lab_config}" \
@@ -148,6 +175,54 @@ jq -e '.levels.scaledUpToTarget == 64 and .levels.plateauTarget == 256' "${repor
   || fail "throughput stopped following the load above 64 VUs (2,000 -> 2,050 rps at 4x the VUs): $(jq -c .levels "${report}")"
 jq -e '.stages[3].target == 160 and .stages[3].judged == true' "${report}" >/dev/null \
   || fail "the ramp-down stage should still be reported"
+
+# --- an arrival ramp is judged against its linear average --------------------
+# S08 and P07: a ramp from 1 to 20 req/s delivers about 10.5, not 20. Judging it
+# against the end target reported a fully delivered ramp as failing.
+capacity="${test_root}/capacity"
+package "${capacity}" capacity "${capacity_start}" '[{"duration":"30s","target":20},{"duration":"30s","target":40}]' ramping-arrival-rate
+run "${capacity}"
+report="${capacity}/analysis/stages.json"
+jq -e '.stages[0].expectedRate == 10.5 and .stages[0].healthy == true and .stages[1].expectedRate == 30 and .stages[1].healthy == true
+       and .levels.firstFailingTarget == null' "${report}" >/dev/null \
+  || fail "a fully delivered arrival ramp was not judged against its average: $(jq -c '[.stages[] | {expectedRate,servedRps,healthy,reasons}]' "${report}")"
+
+# --- client transport errors fail a stage the server never saw ---------------
+# P05: 221,657 connections were dropped before the application, so the server
+# histogram showed a healthy stage while 99% of requests failed.
+transport="${test_root}/transport"
+package "${transport}" stress "${transport_start}" '[{"duration":"30s","target":96},{"duration":"30s","target":384}]'
+run "${transport}"
+report="${transport}/analysis/stages.json"
+jq -e '.stages[0].healthy == true and .stages[0].transportErrorRatio == 0
+       and .stages[1].healthy == false and (.stages[1].reasons | test("client transport errors 0.400"))
+       and .levels.firstFailingTarget == 384' "${report}" >/dev/null \
+  || fail "client transport errors did not fail the stage: $(jq -c '[.stages[] | {transportErrorRatio,healthy,reasons}]' "${report}")"
+jq -e '[.stages[] | .transportErrorRatio] == [null, null, null, null]' "${brk}/analysis/stages.json" >/dev/null \
+  || fail "a run without k6 remote-write invented a transport error ratio"
+
+# --- a fault run reports its outage and recovery -------------------------------
+# S22 stopped Postgres for 8 s and the package said only faultApplied/Restored.
+fault="${test_root}/fault"
+package "${fault}" steady "${fault_start}" '[]'
+"${PYTHON}" - "${fault}/benchmark/fault-proof.json" "${fault_start}" <<'PYFAULT'
+import datetime, json, sys
+iso = lambda t: datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+start = int(sys.argv[2])
+json.dump({"action": "stop", "service": "postgres", "applied": True, "restored": True,
+           "appliedAt": iso(start + 20), "restoredAt": iso(start + 28)}, open(sys.argv[1], "w"))
+PYFAULT
+run "${fault}"
+jq -e '.captureState == "captured" and .dependency == "postgres" and .baseline.p99Ms == 20 and .outage.p99Ms == 900
+       and .outage.errorRatio == 0.1 and .degraded == true and .recovered == true and .recoverySeconds == 15' "${fault}/analysis/fault.json" >/dev/null \
+  || fail "the fault outcome is wrong: $(cat "${fault}/analysis/fault.json")"
+jq -e '.verdict == "not-applicable"' "${fault}/analysis/stages.json" >/dev/null || fail "a steady fault run was given a stage analysis"
+[[ ! -e "${spike}/analysis/fault.json" ]] || fail "a run without a fault proof reported a fault outcome"
+# A fault that was never applied has no outage to report.
+jq '.applied = false' "${fault}/benchmark/fault-proof.json" > "${fault}/proof.tmp" && mv "${fault}/proof.tmp" "${fault}/benchmark/fault-proof.json"
+run "${fault}"
+jq -e '.captureState == "not-captured" and (.reason | test("no applied fault"))' "${fault}/analysis/fault.json" >/dev/null \
+  || fail "a fault that never applied was analysed: $(cat "${fault}/analysis/fault.json")"
 
 # --- a constant-load profile has no stages to judge ----------------------------
 steady="${test_root}/steady"

@@ -12,6 +12,9 @@ trap 'rm -rf "${test_root}"' EXIT
 mkdir -p "${test_root}/harness/core/lib" "${test_root}/bin"
 
 cat > "${test_root}/harness/core/lib/common.sh" <<'EOF'
+# The on-CPU trace report needs a real Speedscope file; diff-speedscope-test.sh
+# covers it, so the stubbed conversions here skip it.
+perflab_python() { return 1; }
 load_generator=k6
 diagnostics_url=http://monitor
 artifacts_root="${PERFLAB_TEST_ARTIFACTS_ROOT:-}"
@@ -96,7 +99,16 @@ case "${url}" in
     if [[ "${PERFLAB_TEST_FAIL_FIRST_GCDUMP:-0}" == "1" && "${count}" == "1" ]]; then exit 22; fi
     printf 'gcdump-%s' "${count}" ;;
   */trace) printf 'nettrace' ;;
-  */stacks) printf 'Thread: (0x1)\n  Fixture.Api!Program.Main\n' ;;
+  */stacks)
+    if [[ "${PERFLAB_TEST_STACKS_PROBLEM:-0}" == "1" ]]; then
+      # dotnet-monitor answers a failed operation with HTTP 500 and ProblemDetails.
+      headers=''; previous=''
+      for argument in "$@"; do [[ "${previous}" == '-D' ]] && headers="${argument}"; previous="${argument}"; done
+      [[ -n "${headers}" ]] && printf 'HTTP/1.1 500 Internal Server Error\r\n\r\n' > "${headers}"
+      printf '{"title":"Unable to collect call stacks","detail":"profiler is not loaded"}'
+    else
+      printf 'Thread: (0x1)\n  Fixture.Api!Program.Main\n'
+    fi ;;
   */dump) printf 'dump' ;;
   */livemetrics)
     # RFC 7464 json-seq: an ASCII RS before every record. Written to the -o
@@ -240,9 +252,11 @@ grep -q '"status":"partial"' "${test_root}/partial/runtime/campaign.json"
 grep -q '"captureState":"failed"' "${test_root}/partial/runtime/captures/gcdump-before/capture.json"
 grep -q '"captureState":"captured"' "${test_root}/partial/runtime/captures/trace/capture.json"
 
-# dump is intentionally a process snapshot only: no warm-up and no diagnostic
-# traffic. The acknowledgement belongs to the core command that invokes this
-# adapter, so the adapter test verifies only its execution contract.
+# A local target is recreated in diagnose mode, so a dump must follow the
+# scenario's load or it shows a fresh, idle process (S04's retained arrays were
+# absent). Only a remote target, never recreated, is dumped without traffic. The
+# acknowledgement belongs to the core command that invokes this adapter, so the
+# adapter test verifies only its execution contract.
 dump_output="${test_root}/dump-only"
 mkdir -p "${dump_output}"; : > "${test_root}/dump-only-calls"
 PATH="${test_root}/bin:${PATH}" \
@@ -273,10 +287,31 @@ if [[ "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* ]]; then
 fi
 grep -q '"artifactPaths":\["runtime/captures/dump/process.dmp.retained.json"\]' "${dump_output}/runtime/captures/dump/capture.json" \
   || { echo 'dump-only: the capture record does not name the retention pointer' >&2; exit 1; }
-# No warm-up and no diagnostic traffic. Monitor requests are logged in the
-# same file, so look for the load hooks rather than an empty file.
-! grep -q '^warmup$\|^diagnostic$' "${test_root}/dump-only-calls"
-grep -q '"diagnosticLoadState":"not-applicable"' "${dump_output}/runtime/campaign.json"
+# Locally: warm-up, then the diagnostic load, then the dump.
+grep -q '^warmup$' "${test_root}/dump-only-calls" || { echo 'dump-only: a local dump did not warm up' >&2; exit 1; }
+load_line="$(grep -n '^diagnostic$' "${test_root}/dump-only-calls" | head -1 | cut -d: -f1)"
+dump_line="$(grep -n '^monitor_curl:.*/dump' "${test_root}/dump-only-calls" | head -1 | cut -d: -f1)"
+[[ -n "${load_line}" && -n "${dump_line}" && "${load_line}" -lt "${dump_line}" ]] \
+  || { echo 'dump-only: a local dump was not taken after the diagnostic load' >&2; cat "${test_root}/dump-only-calls" >&2; exit 1; }
+grep -q '"diagnosticLoadState":"captured"' "${dump_output}/runtime/campaign.json" \
+  || { echo 'dump-only: the local dump did not record its diagnostic load' >&2; exit 1; }
+# Remotely: the process already holds its state; no warm-up, no traffic.
+remote_dump_output="${test_root}/dump-remote"
+mkdir -p "${remote_dump_output}"; : > "${test_root}/dump-remote-calls"
+PATH="${test_root}/bin:${PATH}" \
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_CALLS="${test_root}/dump-remote-calls" \
+PERFLAB_TEST_GCDUMP_COUNT="${test_root}/dump-remote-gcdumps" \
+PERFLAB_DIAGNOSTIC_RECOVERY_SECONDS=0 \
+PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES=67108864 \
+PERFLAB_TEST_ARTIFACTS_ROOT="${test_root}" \
+target_mode=remote PERFLAB_CAMPAIGN_DUMP_ONLY=1 \
+PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
+  bash "${adapter_dir}/capture.sh" "${remote_dump_output}" preset:dump 1 api >/dev/null 2>&1
+! grep -q '^warmup$\|^diagnostic$' "${test_root}/dump-remote-calls" \
+  || { echo 'dump-remote: a remote dump drove traffic' >&2; exit 1; }
+grep -q '"diagnosticLoadState":"not-applicable"' "${remote_dump_output}/runtime/campaign.json" \
+  || { echo 'dump-remote: the remote dump recorded a diagnostic load' >&2; exit 1; }
 
 # A single-kind dump has no per-stage normalization record. When the extended
 # SOS commands fail, the thread and heap listing must survive, the retained
@@ -346,6 +381,24 @@ PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
 [[ -s "${stacks_output}/runtime/api/cpu.nettrace" ]]
 grep -q '"requestedDiagnostic":"stacks","effectiveDiagnostic":"trace"' \
   "${stacks_output}/runtime/capture.json"
+
+# A failed monitor request keeps its status and ProblemDetails (F13): curl -f used
+# to discard the body, and a /stacks 500 was recorded only as "request failed".
+problem_output="${test_root}/stacks-problem"
+mkdir -p "${problem_output}"; : > "${test_root}/stacks-problem-calls"
+if PATH="${test_root}/bin:${PATH}" \
+  PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+  PERFLAB_TEST_CALLS="${test_root}/stacks-problem-calls" \
+  PERFLAB_TEST_GCDUMP_COUNT="${test_root}/stacks-problem-gcdumps" \
+  PERFLAB_ENABLE_DOTNET_MONITOR_STACKS=true PERFLAB_TEST_STACKS_PROBLEM=1 \
+  PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
+  bash "${adapter_dir}/capture.sh" "${problem_output}" stacks 1 api >/dev/null 2> "${test_root}/stacks-problem.err"; then
+  echo 'stacks-problem: a monitor HTTP 500 was accepted' >&2; exit 1
+fi
+grep -q 'HTTP 500: Unable to collect call stacks: profiler is not loaded' "${test_root}/stacks-problem.err" \
+  || { echo "stacks-problem: the failure lost dotnet-monitor's ProblemDetails: $(cat "${test_root}/stacks-problem.err")" >&2; exit 1; }
+[[ ! -e "${problem_output}/runtime/api/stacks.txt" ]] \
+  || { echo 'stacks-problem: the error body was kept as stacks.txt' >&2; exit 1; }
 
 direct_stacks_output="${test_root}/direct-stacks"
 mkdir -p "${direct_stacks_output}"; : > "${test_root}/direct-stacks-calls"

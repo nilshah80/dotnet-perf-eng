@@ -555,12 +555,27 @@ else
   fi
 fi
 
+# Protected endpoints: one login, the token shared by every generator.
+performance_workload_login "${base_url}" || exit 1
+
 # perflab-baggage-v1 (D-P1-8): does the target honour request baggage? Never
 # fatal; capture-evidence scopes by phase only when the proof says so.
 performance_baggage_probe "${base_url}" "${telemetry_run_id}" "${artifact_dir}/analysis/baggage-contract.json" || true
 
+# A previous run's TIME_WAIT tail must not fail this run's first connections.
+generator_endpoints="$(performance_generator_endpoints "${base_url}")"
+performance_generator_settle "${generator_endpoints}" "${artifact_dir}/analysis/generator-ports.json"
+
 echo "Warming up for ${PERFLAB_WARMUP_SECONDS:-10} seconds with ${load_generator}..."
-loadgen_warmup "${artifact_dir}"
+loadgen_warmup "${artifact_dir}" || {
+  warmup_rc=$?
+  warmup_time_wait="$(performance_generator_time_wait "${generator_endpoints}")"
+  generator_range="$(performance_ephemeral_range)"
+  if (( warmup_time_wait * 2 >= generator_range )); then
+    echo "warm-up failed while the generator host held ${warmup_time_wait} TIME_WAIT sockets toward ${generator_endpoints} (ephemeral range ${generator_range}): its ports were exhausted, so connections failed on the generator, not the target." >&2
+  fi
+  exit "${warmup_rc}"
+}
 
 if [[ "${target_mode}" == "local" && "${managed_partition_required}" == "1" ]]; then
   bash "${harness_core_dir}/datafault/managed-reference.sh" "${telemetry_run_id}" "${base_url}" reset
@@ -599,8 +614,17 @@ fi
 # being partial (unlike the required post-run snapshot, which does).
 sample_midload() {
   # Sample at the midpoint of the ACTUAL run (effective_duration), so a soak's
-  # peak snapshot lands mid-soak rather than during VU warm-up.
-  sleep $(( effective_duration / 2 ))
+  # peak snapshot lands mid-soak rather than during VU warm-up -- but never
+  # inside a dependency fault or the 10 s after it: S22's midpoint fell in the
+  # Postgres outage and sampled nothing.
+  local midpoint=$(( effective_duration / 2 )) fault_from fault_until
+  if [[ -n "${PERFLAB_FAULT_DEP:-}" ]]; then
+    fault_from="${PERFLAB_FAULT_AT:-5}"; fault_until=$(( fault_from + ${PERFLAB_FAULT_FOR:-5} + 10 ))
+    if (( midpoint >= fault_from && midpoint < fault_until )); then
+      if (( fault_until < effective_duration )); then midpoint="${fault_until}"; else midpoint=$(( fault_from / 2 )); fi
+    fi
+  fi
+  sleep "${midpoint}"
   for dep in ${dependencies}; do
     "$(dependency_dir "${dep}")/sample-midload.sh" "${artifact_dir}" \
       || echo "WARNING: ${dep} mid-load sample failed (best-effort peak snapshot; the windowed range-gauge telemetry still covers the peak)." >&2
@@ -769,12 +793,12 @@ sample_resource_series() {
     raw="$(bounded_command "${tick_bound}" compose exec -T "${primary_app_service}" sh -c 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null' 2>/dev/null || true)"
     if [[ -n "${raw//[[:space:]]/}" ]]; then
       read -r s_total s_est s_tw s_lis <<< "$(printf '%s\n' "${raw}" | awk '$4 ~ /^[0-9A-F][0-9A-F]$/ {n++; if ($4=="01") est++; if ($4=="06") tw++; if ($4=="0A") lis++} END {printf "%d %d %d %d", n+0, est+0, tw+0, lis+0}')"
-      printf '{"atEpoch":%s,"sequence":%s,"captureState":"captured","total":%s,"established":%s,"timeWait":%s,"listen":%s}\n' \
-        "${now_epoch}" "${sequence}" "${s_total}" "${s_est}" "${s_tw}" "${s_lis}" >> "${socket_file}"
+      printf '{"atEpoch":%s,"sequence":%s,"captureState":"captured","total":%s,"established":%s,"timeWait":%s,"listen":%s,"generatorTimeWait":%s}\n' \
+        "${now_epoch}" "${sequence}" "${s_total}" "${s_est}" "${s_tw}" "${s_lis}" "$(performance_generator_time_wait "${generator_endpoints}")" >> "${socket_file}"
       sockets_captured=$((sockets_captured + 1))
     else
       socket_state=failed
-      printf '{"atEpoch":%s,"sequence":%s,"captureState":"failed","reason":"socket table was not readable within %ss"}\n' "${now_epoch}" "${sequence}" "${tick_bound}" >> "${socket_file}"
+      printf '{"atEpoch":%s,"sequence":%s,"captureState":"failed","reason":"socket table was not readable within %ss","generatorTimeWait":%s}\n' "${now_epoch}" "${sequence}" "${tick_bound}" "$(performance_generator_time_wait "${generator_endpoints}")" >> "${socket_file}"
     fi
     tick_sockets_done=1
     record_tick_outcome
@@ -919,16 +943,13 @@ measure_started_epoch="$(date -u +%s)"
 if [[ "${target_mode}" == "local" ]]; then
   inject_fault & fault_pid=$!
 fi
-measurement_window_start=""
-measurement_window_end=""
 measurement_window_id=""
 if [[ -n "${PERFLAB_MEASUREMENT_WINDOW_PROBE_PATH:-}" ]]; then
   # This is the last target-owned identity check before a measured request can
   # leave the generator. It binds the exact run to the concrete process
   # generation rather than trusting a stale service-instance series.
   measurement_window_id="mw-${measure_started_epoch}-${scenario_lower}"
-  measurement_window_start="${artifact_dir}/analysis/measurement-window-start.json"
-  performance_measurement_window_probe "${base_url}" "${telemetry_run_id}" "${measurement_window_id}" start "${measurement_window_start}" || {
+  performance_measurement_window_open "${base_url}" "${telemetry_run_id}" "${measurement_window_id}" "${artifact_dir}/analysis" || {
     echo "measurement-window start attestation failed before traffic" >&2
     exit 1
   }
@@ -1035,14 +1056,9 @@ measure_ended_epoch="$(date -u +%s)"
 # Stop collection at the load boundary, before post-measure probes.
 stop_resource_series
 run_rc="${load_rc}"
-if [[ -n "${measurement_window_start}" ]]; then
-  measurement_window_end="${artifact_dir}/analysis/measurement-window-end.json"
+if [[ -n "${measurement_window_id}" ]]; then
   window_rc=0
-  performance_measurement_window_probe "${base_url}" "${telemetry_run_id}" "${measurement_window_id}" end "${measurement_window_end}" || window_rc=$?
-  if (( window_rc == 0 )); then
-    performance_measurement_window_finalize "${measurement_window_start}" "${measurement_window_end}" \
-      "${artifact_dir}/analysis/measurement-window.json" || window_rc=$?
-  fi
+  performance_measurement_window_close "${base_url}" "${telemetry_run_id}" "${measurement_window_id}" "${artifact_dir}/analysis" || window_rc=$?
   if (( window_rc != 0 )); then
     echo "measurement-window end attestation failed; retaining partial evidence without an exact generation claim" >&2
     export PERFLAB_CAPTURE_INCOMPLETE=1
@@ -1051,7 +1067,13 @@ if [[ -n "${measurement_window_start}" ]]; then
       > "${artifact_dir}/analysis/measurement-window-error.json"
   fi
 fi
-if (( load_rc != 0 )); then
+if (( load_rc == 99 )) && [[ "${load_generator}" == "k6" && "${distributed_enabled}" != "1" && -s "${artifact_dir}/benchmark/observations.json" ]]; then
+  # k6 exits 99 when the script's own thresholds were crossed. The measurement
+  # ran to the end and its summary is complete: that is a failed run with full
+  # evidence, not an incomplete capture.
+  echo "k6 thresholds were crossed (exit 99); the complete measurement is kept as evidence" >&2
+  printf '{"phase":"measure","exitCode":99,"captureState":"captured","reason":"k6 thresholds were crossed"}\n' > "${artifact_dir}/benchmark/generator-exit.json"
+elif (( load_rc != 0 )); then
   if [[ "${load_profile}" == "soak" ]]; then
     echo "soak generator exited with status ${load_rc}" >&2
   else

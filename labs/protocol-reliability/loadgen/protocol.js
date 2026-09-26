@@ -66,15 +66,12 @@ function rawWebSocket() {
   }
 }
 
+// WebSocket transport without negotiation: a negotiated connection token lives
+// on the replica that issued it, so negotiate-then-connect needs a sticky
+// gateway, and the gateway balances requests across both replicas.
 function signalR() {
-  const negotiate = http.post(`${baseUrl}/signalr/negotiate?negotiateVersion=1`, null);
-  const token = negotiate.json('connectionToken');
-  if (!token) {
-    protocolFailures.add(1);
-    return;
-  }
   let completed = false;
-  ws.connect(`${websocketUrl}/signalr?id=${encodeURIComponent(token)}`, {}, socket => {
+  ws.connect(`${websocketUrl}/signalr`, {}, socket => {
     socket.on('open', () => socket.send('{"protocol":"json","version":1}\u001e'));
     let invoked = false;
     socket.on('message', message => {
