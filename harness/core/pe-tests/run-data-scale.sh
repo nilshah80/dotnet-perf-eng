@@ -46,6 +46,17 @@ echo "Data-scale sweep ${ds_id}: ${scenario_id}, scales [${scales_csv}], ${durat
 
 obs() { jqd -r --arg n "$2" '(.scenarios[0].observations // .observations)[]? | select(.name==$n) | .value' < "$1" 2>/dev/null | head -1; }
 
+# The last scale's data must not outlive the sweep: every later run starts the
+# stack without SEED_SCALE, the seeder's idempotency guard skips reseeding, and
+# the run is measured on the last scale's rows while recording the default
+# (E06-E14 ran on demo after E05). Wipe the owned volume again on the way out,
+# success or failure, so the next run seeds its own scale.
+reset_seeded_volume() {
+  docker compose -f "${compose_file}" down -v >/dev/null 2>&1 \
+    || echo "[data-scale] WARNING: 'docker compose down -v' failed after the sweep; the next run may measure the last scale's data." >&2
+}
+trap reset_seeded_volume EXIT
+
 level_json=()
 failed_scales=0
 for scale in "${scales[@]}"; do

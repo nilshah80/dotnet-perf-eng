@@ -47,6 +47,16 @@ No version has been tagged yet. The entries below describe the state of `main`.
 
 ### Fixed
 
+- The data-scale sweep wipes the owned database volume again when it ends,
+  success or failure. It left the volume at its last scale (demo): every later
+  run started without `SEED_SCALE`, the seeder's idempotency guard skipped
+  reseeding, and E06-E14, checkout and the mixes were measured on demo's rows
+  while recording `seedScale=default` (content fingerprint `01dfdaa1` against
+  E00-E04's `7029fa25`).
+- After a warm-up the target settles at least 5 s before the measurement.
+  The post-warm-up steps gave that interval by accident, and it decides how
+  far a tiered .NET process has compiled: PerfLab, measuring at once, served
+  E11 at 60% of this harness's rate until it settles the same interval.
 - The Redis span note states the gap without asserting its cause: spans the
   exporter dropped (S13) and lookups on a connection opened outside the
   instrumented one (S14: none) both leave the spans short of Redis's own count.

@@ -59,6 +59,7 @@ set -euo pipefail
 # Arm before publishing readiness, so the signal cannot race trap installation.
 trap 'exit 0' INT TERM
 printf 'loadgen:%s\n' "${2:-unknown}" >> "${PERFLAB_TEST_CALLS}"
+printf '%s %s\n' "${2:-unknown}" "$(date -u +%s)" >> "${PERFLAB_TEST_CALLS}.epochs"
 mkdir -p "$1/benchmark"
 printf '{"observations":[{"name":"http.requests_per_second","value":100,"unit":"rps"}]}\n' > "$1/benchmark/observations.json"
 printf '{}\n' > "$1/benchmark/k6-summary.json"
@@ -229,6 +230,18 @@ pkg="$(ls -dt "${test_root}"/artifacts/runs/*/ 2>/dev/null | head -1)"
 [[ -n "${pkg}" ]] || fail "attach-only run produced no evidence package"
 jq -e '.owned == false and (.reason | test("attach-only"))' "${pkg}/data/dataset.json" >/dev/null \
   || fail "attach-only dataset state does not record that the data is not ours: $(cat "${pkg}/data/dataset.json" 2>/dev/null)"
+
+# --- the settle after a warm-up -----------------------------------------------
+# A warmed target settles 5 s before the measurement, as PerfLab's does: a
+# tiered .NET process measured at once was still compiling a minute later.
+: > "${calls}"; : > "${calls}.epochs"
+env PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${lab_config}" PERFLAB_TEST_CALLS="${calls}" \
+  PERFLAB_ARTIFACTS_ROOT="${test_root}/artifacts" PERFLAB_WARMUP_SECONDS=1 PERFLAB_TARGET_KIND=existing-process \
+  bash "${test_root}/harness/core/run/run-scenario.sh" S01 1 > "${test_root}/settle.out" 2>&1 || true
+warmed="$(awk '$1 == "warmup" {print $2}' "${calls}.epochs")"
+measured="$(awk '$1 == "measure" {print $2}' "${calls}.epochs")"
+[[ -n "${warmed}" && -n "${measured}" ]] || fail "the settle run did not warm up and measure: $(cat "${calls}.epochs")"
+(( measured - warmed >= 5 )) || fail "the measurement started $(( measured - warmed )) s after the warm-up, not after the 5 s settle"
 
 # --- acceptance case 18 ------------------------------------------------------
 # An existing REMOTE environment is measured without lifecycle mutation. Same

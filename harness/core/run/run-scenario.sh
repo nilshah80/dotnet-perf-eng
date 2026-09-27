@@ -576,6 +576,7 @@ loadgen_warmup "${artifact_dir}" || {
   fi
   exit "${warmup_rc}"
 }
+warmup_ended_epoch="$(date -u +%s)"
 performance_generator_recover "${generator_endpoints}" "${ready_url}" "${artifact_dir}/analysis/generator-ports.json"
 
 if [[ "${target_mode}" == "local" && "${managed_partition_required}" == "1" ]]; then
@@ -918,6 +919,16 @@ if [[ "${load_profile}" == "soak" ]]; then
     echo "soak session already started; generator restart refused" >&2
     exit 1
   fi
+fi
+# After a warm-up the target settles at least warmup_settle_seconds before the
+# measurement and its samplers. The post-warm-up steps above take 4-5 s, and a tiered .NET
+# process finishes its tier-1 compilation while idle there; PerfLab settles the
+# same interval, since measuring at once left E11 compiling under the load a
+# minute later (60% of this harness's rate).
+warmup_settle_seconds=5
+if (( ${PERFLAB_WARMUP_SECONDS:-10} > 0 )); then
+  settle_left=$(( warmup_settle_seconds - ($(date -u +%s) - warmup_ended_epoch) ))
+  (( settle_left > 0 )) && sleep "${settle_left}"
 fi
 midload_pid=""; fault_pid=""; resource_series_pid=""
 if [[ "${target_mode}" == "local" ]]; then
