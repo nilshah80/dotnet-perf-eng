@@ -30,13 +30,16 @@ export const options = {
   thresholds: { protocol_failures: ['count==0'] },
 };
 
+// gRPC metadata travels as HTTP/2 headers, so the call carries the run's baggage
+// like every HTTP request; without it the verified-baggage phase selector left
+// P01's gRPC traffic out of the server's request metrics.
 function grpcPing() {
   client.connect(grpcTarget, { plaintext: true });
   const response = client.invoke('reliability.v1.Reliability/Ping', {
     runId,
     tenant: 'default',
     workUnits: 10,
-  });
+  }, { metadata: withPerfBaggage({}, runId) });
   const ok = check(response, {
     'gRPC status OK': value => value && value.status === grpc.StatusOK,
     'gRPC instance returned': value => value && value.message && Boolean(value.message.instanceId),
