@@ -568,7 +568,7 @@ spans "${dir}" dependency_time 50 SPAN_KIND_CLIENT:db_system=redis:8
 spans "${dir}" dependency_calls 259 SPAN_KIND_CLIENT:db_system=redis:4768
 classify "${dir}"
 for expected in "dependency amplification: Redis served ~100 key lookups per request (6828700 for 68287 requests)" \
-    "span metrics saw ~18 Redis calls per request against the ~100 key lookups per request Redis served: spans were lost before Tempo"; do
+    "span metrics saw ~18 Redis calls per request against the ~100 key lookups per request Redis served: the spans do not account for every lookup"; do
   notes "${report}" | grep -qF "${expected}" || fail "missing Redis lookup note '${expected}': $(notes "${report}")"
 done
 ! notes "${report}" | grep -q "each request makes ~18 redis calls" || fail "the sampled span count was stated beside the Redis lookups"

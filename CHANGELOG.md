@@ -47,6 +47,11 @@ No version has been tagged yet. The entries below describe the state of `main`.
 
 ### Fixed
 
+- The Redis span note states the gap without asserting its cause: spans the
+  exporter dropped (S13) and lookups on a connection opened outside the
+  instrumented one (S14: none) both leave the spans short of Redis's own count.
+  It said spans were lost before Tempo, which is not what happened to S14's
+  per-request `ConnectionMultiplexer`.
 - The live Gate B tests build the Protocol Reliability target with its
   Dockerfile's Release publish stage into their own temp directory. They ran
   `dotnet build --no-restore` in the source tree, so they depended on restore
