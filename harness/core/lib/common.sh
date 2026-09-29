@@ -193,15 +193,19 @@ validate_target_headers() {
   fi
 }
 
-target_curl() {
+target_curl() { # [--body <data>] <curl-arg>...
+  local body="" has_body=0
+  [[ "${1:-}" == "--body" ]] && { body="$2"; has_body=1; shift 2; }
   validate_target_headers || return 1
-  if [[ -n "${PERF_HEADERS:-}" ]]; then
-    # Headers reach curl through a file descriptor (-H @file), never argv: a
-    # bearer token on the command line is visible to every local user in ps.
-    command curl -H @<(printf '%s' "${PERF_HEADERS}" | jqd -r 'to_entries[] | "\(.key): \(.value)"') "$@"
-  else
-    command curl "$@"
-  fi
+  [[ -n "${PERF_HEADERS:-}" || "${has_body}" == 1 ]] || { command curl "$@"; return; }
+  # Headers and the body reach curl as a --config on stdin, never argv: a bearer
+  # token or password on the command line is visible to every local user in ps.
+  # Stdin is also the one channel native Windows curl reads; it cannot open a
+  # process substitution's /dev/fd path.
+  {
+    [[ -z "${PERF_HEADERS:-}" ]] || printf '%s' "${PERF_HEADERS}" | jqd -r 'to_entries[] | "header = " + ("\(.key): \(.value)" | @json)'
+    [[ "${has_body}" == 0 ]] || printf '%s' "${body}" | jqd -Rrs '"data-binary = " + @json'
+  } | command curl --config - "$@"
 }
 
 # Lab-specific initialization (compose file, base/ready URLs, telemetry regexes,
@@ -368,6 +372,22 @@ loadgen_supports() {
 # phase = warmup | measure | diagnostic.
 loadgen_warmup() { "$(loadgen_dir)/run.sh" "$1" warmup; }
 loadgen_measure() { "$(loadgen_dir)/run.sh" "$1" "$2"; }
+
+# loadgen_timed <command...>: an adapter runs its generator through this. In the
+# measure phase it records the epochs bracketing the generator process in
+# benchmark/generator-window.json, which run-scenario uses as the measured
+# window: the harness clock around loadgen_measure also spans the adapter's
+# setup and evidence processing, which a slow shell (Git Bash on Windows spends
+# ~0.1 s per subshell) turns into tens of seconds of no-load window edges.
+# Reads the adapter's phase and artifact_dir.
+loadgen_timed() {
+  [[ "${phase}" == "measure" ]] || { "$@"; return; }
+  local started rc=0
+  started="$(date -u +%s)"
+  "$@" || rc=$?
+  printf '{"startEpoch":%s,"endEpoch":%s}\n' "${started}" "$(date -u +%s)" > "${artifact_dir}/benchmark/generator-window.json"
+  return "${rc}"
+}
 
 # loadgen_effective_duration <connections> <requested-duration> -> the seconds the
 # measure phase will ACTUALLY run. Most profiles == the requested duration, but a

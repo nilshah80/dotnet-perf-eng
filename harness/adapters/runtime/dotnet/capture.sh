@@ -440,7 +440,9 @@ diagnostic_download_budget() { # dest-file
 # log lines beside the failure.
 try_pull() {
   local dest="$1" attempt attempts=1 rc
-  [[ "${dest##*/}" == "stacks.txt" ]] && attempts=6
+  # /stacks answers in seconds or never: a monitor whose profiler channel is gone
+  # held the request open for more than ten minutes.
+  [[ "${dest##*/}" == "stacks.txt" ]] && { attempts=6; set -- "${dest}" --max-time 60 "${@:2}"; }
   for (( attempt = 1; attempt <= attempts; attempt++ )); do
     rc=0; try_pull_once "$@" || rc=$?
     (( rc == 0 )) && { (( attempt > 1 )) && echo "dotnet-monitor ${dest##*/}: captured on attempt ${attempt} of ${attempts}." >&2; return 0; }

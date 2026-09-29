@@ -57,7 +57,8 @@ cat > "${test_root}/harness/adapters/loadgen/k6/run.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 # Arm before publishing readiness, so the signal cannot race trap installation.
-trap 'exit 0' INT TERM
+stall_pid=""
+trap 'kill "${stall_pid}" 2>/dev/null; exit 0' INT TERM
 printf 'loadgen:%s\n' "${2:-unknown}" >> "${PERFLAB_TEST_CALLS}"
 printf '%s %s\n' "${2:-unknown}" "$(date -u +%s)" >> "${PERFLAB_TEST_CALLS}.epochs"
 mkdir -p "$1/benchmark"
@@ -69,7 +70,16 @@ if [[ "${2:-}" == "${LIFECYCLE_SLOW_PHASE:-}" ||
       ( "${2:-}" == "warmup" && "${PERFLAB_TEST_SLOW_WARMUP:-0}" == "1" ) ]]; then
   # Success after interruption forces the parent to exit from its own trap.
   # LIFECYCLE_PHASE_SLEEP shortens the stall for cases that let it finish.
-  sleep "${LIFECYCLE_PHASE_SLEEP:-30}"
+  # Waited on rather than run in the foreground: on Windows a group signal can
+  # miss a sleep still starting, and Bash defers the trap until its foreground
+  # command ends. wait returns on the signal at once.
+  sleep "${LIFECYCLE_PHASE_SLEEP:-30}" & stall_pid=$!
+  wait "${stall_pid}"
+fi
+# A real adapter records its generator's own run through loadgen_timed.
+if [[ "${2:-}" == "measure" && -n "${LIFECYCLE_GENERATOR_WINDOW:-}" ]]; then
+  # shellcheck disable=SC2086 # "<start> <end>", one epoch per word
+  printf '{"startEpoch":%s,"endEpoch":%s}\n' ${LIFECYCLE_GENERATOR_WINDOW} > "$1/benchmark/generator-window.json"
 fi
 # 107 is k6's script error; 99 is its crossed-thresholds exit.
 if [[ "${2:-}" == "measure" && -n "${LIFECYCLE_FAIL_MEASURE:-}" ]]; then exit "${LIFECYCLE_FAIL_MEASURE}"; fi
@@ -192,6 +202,17 @@ printf '\nPERFLAB_ARTIFACTS_ROOT="%s"\n' "${test_root}/artifacts" >> "${lab_conf
 calls_contain() {
   [[ -f "${calls}" ]] || fail "the call ledger is missing; the test cannot observe what the harness did"
   grep -q "$1" "${calls}"
+}
+
+# wait_for_call <pattern> -- wait up to a minute of wall clock for a ledger
+# line. A count of 0.1 s polls is not a time: on Windows every poll forks, so
+# 100 polls ended before a trap that first stops its children reached cleanup.
+wait_for_call() {
+  local deadline=$((SECONDS + 60))
+  until calls_contain "$1"; do
+    (( SECONDS < deadline )) || return 1
+    sleep 0.1
+  done
 }
 
 run_scenario() { # run_scenario <name> [env assignments...]
@@ -416,7 +437,8 @@ capture_script="${test_root}/harness/core/capture/capture-evidence.sh"
 cp "${capture_script}" "${capture_script}.saved"
 cat > "${capture_script}" <<'EOF'
 #!/usr/bin/env bash
-printf '{"status":"%s"}\n' "${PERFLAB_CAPTURE_INCOMPLETE:-0}" > "$1/facts.json"
+printf '{"status":"%s","window":"%s %s"}\n' "${PERFLAB_CAPTURE_INCOMPLETE:-0}" \
+  "${PERFLAB_MEASURE_START_EPOCH:-}" "${PERFLAB_MEASURE_END_EPOCH:-}" > "$1/facts.json"
 EOF
 failed_pkg="${test_root}/failed-measure"
 rc=0
@@ -440,6 +462,16 @@ jq -e '.status == "0"' "${threshold_pkg}/facts.json" >/dev/null || fail "crossed
 jq -e '.exitCode == 99 and .captureState == "captured"' "${threshold_pkg}/benchmark/generator-exit.json" >/dev/null \
   || fail "crossed thresholds were not recorded"
 
+# The measured window is the generator's own run when the adapter recorded it,
+# not the harness clock around the adapter's setup and evidence processing.
+timed_pkg="${test_root}/generator-window"
+env LIFECYCLE_GENERATOR_WINDOW="1800000005 1800000065" PERFLAB_BOTTLENECK=0 PERFLAB_STEADY_STATE=0 PERFLAB_RECORD_TREND=0 \
+  PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${lab_config}" PERFLAB_TEST_CALLS="${calls}" \
+  PERFLAB_ARTIFACT_DIR="${timed_pkg}" PERFLAB_WARMUP_SECONDS=0 \
+  bash "${test_root}/harness/core/run/run-scenario.sh" S01 1 > "${timed_pkg}.out" 2>&1 || true
+jq -e '.window == "1800000005 1800000065"' "${timed_pkg}/facts.json" >/dev/null \
+  || fail "the recorded generator window was not the measured window: $(cat "${timed_pkg}/facts.json")"
+
 # Losing the end attestation must retain the successful load's partial package.
 window_pkg="${test_root}/failed-window"
 : > "${calls}"
@@ -462,7 +494,8 @@ mv "${capture_script}.saved" "${capture_script}"
 for cancel_case in warmup measure timeout normal-cleanup exit-cleanup normal-cleanup-timeout exit-cleanup-timeout; do
   cancel_phase="${cancel_case}"
   cancel_signals='INT TERM'
-  cleanup_delay=2
+  # Long enough that the second signal lands while the cleanup still runs.
+  cleanup_delay=5
   fault_dep=''
   fail_warmup=0
   ready_pattern="loadgen:${cancel_phase}"
@@ -509,7 +542,9 @@ CALLER
       runner=(bash "${cancel_dir}/caller.sh" "${test_root}/harness/core/run/run-scenario.sh")
     fi
     set -m
-    env LIFECYCLE_SLOW_PHASE="${cancel_phase}" LIFECYCLE_CLEANUP_DELAY="${cleanup_delay}" \
+    # The stalled phase outlasts wait_for_call's minute, so a cleanup can only
+    # appear in time because the signal started it, never because the phase ended.
+    env LIFECYCLE_SLOW_PHASE="${cancel_phase}" LIFECYCLE_PHASE_SLEEP=120 LIFECYCLE_CLEANUP_DELAY="${cleanup_delay}" \
       PERFLAB_FAULT_DEP="${fault_dep}" PERFLAB_TEST_FAIL_WARMUP="${fail_warmup}" \
       PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${lab_config}" \
       PERFLAB_TEST_CALLS="${calls}" PERFLAB_ARTIFACT_DIR="${cancel_dir}/package" \
@@ -518,27 +553,19 @@ CALLER
       "${runner[@]}" < /dev/null > "${cancel_dir}/out" 2>&1 &
     cancel_pid=$!
     set +m
-    for _ in $(seq 1 300); do
-      calls_contain "${ready_pattern}" && break
-      sleep 0.1
-    done
-    if ! calls_contain "${ready_pattern}"; then
+    if ! wait_for_call "${ready_pattern}"; then
       kill -KILL -- "-${cancel_pid}" 2>/dev/null || true
       wait "${cancel_pid}" 2>/dev/null || true
       cancel_pid=""
       cat "${cancel_dir}/out" >&2
       fail "run never reached ${cancel_phase} before cancellation"
     fi
-    kill -"${cancel_signal}" -- "-${cancel_pid}" || fail 'run exited before cancellation'
-    for _ in $(seq 1 100); do
-      calls_contain 'partition:cleanup$' && break
-      sleep 0.1
-    done
-    calls_contain 'partition:cleanup$' || fail 'signal did not start cleanup'
+    signal_group "${cancel_signal}" "${cancel_pid}" || fail 'run exited before cancellation'
+    wait_for_call 'partition:cleanup$' || fail 'signal did not start cleanup'
     sleep 0.1
     # Interrupt again while the managed cleanup is sleeping. Both its process
     # and the parent must survive long enough to write the completion marker.
-    kill -"${cancel_signal}" -- "-${cancel_pid}" || fail 'run exited during cleanup'
+    signal_group "${cancel_signal}" "${cancel_pid}" || fail 'run exited during cleanup'
     cancel_rc=0
     wait "${cancel_pid}" 2>/dev/null || cancel_rc=$?
     cancel_pid=""

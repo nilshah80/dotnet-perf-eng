@@ -6,8 +6,8 @@
 # (harness/adapters/runtime/dotnet/injection) tags each local root span with
 # pyroscope.profile.id and labels the CPU samples taken while it ran with the
 # same id. This reads the ids from the detail traces already captured -- the
-# median, p95, p99 and slowest -- and asks Pyroscope for the CPU profile of
-# exactly those spans, so a slow trace opens onto its own flame graph.
+# median, p95, p99 and the twenty slowest -- and asks Pyroscope for the CPU
+# profile of exactly those spans, so a slow trace opens onto its own flame graph.
 #
 # Best-effort, like every Gate C signal: the result records its own capture
 # state and never marks the package incomplete. CPU profiles only.
@@ -67,7 +67,8 @@ span_profile_query() {
 
 pyroscope_capture_span_profiles() {
   mkdir -p "${artifact_dir}/telemetry/profiles"
-  if [[ "${continuous_profiling:-0}" != "1" || "${capture_telemetry:-0}" != "1" ]]; then
+  # CPU-only: a memory or contention policy profiles continuously but tags no span.
+  if [[ "${continuous_profiling:-0}" != "1" || "${capture_telemetry:-0}" != "1" || ",${PERFLAB_PROFILING_TYPES:-}," != *,cpu,* ]]; then
     span_profiles_write not-applicable "continuous CPU profiling was not enabled for this run" 0 0 ""
     return 0
   fi

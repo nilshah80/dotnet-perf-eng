@@ -54,7 +54,7 @@ headers="$(login 'Pa"ss' '{"X-Tenant":"t1"}' 2>/dev/null)" || fail "a valid logi
 jq -e '.Authorization == "Bearer eyJhbGciOi.test.token" and .["X-Tenant"] == "t1"' <<< "${headers}" >/dev/null \
   || fail "the token was not merged into PERF_HEADERS: ${headers}"
 
-# The token reaches the target through target_curl's header file descriptor.
+# The token reaches the target through target_curl's --config on stdin.
 echoed="$(PERFLAB_JQ=host PERFLAB_LAB_OPTIONAL=1 PERF_HEADERS="${headers}" bash -c 'source "$1/harness/core/lib/common.sh"; target_curl -fsS "$2/echo"' _ "${repo}" "${base}")"
 jq -e '.authorization == "Bearer eyJhbGciOi.test.token"' <<< "${echoed}" >/dev/null || fail "target_curl did not send the minted header: ${echoed}"
 

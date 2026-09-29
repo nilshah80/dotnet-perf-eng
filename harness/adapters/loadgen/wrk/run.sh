@@ -88,7 +88,7 @@ case "${phase}" in
     conns="${PERFLAB_CONNECTIONS:?PERFLAB_CONNECTIONS not set}"
     dur="${PERFLAB_DURATION_SECONDS:?PERFLAB_DURATION_SECONDS not set}"
     if [[ "${phase}" == "measure" ]]; then out="wrk.txt"; else out="diagnostic-wrk.txt"; fi
-    wrk_run -t4 -c"${conns}" -d"${dur}s" --latency -s "${lua}" "${url}" \
+    loadgen_timed wrk_run -t4 -c"${conns}" -d"${dur}s" --latency -s "${lua}" "${url}" \
       > "${artifact_dir}/benchmark/${out}"
 
     [[ "${phase}" == "measure" ]] || exit 0

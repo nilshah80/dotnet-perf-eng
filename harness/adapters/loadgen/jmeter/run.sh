@@ -202,7 +202,7 @@ plugin_env=(
   --env PERFLAB_GENERATOR_NETWORK_PATH
 )
 
-MSYS_NO_PATHCONV=1 docker run --rm --pull=never --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m --cap-drop ALL --security-opt no-new-privileges \
+MSYS_NO_PATHCONV=1 loadgen_timed docker run --rm --pull=never --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m --cap-drop ALL --security-opt no-new-privileges \
   "${user_args[@]}" "${network_args[@]}" \
   --cpus "${cpus}" --memory "${memory}" \
   --add-host host.docker.internal:host-gateway \

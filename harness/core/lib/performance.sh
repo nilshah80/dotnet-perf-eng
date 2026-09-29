@@ -356,9 +356,9 @@ performance_workload_login() { # <base-url>
   }
   local response code token
   response="$(mktemp "${TMPDIR:-/tmp}/perflab-login.XXXXXX")" || return 1
-  code="$(printf '{"username":"%s","password":"%s"}' "$(json_escape "${PERF_LOGIN_USER:-}")" "$(json_escape "${PERF_LOGIN_PASSWORD:-}")" \
-    | target_curl -sS --max-time 15 -o "${response}" -w '%{http_code}' -H 'Content-Type: application/json' \
-      --data-binary @- "${1%/}${PERFLAB_LOGIN_PATH}" 2>/dev/null || true)"
+  code="$(target_curl --body "$(printf '{"username":"%s","password":"%s"}' "$(json_escape "${PERF_LOGIN_USER:-}")" "$(json_escape "${PERF_LOGIN_PASSWORD:-}")")" \
+    -sS --max-time 15 -o "${response}" -w '%{http_code}' -H 'Content-Type: application/json' \
+    "${1%/}${PERFLAB_LOGIN_PATH}" 2>/dev/null || true)"
   token="$(jqd -r --arg field "${PERFLAB_LOGIN_RESPONSE_FIELD:-token}" '.[$field] // empty' < "${response}" 2>/dev/null || true)"
   rm -f "${response}"
   if [[ "${code}" != "200" || ! "${token}" =~ ^[A-Za-z0-9._~+/=-]+$ ]]; then

@@ -38,13 +38,13 @@ base="http://127.0.0.1:$(tr -d '\r\n' < "${work}/port")"
 ran=0
 if command -v k6 >/dev/null 2>&1; then
   : > "${work}/headers"
-  PERF_BASE_URL="${base}" PERF_PATH=/ PERF_RUN_ID=run-11 PERF_PHASE=measure \
+  PERF_BASE_URL="${base}" PERF_RUN_ID=run-11 PERF_PHASE=measure \
     k6 run --quiet --no-color --vus 1 --iterations 2 "${repo}/labs/scenariolab/loadgen/k6.js" > "${work}/k6.out" 2>&1 \
     || { cat "${work}/k6.out" >&2; fail "k6 did not run the lab script"; }
   [[ "$(sort -u "${work}/headers")" == "perf.run.id=run-11,perf.phase=measure" ]] \
     || fail "k6 sent '$(sort -u "${work}/headers" | tr '\n' ' ')' instead of the run and phase"
   : > "${work}/headers"
-  PERF_BASE_URL="${base}" PERF_PATH=/ PERF_RUN_ID='run 11;x' PERF_PHASE=hacked \
+  PERF_BASE_URL="${base}" PERF_RUN_ID='run 11;x' PERF_PHASE=hacked \
     k6 run --quiet --no-color --vus 1 --iterations 1 "${repo}/labs/scenariolab/loadgen/k6.js" > "${work}/k6.out" 2>&1 \
     || { cat "${work}/k6.out" >&2; fail "k6 did not run with rejected values"; }
   [[ "$(sort -u "${work}/headers")" == "<none>" ]] || fail "k6 sent values the application would reject: $(cat "${work}/headers")"
@@ -64,4 +64,7 @@ else
   echo "baggage-test: wrk SKIPPED (not installed)" >&2
 fi
 
+# Stop the server before cleanup removes its log: Windows refuses to delete a
+# file a still-exiting process holds open.
+kill "${server_pid}" 2>/dev/null; wait "${server_pid}" 2>/dev/null || true; server_pid=""
 echo "generator baggage tests passed (${ran} generator(s) exercised)"

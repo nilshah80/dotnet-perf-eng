@@ -22,8 +22,7 @@ action="${3:-seed}"
 }
 
 # The lab's own login (a no-op when the run already exported the token); the
-# password and token reach curl through stdin and a header file descriptor,
-# never its arguments.
+# password and token reach curl as a --config on stdin, never its arguments.
 performance_workload_login "${base_url}" || exit 1
 printf '%s' "${PERF_HEADERS:-}" | jqd -e 'has("Authorization")' >/dev/null 2>&1 || {
   echo "managed-reference requires the lab login (PERFLAB_LOGIN_PATH)" >&2

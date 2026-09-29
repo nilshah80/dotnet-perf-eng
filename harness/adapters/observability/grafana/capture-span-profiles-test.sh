@@ -58,7 +58,7 @@ package() { # <name> -> artifact dir with two traces
   printf '%s' "${dir}"
 }
 
-continuous_profiling=1; capture_telemetry=1; target_mode=local
+continuous_profiling=1; capture_telemetry=1; target_mode=local; PERFLAB_PROFILING_TYPES=cpu,wall
 pyroscope_url=http://pyroscope:4040; telemetry_run_id=run-9; start_epoch=1800000000; end_epoch=1800000060
 
 artifact_dir="$(package captured)"; SPAN_TEST_MODE=samples; export SPAN_TEST_MODE
@@ -97,5 +97,13 @@ continuous_profiling=0; artifact_dir="$(package off)"
 pyroscope_capture_span_profiles
 jq -e '.captureState == "not-applicable"' "${artifact_dir}/telemetry/profiles/span-profiles.json" >/dev/null \
   || fail "a run without continuous profiling was not not-applicable"
+
+# A memory policy profiles continuously but tags no span: CPU-only.
+continuous_profiling=1; PERFLAB_PROFILING_TYPES=allocation,live-heap; artifact_dir="$(package memory)"
+: > "${SPAN_TEST_CALLS}"
+pyroscope_capture_span_profiles
+jq -e '.captureState == "not-applicable"' "${artifact_dir}/telemetry/profiles/span-profiles.json" >/dev/null \
+  || fail "a run profiling no CPU was not not-applicable"
+[[ ! -s "${SPAN_TEST_CALLS}" ]] || fail "a run profiling no CPU still queried Pyroscope"
 
 echo "span profile capture tests passed"

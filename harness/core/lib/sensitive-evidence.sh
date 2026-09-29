@@ -30,7 +30,10 @@ sensitive_utc_after_days() { # <days> -> ISO-8601 UTC timestamp
 retain_sensitive_file() { # <file-inside-artifacts-root> [classification]
   local file="$1" classification="${2:-process-memory}" root rel target days sha bytes
   [[ -f "${file}" ]] || return 0
-  root="${artifacts_root:-}"
+  # Compare physical paths: one directory has several spellings (D:/x and /d/x
+  # in Git Bash, a symlinked root on macOS), and a mismatch deletes the dump.
+  root="${artifacts_root:+$(cd "${artifacts_root}" 2>/dev/null && pwd -P)}"
+  file="$(cd "$(dirname "${file}")" && pwd -P)/${file##*/}"
   if [[ -z "${root}" || "${file}" != "${root}/"* ]]; then
     rm -f "${file}"
     echo "Refusing to keep ${file##*/} outside the artifacts root's sensitive store; it was deleted." >&2

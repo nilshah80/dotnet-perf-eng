@@ -20,6 +20,8 @@ if ! command -v dotnet >/dev/null 2>&1 || ! dotnet --list-sdks 2>/dev/null | gre
   exit 0
 fi
 command -v curl >/dev/null || fail "curl is required"
+. "${here}/../../../../core/lib/python.sh"
+PYTHON="$(perflab_python)" || fail "a working Python 3 interpreter was not found (tried python3, python)"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/injection-test.XXXXXX")"
 app_pid=""
@@ -70,7 +72,7 @@ EOF
 dotnet build "${work}/app/app.csproj" -c Release -o "${work}/app/out" -nologo -v q > "${work}/build.log" 2>&1 \
   || { cat "${work}/build.log" >&2; fail "the throwaway app did not build"; }
 
-port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+port="$("${PYTHON}" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
 url="http://127.0.0.1:${port}"
 start_app() { # <startup-hook> <hosting-startup> <log>
   DOTNET_STARTUP_HOOKS="$1" ASPNETCORE_HOSTINGSTARTUPASSEMBLIES="$2" INJECTION_TEST_URL="${url}" \

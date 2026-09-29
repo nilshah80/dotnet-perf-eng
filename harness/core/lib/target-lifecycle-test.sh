@@ -140,7 +140,7 @@ for signal in INT TERM; do
     kill -KILL -- "-${holder_pid}" 2>/dev/null || true
     fail "the ${signal} lease holder never acquired its lease"
   fi
-  kill -"${signal}" -- "-${holder_pid}"
+  signal_group "${signal}" "${holder_pid}" || fail "the ${signal} lease holder exited before the signal"
   holder_rc=0
   wait "${holder_pid}" || holder_rc=$?
   expected_rc=130

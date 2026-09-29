@@ -1065,6 +1065,13 @@ else
   fi
 fi
 measure_ended_epoch="$(date -u +%s)"
+# The analysis window is the generator's own run when the adapter recorded it
+# (loadgen_timed); the harness clock above also spans the adapter's setup and
+# evidence processing.
+window_started_epoch="${measure_started_epoch}" window_ended_epoch="${measure_ended_epoch}"
+if [[ -s "${artifact_dir}/benchmark/generator-window.json" ]]; then
+  read -r window_started_epoch window_ended_epoch < <(jqd -r '"\(.startEpoch) \(.endEpoch)"' < "${artifact_dir}/benchmark/generator-window.json")
+fi
 # Stop collection at the load boundary, before post-measure probes.
 stop_resource_series
 run_rc="${load_rc}"
@@ -1130,7 +1137,7 @@ sleep 6
 # startup, the warm-up, or the post-load cooldown -- so range gauges (working set,
 # heap) are not inflated into false "growth" and the trend/leak analysis reflects
 # the measurement rather than process initialization.
-export PERFLAB_MEASURE_START_EPOCH="${measure_started_epoch}" PERFLAB_MEASURE_END_EPOCH="${measure_ended_epoch}"
+export PERFLAB_MEASURE_START_EPOCH="${window_started_epoch}" PERFLAB_MEASURE_END_EPOCH="${window_ended_epoch}"
 cleanup_partition
 
 capture_rc=0
@@ -1188,7 +1195,7 @@ if [[ "${target_mode}" == "local" || "${remote_telemetry:-0}" == "1" ]]; then
 else
   echo "Remote (black-box): skipping Prometheus-backed analyzers; recording not-applicable server analysis." >&2
   mkdir -p "${artifact_dir}/analysis"
-  window=$(( measure_ended_epoch - measure_started_epoch )); (( window < 1 )) && window=1
+  window=$(( window_ended_epoch - window_started_epoch )); (( window < 1 )) && window=1
   printf '{"kind":"steady-state","runId":"%s","scenarioId":"%s","profile":"%s","verdict":"not-applicable","windowSeconds":%s,"basis":"server-side windowed (http_server_request_duration histogram)","reason":"server telemetry was not collected for this black-box remote measurement"}\n' \
     "$(json_escape "${telemetry_run_id}")" "$(json_escape "${scenario_id}")" "$(json_escape "${load_profile}")" "${window}" \
     > "${artifact_dir}/analysis/steady-state.json"

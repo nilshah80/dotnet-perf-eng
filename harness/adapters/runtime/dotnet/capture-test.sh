@@ -7,6 +7,9 @@ adapter_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 . "${adapter_dir}/../../../core/lib/sigint-reset.sh"
 reset_inherited_sigint "$@"
+# sensitive_sha256: the harness's file SHA-256 (sha256sum, else shasum).
+# shellcheck source=../../../core/lib/sensitive-evidence.sh
+. "${adapter_dir}/../../../core/lib/sensitive-evidence.sh"
 test_root="$(mktemp -d)"
 trap 'rm -rf "${test_root}"' EXIT
 mkdir -p "${test_root}/harness/core/lib" "${test_root}/bin"
@@ -288,7 +291,7 @@ PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
 dump_pointer="${dump_output}/runtime/captures/dump/process.dmp.retained.json"
 retained_dump="${test_root}/sensitive/dump-only/runtime/captures/dump/process.dmp"
 [[ -s "${retained_dump}" ]] || { echo 'dump-only: the dump was not retained in the sensitive store' >&2; exit 1; }
-jq -e --arg sha "$(shasum -a 256 "${retained_dump}" | awk '{print $1}')" \
+jq -e --arg sha "$(sensitive_sha256 "${retained_dump}")" \
   '.exportable == false and .retainedPath == "sensitive/dump-only/runtime/captures/dump/process.dmp" and .sha256 == $sha and (.retainUntil | length > 0)' \
   "${dump_pointer}" >/dev/null || { echo 'dump-only: the retention pointer is wrong' >&2; cat "${dump_pointer}" >&2; exit 1; }
 if [[ "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* ]]; then
@@ -341,6 +344,21 @@ PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
 [[ ! -e "${dump_kind_output}/runtime/api/process.dmp" && -s "${dump_kind_output}/runtime/api/process.dmp.retained.json" ]] \
   || { echo 'dump-kind: the process dump stayed in the evidence package' >&2; exit 1; }
 [[ -s "${dump_kind_output}/sensitive/runtime/api/process.dmp" ]]
+# The artifacts root may be spelled differently from the package path (D:/x
+# against /d/x in Git Bash): the dump is still retained, not deleted.
+dump_spelled_output="${test_root}/dump-spelled"
+mkdir -p "${dump_spelled_output}"
+PATH="${test_root}/bin:${PATH}" \
+PERFLAB_HARNESS_ROOT="${test_root}/harness" \
+PERFLAB_TEST_CALLS="${test_root}/dump-spelled-calls" \
+PERFLAB_TEST_GCDUMP_COUNT="${test_root}/dump-spelled-gcdumps" \
+PERFLAB_DIAGNOSTIC_RECOVERY_SECONDS=0 \
+PERFLAB_DIAGNOSTIC_ARTIFACT_BUDGET_BYTES=67108864 \
+PERFLAB_TEST_ARTIFACTS_ROOT="${test_root}/dump-kind/../dump-spelled" \
+PERF_SCENARIO=S07 PERF_RUN_ID=run-source \
+  bash "${adapter_dir}/capture.sh" "${dump_spelled_output}" dump 1 api >/dev/null 2>&1
+[[ -s "${dump_spelled_output}/sensitive/runtime/api/process.dmp" ]] \
+  || { echo 'dump-spelled: a differently spelled artifacts root deleted the dump' >&2; exit 1; }
 PERFLAB_HARNESS_ROOT="${test_root}/harness" \
 PERFLAB_TEST_ARTIFACTS_ROOT="${test_root}/dump-kind" \
 PERFLAB_TEST_FAIL_EXTENDED_SOS=1 \
@@ -570,7 +588,8 @@ for signal in INT TERM; do
     kill -KILL -- "-${capture_pid}" 2>/dev/null || true
     echo "cancelled-${signal}: the diagnostic load never started" >&2; exit 1
   fi
-  kill -"${signal}" -- "-${capture_pid}"
+  signal_group "${signal}" "${capture_pid}" \
+    || { echo "cancelled-${signal}: the capture exited before the signal" >&2; exit 1; }
   capture_rc=0
   wait "${capture_pid}" || capture_rc=$?
   expected_rc=130

@@ -2,6 +2,9 @@
 set -euo pipefail
 
 adapter_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# sensitive_sha256: the harness's file SHA-256 (sha256sum, else shasum).
+# shellcheck source=../../../core/lib/sensitive-evidence.sh
+. "${adapter_dir}/../../../core/lib/sensitive-evidence.sh"
 test_root="$(mktemp -d)"
 trap 'rm -rf "${test_root}"' EXIT
 mkdir -p "${test_root}/harness/core/lib" "${test_root}/bin" "${test_root}/workload"
@@ -9,6 +12,7 @@ printf 'export default function () {}\n' > "${test_root}/workload/k6.js"
 
 printf '%s\n' \
   'load_generator=k6' \
+  'loadgen_timed() { "$@"; }' \
   'loadgen_script() { printf "%s" "${PERFLAB_TEST_SCRIPT}"; }' \
   'relative_to_repo() { printf "labs/fixture/loadgen/k6.js"; }' \
   'json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf "%s" "${s}"; }' \
@@ -89,12 +93,12 @@ printf 'export default function () {}\n' > "${test_root}/workload/k6.js"
 # byte-identical (capture-runtime's mutation guard hashes it) and publish its
 # own beside it.
 cp -R "${test_root}/measure" "${test_root}/measured-package"
-before="$(shasum -a 256 "${test_root}/measured-package/benchmark/compatibility.json" | awk '{print $1}')"
+before="$(sensitive_sha256 "${test_root}/measured-package/benchmark/compatibility.json")"
 PATH="${test_root}/bin:${PATH}" PERFLAB_HARNESS_ROOT="${test_root}/harness" PERFLAB_TEST_SCRIPT="${test_root}/workload/k6.js" \
   PERFLAB_K6_PROM_RW=0 PERFLAB_CONNECTIONS=4 PERFLAB_DURATION_SECONDS=1 PERFLAB_PROFILE=steady \
   PERF_SCENARIO=S07 PERF_BASE_URL=http://127.0.0.1:8080/v1/ PERF_METHOD=GET PERF_PATH=/orders PERF_BODY='' \
   bash "${adapter_dir}/run.sh" "${test_root}/measured-package" diagnostic
-after="$(shasum -a 256 "${test_root}/measured-package/benchmark/compatibility.json" | awk '{print $1}')"
+after="$(sensitive_sha256 "${test_root}/measured-package/benchmark/compatibility.json")"
 [[ "${before}" == "${after}" ]] || { echo "diagnostic replay mutated the measured compatibility envelope" >&2; exit 1; }
 [[ -s "${test_root}/measured-package/benchmark/diagnostic-compatibility.json" ]] || { echo "diagnostic replay did not publish its own envelope" >&2; exit 1; }
 

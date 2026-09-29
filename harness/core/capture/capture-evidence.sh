@@ -538,7 +538,11 @@ if grep -q '"traceID"' "${trace_search_file}" 2>/dev/null; then
       $sorted[((($sorted|length)*99/100)|floor)],
       $sorted[-1],
       ($sorted | max_by((.spanSet.matched // 0) + ([.spanSets[]?.matched // 0] | add // 0)))
-    ] + [$all[] | select((.|tostring|test("error|status.*(error|true|2)";"i")))][:100])
+    ] + [$all[] | select((.|tostring|test("error|status.*(error|true|2)";"i")))][:100]
+      # The twenty slowest: a slow trace is the one worth opening, and the span
+      # profiles need enough tagged root spans that a 100 Hz sampler lands in
+      # one (four short spans often held none).
+      + $sorted[-20:])
     | map(select(. != null) | .traceID) | unique[]' < "${trace_search_file}" 2>/dev/null)
   if [[ "${trace_detail_failures}" -gt 0 ]]; then
     echo "WARNING: ${trace_detail_failures} trace detail fetch(es) failed; this evidence package is INCOMPLETE." >&2

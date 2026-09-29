@@ -126,7 +126,9 @@ services:
       INSTANCE_ID: api-a
       PYROSCOPE_APPLICATION_NAME: protocol-reliability-a
       OTEL_SERVICE_NAME: protocol-reliability-a
-      DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
+      # Suspended until dotnet-monitor resumes it: with nosuspend the app raced
+      # the monitor's profiler injection, and /stacks failed for that process.
+      DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock
     volumes:
       - diagnostic-ipc:/diag
       - telemetry-injection:/opt/perflab/injection:ro
@@ -147,7 +149,7 @@ services:
       INSTANCE_ID: api-b
       PYROSCOPE_APPLICATION_NAME: protocol-reliability-b
       OTEL_SERVICE_NAME: protocol-reliability-b
-      DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
+      DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock
     volumes:
       - diagnostic-ipc-b:/diag
       - telemetry-injection:/opt/perflab/injection:ro

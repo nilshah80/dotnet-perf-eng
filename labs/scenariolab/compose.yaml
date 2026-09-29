@@ -214,7 +214,9 @@ services:
       # subject, since a sample can miss the true worst outlier.
       OTEL_TRACES_SAMPLER: parentbased_traceidratio
       OTEL_TRACES_SAMPLER_ARG: ${PERFLAB_TRACE_SAMPLE_RATIO:-0.25}
-      DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
+      # Suspended until dotnet-monitor resumes it: with nosuspend the app raced
+      # the monitor's profiler injection, and /stacks failed for that process.
+      DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock
       DOTNET_DbgEnableMiniDump: ${PERFLAB_DBG_ENABLE_MINIDUMP:-0}
       COMPlus_DbgEnableMiniDump: ${PERFLAB_DBG_ENABLE_MINIDUMP:-0}
       DOTNET_DbgMiniDumpType: "3"
@@ -281,7 +283,7 @@ services:
       # subject, since a sample can miss the true worst outlier.
       OTEL_TRACES_SAMPLER: parentbased_traceidratio
       OTEL_TRACES_SAMPLER_ARG: ${PERFLAB_TRACE_SAMPLE_RATIO:-0.25}
-      DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
+      DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock
       DOTNET_DbgEnableMiniDump: ${PERFLAB_DBG_ENABLE_MINIDUMP:-0}
       COMPlus_DbgEnableMiniDump: ${PERFLAB_DBG_ENABLE_MINIDUMP:-0}
       DOTNET_DbgMiniDumpType: "3"

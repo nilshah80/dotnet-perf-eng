@@ -38,3 +38,10 @@ if os.name == "nt":
 os.execv(sys.argv[1], sys.argv[1:])
 ' "${BASH}" "$0" "$@"
 }
+
+# signal_group <signal> <leader-pid>: signal the process group a test started
+# with set -m. On Windows the group signal fails for a member that is still
+# starting, yet reaches the rest; the group has exited only when its leader has.
+signal_group() {
+  kill -"$1" -- "-$2" 2>/dev/null || kill -0 "$2" 2>/dev/null
+}
