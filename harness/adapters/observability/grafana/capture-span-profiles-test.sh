@@ -19,28 +19,41 @@ source "${adapter_dir}/capture-profiles.sh"
 # shellcheck disable=SC1091
 source "${adapter_dir}/capture-span-profiles.sh"
 
-# Fake curl: records the request body, answers like Pyroscope's Connect API.
+# Fake curl: records the request, answers Tempo's search with the run's tagged
+# spans and Pyroscope's Connect API by SPAN_TEST_MODE. linkage: the two
+# representative spans hold no sample, the run's other tagged spans do.
 mkdir -p "${test_root}/bin"
 cat > "${test_root}/bin/curl" <<'CURL'
 #!/usr/bin/env bash
-out=""; data=""; url=""
+out=""; data=""; url=""; query=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     --data) data="$2"; shift 2 ;;
+    --data-urlencode) query="${query}${query:+&}$2"; shift 2 ;;
     -w|-H|--max-time) shift 2 ;;
     http*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
+if [[ "${url}" == */api/search ]]; then
+  printf '%s %s\n' "${url}" "${query}" >> "${SPAN_TEST_CALLS}"
+  span() { printf '{"spanID":"%s","attributes":[{"key":"pyroscope.profile.id","value":{"stringValue":"%s"}},{"key":"service.name","value":{"stringValue":"%s"}}]}' "$2" "$2" "$1"; }
+  printf '{"traces":[{"traceID":"01","spanSets":[{"spans":[%s,%s]}]},{"traceID":"02","spanSet":{"spans":[%s]}}]}' \
+    "$(span perflab-api 1111111111111111)" "$(span perflab-worker 3333333333333333)" "$(span perflab-api 2222222222222222)"
+  exit 0
+fi
 printf '%s %s\n' "${url}" "${data}" >> "${SPAN_TEST_CALLS}"
-case "${SPAN_TEST_MODE}" in
-  samples) printf '{"flamegraph":{"names":["total","Checkout"],"levels":[{"values":["0","42","0","1"]}],"total":"42","maxSelf":"42"}}' > "${out}"; printf 200 ;;
+mode="${SPAN_TEST_MODE}"
+[[ "${mode}" == linkage && "${data}" == *'"spanSelector":["00f067aa0ba902b7","53995c3f42cd8ad8"]'* ]] && mode=none
+case "${mode}" in
+  samples|linkage) printf '{"flamegraph":{"names":["total","Checkout"],"levels":[{"values":["0","42","0","1"]}],"total":"42","maxSelf":"42"}}' > "${out}"; printf 200 ;;
   none) printf '{"flamegraph":{"names":["total"],"levels":[],"total":"0"}}' > "${out}"; printf 200 ;;
   down) exit 7 ;;
 esac
 CURL
 chmod +x "${test_root}/bin/curl"
+backend_curl() { curl "$@"; }
 export PATH="${test_root}/bin:${PATH}" SPAN_TEST_CALLS="${test_root}/calls"
 
 trace() { # <file> <service> <profile-id-or-empty>
@@ -83,6 +96,33 @@ artifact_dir="$(package down)"; SPAN_TEST_MODE=down
 pyroscope_capture_span_profiles
 jq -e '.captureState == "failed" and (.reason | test("unreachable"))' "${artifact_dir}/telemetry/profiles/span-profiles.json" >/dev/null \
   || fail "an unreachable Pyroscope was not reported as failed"
+
+# The representative spans often hold no 100 Hz sample. The run's other tagged
+# spans, found by the same trace query, then decide whether the linkage works.
+tempo_url=http://tempo:3200; trace_query='{ resource.service.name =~ "perflab-api" && resource.perf.run.id = "run-9" }'
+artifact_dir="$(package linked)"; SPAN_TEST_MODE=linkage; : > "${SPAN_TEST_CALLS}"
+pyroscope_capture_span_profiles
+result="${artifact_dir}/telemetry/profiles/span-profiles.json"
+jq -e '.captureState == "captured" and (.reason | test("linkage")) and .services[0].captureState == "empty"
+       and .linkage == [{"service":"perflab-api","spanIds":2,"totalSamples":42,"httpStatus":"200","captureState":"captured"},
+                        {"service":"perflab-worker","spanIds":1,"totalSamples":42,"httpStatus":"200","captureState":"captured"}]' "${result}" >/dev/null \
+  || fail "linked samples did not settle unsampled representatives: $(cat "${result}")"
+grep -qF 'http://tempo:3200/api/search q={ resource.service.name =~ "perflab-api" && resource.perf.run.id = "run-9" && span.pyroscope.profile.id != "" } | select(span.pyroscope.profile.id, resource.service.name)&start=1800000000&end=1800000060&limit=500&spss=10&most_recent=true' "${SPAN_TEST_CALLS}" \
+  || fail "the linkage search did not narrow the trace query: $(cat "${SPAN_TEST_CALLS}")"
+grep -qF '"spanSelector":["1111111111111111","2222222222222222"]' "${SPAN_TEST_CALLS}" || fail "the linkage did not ask for the run's tagged api spans"
+[[ -z "$(find "${artifact_dir}/telemetry/profiles" -name '.linkage*')" ]] || fail "linkage scratch files were left in the package"
+
+artifact_dir="$(package linked-empty)"; SPAN_TEST_MODE=none
+pyroscope_capture_span_profiles
+jq -e '.captureState == "missing" and (.linkage | length) == 2 and .linkage[0].captureState == "empty"' "${artifact_dir}/telemetry/profiles/span-profiles.json" >/dev/null \
+  || fail "unsampled linkage was not reported as missing"
+
+artifact_dir="$(package linked-sampled)"; SPAN_TEST_MODE=samples; : > "${SPAN_TEST_CALLS}"
+pyroscope_capture_span_profiles
+jq -e '.captureState == "captured" and .reason == "" and .linkage == []' "${artifact_dir}/telemetry/profiles/span-profiles.json" >/dev/null \
+  || fail "sampled representatives recorded a linkage"
+! grep -q '/api/search' "${SPAN_TEST_CALLS}" || fail "sampled representatives still searched for linkage"
+tempo_url=""; trace_query=""
 
 # Traces without the attribute: the listener was not active. Nothing is queried.
 artifact_dir="${test_root}/untagged"; mkdir -p "${artifact_dir}/telemetry/traces/details"
