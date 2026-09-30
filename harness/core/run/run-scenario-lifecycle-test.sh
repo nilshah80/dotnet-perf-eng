@@ -249,6 +249,10 @@ calls_contain 'loadgen:measure' \
 
 pkg="$(ls -dt "${test_root}"/artifacts/runs/*/ 2>/dev/null | head -1)"
 [[ -n "${pkg}" ]] || fail "attach-only run produced no evidence package"
+jq -e '.workload.type == "request" and .workload.selector == "S01" and
+  .workload.entrypoint == "harness/adapters/loadgen/k6/default.js" and
+  .workload.allowedOrigins == []' "${pkg}/manifest.json" >/dev/null \
+  || fail "the measured manifest lost its workload replay identity"
 jq -e '.owned == false and (.reason | test("attach-only"))' "${pkg}/data/dataset.json" >/dev/null \
   || fail "attach-only dataset state does not record that the data is not ours: $(cat "${pkg}/data/dataset.json" 2>/dev/null)"
 
@@ -658,5 +662,45 @@ calls_contain 'campaign:worker:' \
   || fail "the api load was replayed $(grep -c '^replay:api$' "${calls}") time(s), want exactly 1"
 [[ "$(grep -c '^replay:worker$' "${calls}")" == "1" ]] \
   || fail "the worker load was replayed $(grep -c '^replay:worker$' "${calls}") time(s), want exactly 1"
+
+# A measurement and standalone capture are different processes. Exercise the
+# shipping manifest writer and capture-runtime restoration for every workload
+# mentioned by the review, with only target/generator/runtime I/O stubbed.
+protocol_config="${test_root}/protocol-lab.config.sh"
+cp "${test_root}/labs/protocol-reliability/lab.config.sh" "${protocol_config}"
+printf '\nPERFLAB_MEASUREMENT_WINDOW_PROBE_PATH=""\nPERFLAB_MEASUREMENT_WINDOW_REPLICAS=""\n' >> "${protocol_config}"
+cat > "${test_root}/harness/adapters/runtime/dotnet/capture.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source "${PERFLAB_HARNESS_ROOT}/core/lib/common.sh"
+entrypoint="$(relative_to_repo "$(loadgen_script)")"
+mkdir -p "$1/runtime"
+jqd -n --arg type "${PERF_WORKLOAD_KIND}" --arg selector "${PERF_PROTOCOL}" \
+  --arg entrypoint "${entrypoint}" --argjson origins "${PERF_ALLOWED_ORIGINS:-[]}" \
+  --arg secondary "${PERF_SECONDARY_BASE_URL:-}" \
+  '{type:$type,selector:$selector,entrypoint:$entrypoint,allowedOrigins:$origins,secondaryBaseUrl:$secondary}' \
+  > "$1/runtime/selection.json"
+EOF
+chmod +x "${test_root}/harness/adapters/runtime/dotnet/capture.sh"
+for selector in P01 P02 P03 P04 P10 P12 P13; do
+  replay_pkg="${test_root}/replay-${selector}"
+  : > "${calls}"
+  env PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${protocol_config}" PERFLAB_JQ=host \
+    PERFLAB_TEST_CALLS="${calls}" PERFLAB_ARTIFACT_DIR="${replay_pkg}" PERFLAB_ARTIFACTS_ROOT="${test_root}/artifacts" \
+    PERFLAB_WARMUP_SECONDS=0 PERF_WRITE_ACK=managed-reference PERF_WRITE_BUDGET=100 \
+    bash "${test_root}/harness/core/run/run-scenario.sh" "${selector}" 1 > "${replay_pkg}.measure.out" 2>&1 || true
+  [[ -s "${replay_pkg}/manifest.json" ]] || fail "${selector} did not record its workload: $(tail -3 "${replay_pkg}.measure.out")"
+  env -u PERF_WORKLOAD_KIND -u PERF_PROTOCOL -u PERF_WORKLOAD_ENTRYPOINT -u PERF_ALLOWED_ORIGINS -u PERF_SECONDARY_BASE_URL \
+    PATH="${test_root}/bin:${PATH}" PERFLAB_CONFIG="${protocol_config}" PERFLAB_JQ=host \
+    PERFLAB_TEST_CALLS="${calls}" PERFLAB_ARTIFACTS_ROOT="${test_root}/artifacts" \
+    bash "${test_root}/harness/core/capture/capture-runtime.sh" "${replay_pkg}" trace 1 > "${replay_pkg}.capture.out" 2>&1 \
+    || fail "${selector} standalone replay failed: $(tail -3 "${replay_pkg}.capture.out")"
+  jq -e -s '.[0].workload as $w | .[1] == ($w | {type,selector,entrypoint,allowedOrigins,secondaryBaseUrl})' \
+    "${replay_pkg}/manifest.json" "${replay_pkg}/runtime/selection.json" >/dev/null \
+    || fail "${selector} diagnostic workload differed from the measurement"
+  expected="$(jq -r --arg id "${selector}" '.selectors[] | select(.id==$id) | .entrypoints.k6' "${test_root}/labs/protocol-reliability/workload-manifest.json")"
+  jq -e --arg expected "${expected}" '.entrypoint==$expected' "${replay_pkg}/runtime/selection.json" >/dev/null \
+    || fail "${selector} did not replay its declared entrypoint"
+done
 
 echo "run-scenario lifecycle tests passed"

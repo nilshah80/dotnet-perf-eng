@@ -254,6 +254,7 @@ fi
 export PERF_BASE_URL="${manifest_base_url:-${base_url}}"
 export PERFLAB_CONNECTIONS="${manifest_conns:-$(scenario_value "${scenario_id}" connections)}"
 export PERFLAB_DURATION_SECONDS="${duration_seconds}" PERFLAB_PROFILE="steady"
+performance_restore_workload_selector "${manifest}" "${scenario_id}" || exit 1
 if [[ "${manifest_dataset}" == seedScale=* ]]; then
   recorded_seed_scale="${manifest_dataset#seedScale=}"
   if [[ "${recorded_seed_scale}" == "default" ]]; then

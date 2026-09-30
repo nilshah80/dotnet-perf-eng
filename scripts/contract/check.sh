@@ -54,6 +54,7 @@ PY
 "$root/harness/core/lib/capability-qualification-test.sh"
 "$root/harness/core/lib/backend-auth-test.sh"
 "$root/harness/core/lib/remote-correlation-test.sh"
+bash "$root/harness/core/lib/workload-replay-test.sh"
 "$root/harness/core/lib/baggage-contract-test.sh"
 "$root/harness/core/lib/soak-session-test.sh"
 "$root/harness/core/lib/fault-proof-test.sh"

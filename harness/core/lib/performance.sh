@@ -39,6 +39,51 @@ performance_manifest_selector_preflight() {
   }
 }
 
+# Restore the measured workload before the runtime adapter re-sources common.sh.
+# Legacy request packages retain their supported fallback; protocol and journey
+# packages without this envelope must be measured again instead of loading k6.js.
+performance_restore_workload_selector() {
+  local file="$1" scenario="$2" kind selector entrypoint origins secondary measured_generator
+  read_fields 6 < <(jqd -r '[.workload.type // "", .workload.selector // "",
+    .workload.entrypoint // "", (.workload.allowedOrigins // [] | tojson),
+    .workload.secondaryBaseUrl // "", .workload.loadGenerator // ""] | .[]' < "${file}") || return 1
+  kind="${TSV_FIELDS[0]}"; selector="${TSV_FIELDS[1]}"; entrypoint="${TSV_FIELDS[2]}"
+  origins="${TSV_FIELDS[3]}"; secondary="${TSV_FIELDS[4]}"; measured_generator="${TSV_FIELDS[5]}"
+  if [[ -z "${kind}" ]]; then
+    kind="$(scenario_value "${scenario}" type)" || return 1
+    if [[ "${kind}" != request || "${PERF_METHOD:-}" == JOURNEY || "${PERF_METHOD:-}" == MIX ]]; then
+      echo "This measurement lacks a recorded workload type/selector; create a fresh measurement before diagnostic replay." >&2
+      return 1
+    fi
+  fi
+  case "${kind}" in request|protocol|journey|mix) ;; *) echo "invalid recorded workload type '${kind}'" >&2; return 1 ;; esac
+  if [[ "${kind}" == protocol || "${kind}" == journey ]]; then
+    [[ -n "${selector}" && -n "${entrypoint}" ]] || {
+      echo "This measurement lacks a recorded workload selector/entrypoint; create a fresh measurement before diagnostic replay." >&2
+      return 1
+    }
+  fi
+  if [[ -n "${measured_generator}" && "${load_generator:-${measured_generator}}" != "${measured_generator}" ]]; then
+    if [[ "${kind}" != request ]]; then
+      echo "Diagnostic replay must use the measured ${measured_generator} generator for a ${kind} workload." >&2
+      return 1
+    fi
+    # Isolated request captures have always permitted a generator override.
+    # Replay the recorded route with that generator's script, not a k6 file
+    # passed as a JMeter plan (or vice versa).
+    entrypoint=""
+  fi
+  export PERF_WORKLOAD_KIND="${kind}" PERF_PROTOCOL="${selector}"
+  export PERF_WORKLOAD_ENTRYPOINT="${entrypoint}"
+  if [[ "${origins}" != '[]' ]]; then
+    export PERF_ALLOWED_ORIGINS="${origins}"
+  else
+    unset PERF_ALLOWED_ORIGINS
+  fi
+  # Empty is recorded too: do not borrow a later descriptor's secondary target.
+  export PERF_SECONDARY_BASE_URL="${secondary}"
+}
+
 # Distributed execution is deliberately a selector-owned capability. A caller
 # cannot turn an arbitrary k6 script or a JMeter plan into a remote workload by
 # setting PERFLAB_SHARDS: the selected manifest entry must opt into the one

@@ -5,7 +5,17 @@
 set -euo pipefail
 
 root="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
-script="${root}/labs/protocol-reliability/loadgen/multi-origin.js"
+# Use the shipping resolver, so a P13-to-P12 dispatch regression fails this
+# live case before building or loading a target.
+export PERFLAB_CONFIG="${root}/labs/protocol-reliability/lab.config.sh" PERFLAB_JQ=host
+export PERF_SCENARIO=P13 PERF_WORKLOAD_KIND=journey PERF_PROTOCOL=multi-origin-allowlist
+unset PERF_WORKLOAD_ENTRYPOINT
+# shellcheck disable=SC1091
+source "${root}/harness/core/lib/common.sh"
+script="$(loadgen_script)"
+[[ "${script}" == "${root}/labs/protocol-reliability/loadgen/multi-origin.js" ]] || {
+  echo "multi-origin-proof-test: P13 resolved the wrong workload: ${script}" >&2; exit 1;
+}
 for tool in docker dotnet k6 curl jq lsof; do
   command -v "${tool}" >/dev/null 2>&1 || { echo "multi-origin-proof-test: ${tool} is required" >&2; exit 1; }
 done
@@ -88,6 +98,21 @@ jq -e '
   exit 1
 }
 
+# Replay in a fresh selector environment using the measured entrypoint and
+# origin set. This drives the same two live listeners through the restored file.
+jq -n --arg entrypoint "$(relative_to_repo "${script}")" --argjson origins "${allowed_origins}" --arg secondary "${secondary}" \
+  '{workload:{loadGenerator:"k6",type:"journey",selector:"multi-origin-allowlist",entrypoint:$entrypoint,allowedOrigins:$origins,secondaryBaseUrl:$secondary}}' \
+  > "${work}/recorded-workload.json"
+unset PERF_WORKLOAD_KIND PERF_PROTOCOL PERF_WORKLOAD_ENTRYPOINT PERF_ALLOWED_ORIGINS PERF_SECONDARY_BASE_URL
+performance_restore_workload_selector "${work}/recorded-workload.json" P13
+replay_script="$(loadgen_script)"
+PERF_BASE_URL="${primary}" PERF_RUN_ID=multi-origin-replay \
+  k6 run --quiet --vus 1 --iterations 1 --summary-export "${work}/replay-summary.json" "${replay_script}" > "${work}/replay.out" 2>&1
+jq -e '(.metrics.multi_origin_primary_requests.count // 0) == 1 and (.metrics.multi_origin_secondary_requests.count // 0) == 1 and (.metrics.journey_completed.count // 0) == 1 and (.metrics.journey_failed.count // 0) == 0 and (.metrics.journey_wire_requests.count // 0) == 2' \
+  "${work}/replay-summary.json" >/dev/null || {
+  echo "multi-origin-proof-test: diagnostic replay did not complete the same two-origin journey" >&2; exit 1;
+}
+
 # A /status response snapshots before its own middleware increment. The second
 # read should therefore be exactly one higher (the read itself), proving the
 # rejected k6 initialization never reached the unallowed sink.
@@ -112,4 +137,4 @@ sink_after="$(curl -fsS "${sink}/api/reliability/status" | jq -r '.httpRequests'
   exit 1
 }
 
-echo "multi-origin proof passed: P13 used exactly two allowlisted listener origins and rejected a hostile origin before traffic"
+echo "multi-origin proof passed: P13 measured and replayed both allowlisted listener origins and rejected a hostile origin before traffic"

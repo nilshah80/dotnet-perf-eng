@@ -307,13 +307,13 @@ export PERFLAB_HARNESS_ROOT="${harness_root}"
 dependency_dir() { printf '%s/adapters/dependency/%s' "${harness_root}" "$1"; }
 loadgen_dir() { printf '%s/adapters/loadgen/%s' "${harness_root}" "${load_generator}"; }
 
-# Per-lab workload script for the active generator, falling back to the shared
-# default. Resolution order: explicit PERFLAB_{K6,WRK}_SCRIPT from the descriptor
-# > <lab>/loadgen/<gen>.<ext> > the shared default.<ext>. This is the seam that
+# Resolve the measured replay entrypoint first, then a journey/protocol
+# manifest entrypoint, followed by the existing workload-specific, descriptor,
+# lab and shared fallbacks. This is the seam that
 # lets a project own its workload (auth in k6 setup(), datasets, chaining)
 # WITHOUT forking the shared run.sh or the observations/evidence contract.
 loadgen_script() {
-  local ext override lab_script
+  local ext override lab_script manifest_script selector
   case "${load_generator}" in
     k6)  ext="js";  override="${PERFLAB_K6_SCRIPT:-}" ;;
     wrk) ext="lua"; override="${PERFLAB_WRK_SCRIPT:-}" ;;
@@ -324,6 +324,25 @@ loadgen_script() {
     if [[ "${load_generator}" == "wrk" ]]; then
       echo "capability generator.wrk.journey is unsupported; rejected before traffic" >&2
       return 1
+    fi
+  fi
+  # Diagnostic replay pins the measured entrypoint, even if today's manifest
+  # or descriptor points at a different script. Never silently replace it.
+  if [[ -n "${PERF_WORKLOAD_ENTRYPOINT:-}" ]]; then
+    lab_script="$(resolve_repo_path "${PERF_WORKLOAD_ENTRYPOINT}")"
+    [[ -f "${lab_script}" ]] || { echo "recorded workload entrypoint is missing: ${lab_script}" >&2; return 1; }
+    printf '%s' "${lab_script}"; return 0
+  fi
+  if [[ "${PERF_WORKLOAD_KIND:-}" == "journey" || "${PERF_WORKLOAD_KIND:-}" == "protocol" ]]; then
+    selector="${PERF_SCENARIO:-${scenario_id:-}}"
+    if [[ -n "${workload_manifest:-}" && -f "${workload_manifest}" && -n "${selector}" ]]; then
+      manifest_script="$(jqd -r --arg selector "${selector}" --arg generator "${load_generator}" \
+        '.selectors[] | select(.id == $selector) | .entrypoints[$generator] // empty' < "${workload_manifest}")" || return 1
+      if [[ -n "${manifest_script}" ]]; then
+        lab_script="$(resolve_repo_path "${manifest_script}")"
+        [[ -f "${lab_script}" ]] || { echo "manifest workload entrypoint is missing: ${lab_script}" >&2; return 1; }
+        printf '%s' "${lab_script}"; return 0
+      fi
     fi
   fi
   if [[ "${PERF_WORKLOAD_KIND:-}" == "journey" || "${PERF_MIX_KIND:-}" == "journey" ]]; then

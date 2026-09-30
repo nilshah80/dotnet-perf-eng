@@ -245,13 +245,21 @@ if [[ "${distributed_enabled}" == "1" ]]; then
     "$(json_escape "${distributed_target_origin}")" \
     "$([[ "${PERFLAB_DISTRIBUTED_PARTIAL:-0}" == "1" ]] && echo true || echo false)")"
 fi
+# Resolve with this scenario's identity, not an inherited replay entrypoint.
+export PERF_SCENARIO="${perf_scenario}"
+unset PERF_WORKLOAD_ENTRYPOINT
+workload_entrypoint="$(loadgen_script)" || exit 1
+workload_entrypoint="$(relative_to_repo "${workload_entrypoint}")"
+workload_selector="${PERF_PROTOCOL:-${scenario_id}}"
+workload_allowed_origins="${PERF_ALLOWED_ORIGINS:-[]}"
 continuous_profiling_json=false; [[ "${continuous_profiling:-0}" == "1" ]] && continuous_profiling_json=true
 profiling_keep_tiering_json=false
 [[ "${continuous_profiling:-0}" == "1" && "${profiling_keep_tiering:-0}" == "1" ]] && profiling_keep_tiering_json=true
-printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","mode":"measure","target":"%s","remoteTelemetry":%s,"continuousProfiling":%s,"profilingKeepTiering":%s,"profilingPolicy":"%s","profilingPolicySource":"%s","profilingTypes":"%s","traceSampler":"%s","traceSamplerArg":"%s","profilingPreflight":"analysis/profiling-preflight.json","workload":{"loadGenerator":"%s","baseUrl":"%s","readyUrl":"%s","method":"%s","path":"%s","body":"%s","datasetIdentity":"%s","durationSeconds":%s,"requestedDurationSeconds":%s,"connections":%s,"profile":"%s"},"startedAt":"%s","startedEpoch":%s,"source":{"gitRevision":"%s"}%s%s%s%s}\n' \
+printf '{"runId":"%s","telemetryRunId":"%s","scenarioId":"%s","mode":"measure","target":"%s","remoteTelemetry":%s,"continuousProfiling":%s,"profilingKeepTiering":%s,"profilingPolicy":"%s","profilingPolicySource":"%s","profilingTypes":"%s","traceSampler":"%s","traceSamplerArg":"%s","profilingPreflight":"analysis/profiling-preflight.json","workload":{"type":"%s","selector":"%s","entrypoint":"%s","allowedOrigins":%s,"secondaryBaseUrl":"%s","loadGenerator":"%s","baseUrl":"%s","readyUrl":"%s","method":"%s","path":"%s","body":"%s","datasetIdentity":"%s","durationSeconds":%s,"requestedDurationSeconds":%s,"connections":%s,"profile":"%s"},"startedAt":"%s","startedEpoch":%s,"source":{"gitRevision":"%s"}%s%s%s%s}\n' \
   "$(json_escape "${package_run_id}")" "$(json_escape "${telemetry_run_id}")" "$(json_escape "${scenario_id}")" "$(json_escape "${target_mode}")" "${remote_telemetry_json}" "${continuous_profiling_json}" "${profiling_keep_tiering_json}" \
   "$(json_escape "${PERFLAB_PROFILING_POLICY}")" "$(json_escape "${PERFLAB_PROFILING_POLICY_SOURCE:-default}")" "$(json_escape "${PERFLAB_PROFILING_TYPES}")" \
   "$(json_escape "${PERFLAB_TRACE_SAMPLER:-parentbased_traceidratio}")" "$(json_escape "${PERFLAB_TRACE_SAMPLE_RATIO:-0.25}")" \
+  "$(json_escape "${PERF_WORKLOAD_KIND}")" "$(json_escape "${workload_selector}")" "$(json_escape "${workload_entrypoint}")" "${workload_allowed_origins}" "$(json_escape "${PERF_SECONDARY_BASE_URL:-}")" \
   "$(json_escape "${load_generator}")" "$(json_escape "${base_url}")" "$(json_escape "${ready_url}")" "$(json_escape "${method}")" "$(json_escape "${path}")" "$(json_escape "${body}")" "$(json_escape "${dataset_identity}")" \
   "${effective_duration}" "${duration_seconds}" "${connections}" "$(json_escape "${load_profile}")" "$(json_escape "${started_at}")" "${started_epoch}" \
   "$(json_escape "${git_revision}")" "${suite_field}" "${fault_field}" "${remote_correlation_field}" "${distributed_field}" \
