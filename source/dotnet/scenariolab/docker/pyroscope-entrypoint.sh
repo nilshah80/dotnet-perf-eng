@@ -1,5 +1,5 @@
 #!/bin/sh
-# Opt-in Pyroscope .NET CPU profiler wrapper. When continuous profiling is off,
+# Opt-in Pyroscope .NET profiler wrapper. When continuous profiling is off,
 # the application is exec'd with no CLR profiler or LD_PRELOAD activation.
 set -eu
 
@@ -43,13 +43,35 @@ if parse_bool "${PERFLAB_CONTINUOUS_PROFILING:-0}"; then
   else
     export LD_LIBRARY_PATH="/opt/pyroscope"
   fi
+  profile_types="${PERFLAB_PROFILING_TYPES:-cpu}"
   export PYROSCOPE_PROFILING_ENABLED=1
-  export PYROSCOPE_PROFILING_CPU_ENABLED=true
+  export PYROSCOPE_PROFILING_CPU_ENABLED=false
   export PYROSCOPE_PROFILING_WALLTIME_ENABLED=false
   export PYROSCOPE_PROFILING_ALLOCATION_ENABLED=false
   export PYROSCOPE_PROFILING_LOCK_ENABLED=false
   export PYROSCOPE_PROFILING_EXCEPTION_ENABLED=false
   export PYROSCOPE_PROFILING_HEAP_ENABLED=false
+  selected=0
+  old_ifs="${IFS}"
+  IFS=','
+  for profile_type in ${profile_types}; do
+    case "${profile_type}" in
+      cpu) export PYROSCOPE_PROFILING_CPU_ENABLED=true ;;
+      wall) export PYROSCOPE_PROFILING_WALLTIME_ENABLED=true ;;
+      allocation) export PYROSCOPE_PROFILING_ALLOCATION_ENABLED=true ;;
+      lock) export PYROSCOPE_PROFILING_LOCK_ENABLED=true ;;
+      exception) export PYROSCOPE_PROFILING_EXCEPTION_ENABLED=true ;;
+      live-heap) export PYROSCOPE_PROFILING_HEAP_ENABLED=true ;;
+      *)
+        echo "unsupported Pyroscope profile type '${profile_type}' in PERFLAB_PROFILING_TYPES." >&2
+        exit 1
+        ;;
+    esac
+    selected=$((selected + 1))
+  done
+  IFS="${old_ifs}"
+  [ "${selected}" -gt 0 ] || { echo "PERFLAB_PROFILING_TYPES must select at least one type." >&2; exit 1; }
+  export PERFLAB_PROFILING_TYPES="${profile_types}"
   export PYROSCOPE_PROFILING_LOG_DIR="${PYROSCOPE_PROFILING_LOG_DIR:-/opt/pyroscope/logs}"
   export PYROSCOPE_SERVER_ADDRESS
   export PYROSCOPE_APPLICATION_NAME
@@ -74,9 +96,17 @@ if parse_bool "${PERFLAB_CONTINUOUS_PROFILING:-0}"; then
       esac
       ;;
   esac
-  # Datadog refuses to start when the container CPU quota is below 1 core.
-  # scenariolab's worker is cpus: 0.75. Opt-in profiling must still run.
-  export DD_PROFILING_MIN_CORES_THRESHOLD="${DD_PROFILING_MIN_CORES_THRESHOLD:-0.1}"
+  # pyroscope-dotnet uses this inherited internal setting for its CPU gate. The
+  # orchestrator validates the provider range and each service quota first.
+  threshold="${PERFLAB_PROFILING_MIN_CORES_THRESHOLD:?required when continuous profiling is enabled}"
+  effective_cores="${PERFLAB_PROFILING_EFFECTIVE_CPU_CORES:?required when continuous profiling is enabled}"
+  if ! awk -v threshold="${threshold}" -v effective="${effective_cores}" 'BEGIN {
+    exit !(threshold >= 0.1 && threshold <= 1 && effective > 0 && threshold <= effective)
+  }'; then
+    echo "invalid profiling CPU threshold/quota: threshold=${threshold} effective=${effective_cores}" >&2
+    exit 1
+  fi
+  export DD_PROFILING_MIN_CORES_THRESHOLD="${threshold}"
   # Each upload is stored by Pyroscope at ONE timestamp. The inherited 60s
   # period puts at most one point inside a 30s measurement window (often none),
   # so exact-window queries miss active processes. 10s matches the 10s query

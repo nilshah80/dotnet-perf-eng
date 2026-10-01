@@ -63,19 +63,22 @@ if [[ "${with_runtime}" == "true" && "${target_mode}" != "local" ]]; then
   echo "NOTE: runtime diagnostics are standalone-only for a remote target; running measurement-only. Use capture-runtime.sh directly for a single remote diagnostic (PERFLAB_REMOTE_DIAGNOSTICS=1 + ack)."
 fi
 
-normalized_selector="$(printf '%s' "${selector}" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
+normalized_selector="$(printf '%s' "${selector}" | tr -d '[:space:]')"
 [[ -n "${normalized_selector}" ]] || { echo "At least one scenario must be selected." >&2; exit 1; }
 
 scenario_ids=()
-if [[ "${normalized_selector}" == "ALL" ]]; then
+if [[ "$(printf '%s' "${normalized_selector}" | tr '[:lower:]' '[:upper:]')" == "ALL" ]]; then
   while IFS= read -r sid; do scenario_ids+=("${sid}"); done < <(scenario_ids_all)
 else
   if [[ "${normalized_selector}" == ,* || "${normalized_selector}" == *, || "${normalized_selector}" == *,,* ]]; then
     echo "Scenario selection contains an empty value: '${selector}'." >&2; exit 1
   fi
   IFS=',' read -r -a requested <<< "${normalized_selector}"
-  for sid in "${requested[@]}"; do
-    require_scenario "${sid}"
+  for requested_id in "${requested[@]}"; do
+    # Preserve the catalog's canonical identifier. Request scenarios commonly
+    # use upper-case IDs while named journeys use lower-case selectors.
+    sid="$(scenario_ids_all | awk -v wanted="${requested_id}" 'tolower($0) == tolower(wanted) { print; exit }')"
+    [[ -n "${sid}" ]] || require_scenario "${requested_id}"
     for existing in "${scenario_ids[@]:-}"; do
       [[ "${existing}" == "${sid}" ]] && { echo "Scenario '${sid}' was selected more than once." >&2; exit 1; }
     done

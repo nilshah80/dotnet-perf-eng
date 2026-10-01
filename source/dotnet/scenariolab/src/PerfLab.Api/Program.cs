@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.AspNetCore.HttpLogging;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using OpenTelemetry.Logs;
@@ -99,8 +100,51 @@ builder.Logging.AddOpenTelemetry(logging =>
     });
 });
 
+// Per-request logging is an explicit opt-in (D-P0-12). The knob is
+// PERFLAB_REQUEST_LOGGING, which compose maps onto the logging categories; it is
+// OFF by default because at this lab's throughput two lines per request is over
+// a million records per window, which perturbs the measurement and instantly
+// truncates the log budget.
+//
+// It has to be HTTP logging middleware rather than a category level: raising
+// Microsoft.AspNetCore to Information does NOT produce per-request records on
+// this framework version, so the knob silently did nothing and every run
+// reported an empty log window. Fields are restricted to what correlates a line
+// to a trace and a route -- bodies and headers are never logged, because this
+// runs against synthetic data but the habit should not depend on that.
+var requestLogging = Environment.GetEnvironmentVariable("PERFLAB_REQUEST_LOGGING");
+var requestLoggingEnabled = requestLogging is not null && (
+    requestLogging.Equals("Trace", StringComparison.OrdinalIgnoreCase) ||
+    requestLogging.Equals("Debug", StringComparison.OrdinalIgnoreCase) ||
+    requestLogging.Equals("Information", StringComparison.OrdinalIgnoreCase));
+if (requestLoggingEnabled)
+{
+    // The filter is set here rather than left to configuration layering. The
+    // compose variable sets Logging:LogLevel:Microsoft.AspNetCore.HttpLogging,
+    // but appsettings.json pins the parent Microsoft.AspNetCore to Warning and
+    // that pin wins in practice -- so the documented knob silently did nothing.
+    // An explicit filter makes the knob authoritative instead of dependent on
+    // which of two files is read last.
+    builder.Logging.AddFilter("Microsoft.AspNetCore.HttpLogging", LogLevel.Information);
+    builder.Services.AddHttpLogging(options =>
+    {
+        options.LoggingFields =
+            HttpLoggingFields.RequestMethod |
+            HttpLoggingFields.RequestPath |
+            HttpLoggingFields.ResponseStatusCode |
+            HttpLoggingFields.Duration;
+        options.CombineLogs = true;
+    });
+}
+
 var app = builder.Build();
 app.UseExceptionHandler();
+
+if (requestLoggingEnabled)
+{
+    app.UseHttpLogging();
+}
+
 
 app.Use(async (httpContext, next) =>
 {

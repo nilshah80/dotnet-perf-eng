@@ -1,0 +1,29 @@
+{
+  "apiVersion": "perflab.io/v1",
+  "kind": "ScenarioCatalog",
+  "contractRevision": "v1",
+  "scenarios": [
+    {
+      "id": "E00",
+      "name": "control-products",
+      "workload": {
+        "type": "request",
+        "selector": "control-products"
+      },
+      "targets": [
+        "api"
+      ],
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      }
+    }
+  ]
+}

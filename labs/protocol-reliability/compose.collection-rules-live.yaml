@@ -1,0 +1,17 @@
+# Isolated ports for the live CollectionRules qualification. This override is
+# intentionally used only by collection-rules-live-test.sh, so it never alters
+# the normal developer Compose topology or its stable local ports.
+services:
+  lgtm:
+    ports: !reset []
+  dotnet-monitor:
+    ports: !override
+      - "127.0.0.1:${PERFLAB_COLLECTION_RULES_MONITOR_PORT:-29423}:52323"
+      - "127.0.0.1:${PERFLAB_COLLECTION_RULES_METRICS_PORT:-29425}:52325"
+  api-a:
+    ports: !override
+      - "127.0.0.1:${PERFLAB_COLLECTION_RULES_API_PORT:-28482}:8080"
+  api-b:
+    ports: !reset []
+  gateway:
+    ports: !reset []

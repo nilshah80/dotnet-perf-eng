@@ -38,7 +38,7 @@
   "panels": [
     {
       "id": 101,
-      "title": "CPU flame graph (opt-in continuous profiling)",
+      "title": "Pyroscope flame graph (opt-in continuous profiling)",
       "type": "row",
       "collapsed": false,
       "gridPos": {
@@ -63,7 +63,7 @@
         "x": 0,
         "y": 1
       },
-      "description": "Requires PERFLAB_CONTINUOUS_PROFILING=1. Queries process_cpu over the dashboard time range for $service and $run. Allocation, heap, lock, and exception profiling stay off.",
+      "description": "Shows CPU for $service and $run. Use Profiles Drilldown or Explore for every selected type: CPU, wall, allocation, live heap, lock, and exception.",
       "targets": [
         {
           "datasource": {

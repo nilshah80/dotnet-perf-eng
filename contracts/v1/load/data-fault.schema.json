@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "$id": "https://perflab.io/v1/data-fault.schema.json",
+  "required": [
+    "runId",
+    "cleanupComplete"
+  ],
+  "properties": {
+    "runId": {
+      "type": "string"
+    },
+    "cleanupComplete": {
+      "type": "boolean"
+    },
+    "faultRestored": {
+      "type": "boolean"
+    }
+  }
+}

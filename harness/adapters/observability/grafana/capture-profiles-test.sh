@@ -5,6 +5,12 @@ adapter="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/capture-profiles.sh"
 test_root="$(mktemp -d)"
 trap 'rm -rf "${test_root}"' EXIT
 
+fail() { echo "capture-profiles-test: $*" >&2; exit 1; }
+
+# shellcheck source=/dev/null
+. "$(dirname "${adapter}")/../../../core/lib/python.sh"
+PYTHON="$(perflab_python)" || fail "a working Python 3 interpreter was not found (tried python3, python)"
+
 json_escape() {
   local s="$1"
   s="${s//\\/\\\\}"
@@ -13,7 +19,13 @@ json_escape() {
 }
 
 if command -v jq >/dev/null 2>&1; then
-  jqd() { jq "$@"; }
+  # Delegates to the host jq so the selector under test is the real one, but it
+  # must keep BOTH guards common.sh's jqd applies. jq.exe writes CRLF on Windows,
+  # so a value read through a bare override carries a trailing CR that corrupts
+  # every later comparison and URL built from it; and MSYS rewrites any argument
+  # that looks like a POSIX path, so `--arg path /stacks` reaches jq.exe as
+  # C:/Program Files/Git/stacks and the lookup silently misses.
+  jqd() { MSYS_NO_PATHCONV=1 jq "$@" | tr -d '\r'; return "${PIPESTATUS[0]}"; }
 else
   echo "capture-profiles-test requires jq" >&2
   exit 1
@@ -22,9 +34,9 @@ fi
 # shellcheck disable=SC1091
 source "${adapter}"
 
-populated="$(python3 -c 'import json; names=["total","Unknown-Type.Unknown-Method"]+["Frame%d"%i for i in range(40)]; print(json.dumps({"flamebearer":{"names":names,"levels":[[0,10,2,1]],"numTicks":10},"metadata":{"units":"nanoseconds","sampleRate":100}}))')"
+populated="$("${PYTHON}" -c 'import json; names=["total","Unknown-Type.Unknown-Method"]+["Frame%d"%i for i in range(40)]; print(json.dumps({"flamebearer":{"names":names,"levels":[[0,10,2,1]],"numTicks":10},"metadata":{"units":"nanoseconds","sampleRate":100}}))')"
 empty='{"flamebearer":{"names":[],"levels":[]},"metadata":{"units":"nanoseconds"}}'
-truncated="$(python3 -c 'import json; names=["n%d"%i for i in range(16384)]; print(json.dumps({"flamebearer":{"names":names,"levels":[[0,1,1,0]]},"metadata":{"units":"nanoseconds"}}))')"
+truncated="$("${PYTHON}" -c 'import json; names=["n%d"%i for i in range(16384)]; print(json.dumps({"flamebearer":{"names":names,"levels":[[0,1,1,0]]},"metadata":{"units":"nanoseconds"}}))')"
 malformed='{"not":"a-profile"'
 
 # Fake curl. mode: ok (HTTP 200 + body), down (connection refused), or an HTTP
@@ -104,27 +116,27 @@ grep -q '"symbolization":"unknown"' "${test_root}/unsymbolized/telemetry/profile
 grep -q '"symbolizedNodes":0' "${test_root}/unsymbolized/telemetry/profiles-signal.json" || { echo "symbolizedNodes must be 0" >&2; exit 1; }
 grep -q 'no symbolized frames' "${test_root}/unsymbolized/telemetry/profiles-signal.json" || { echo "unsymbolized reason missing" >&2; exit 1; }
 
-run_case empty delayed ok "${empty}"
-[[ "${profiles_incomplete}" == "1" ]] || { echo "required delayed profile must be incomplete" >&2; exit 1; }
+run_case empty missing ok "${empty}"
+[[ "${profiles_incomplete}" == "1" ]] || { echo "required missing profile must be incomplete" >&2; exit 1; }
 
 stub='{"flamebearer":{"names":["total"],"levels":[[0,0,0,0]]},"metadata":{"units":"samples"}}'
-run_case stub delayed ok "${stub}"
+run_case stub missing ok "${stub}"
 [[ "${profiles_incomplete}" == "1" ]] || { echo "stub total-only profile must be incomplete" >&2; exit 1; }
 
 run_case truncated truncated ok "${truncated}"
 [[ "${profiles_incomplete}" == "0" ]] || { echo "truncated profile must remain usable" >&2; exit 1; }
 
-run_case malformed missing ok "${malformed}"
+run_case malformed failed ok "${malformed}"
 [[ "${profiles_incomplete}" == "1" ]] || { echo "malformed required profile must be incomplete" >&2; exit 1; }
 
-run_case unreachable missing down ""
+run_case unreachable failed down ""
 [[ "${profiles_incomplete}" == "1" ]] || { echo "unreachable required profile must be incomplete" >&2; exit 1; }
 grep -q '"ready":false' "${test_root}/unreachable/telemetry/profiles/query.json" || { echo "unreachable must record ready=false" >&2; exit 1; }
 grep -q 'unreachable' "${test_root}/unreachable/telemetry/profiles-signal.json" || { echo "unreachable reason missing" >&2; exit 1; }
 
-# A reachable backend rejecting the selector (HTTP 400/500) is missing WITH the
+# A reachable backend rejecting the selector (HTTP 400/500) is failed WITH the
 # status, never mis-reported as unreachable.
-run_case rejected missing 500 '{"code":"internal","message":"boom"}'
+run_case rejected failed 500 '{"code":"internal","message":"boom"}'
 [[ "${profiles_incomplete}" == "1" ]] || { echo "HTTP 500 required profile must be incomplete" >&2; exit 1; }
 grep -q '"httpStatus":"500"' "${test_root}/rejected/telemetry/profiles-signal.json" || { echo "HTTP status not recorded" >&2; cat "${test_root}/rejected/telemetry/profiles-signal.json" >&2; exit 1; }
 grep -q 'HTTP 500' "${test_root}/rejected/telemetry/profiles-signal.json" || { echo "HTTP 500 reason missing" >&2; exit 1; }
@@ -161,8 +173,89 @@ pyroscope_required_services="perflab-api" start_epoch=1 end_epoch=30 telemetry_r
 PYROSCOPE_CAPTURE_ATTEMPTS=1 PYROSCOPE_CAPTURE_SLEEP=0 \
   pyroscope_capture_profiles
 grep -q '^{"captureState":"captured"' "${artifact}/telemetry/profiles-signal.json" || { echo "optional idle worker must not degrade the signal" >&2; cat "${artifact}/telemetry/profiles-signal.json" >&2; exit 1; }
-grep -q '"service":"perflab-worker","captureState":"delayed"' "${artifact}/telemetry/profiles-signal.json" || { echo "optional worker state not retained" >&2; exit 1; }
+grep -q '"service":"perflab-worker".*"captureState":"missing"' "${artifact}/telemetry/profiles-signal.json" || { echo "optional worker state not retained" >&2; exit 1; }
 [[ "${profiles_incomplete}" == "0" ]] || { echo "optional idle worker must not make the package incomplete" >&2; exit 1; }
+
+artifact="${test_root}/multi-type"; mkdir -p "${artifact}"
+PATH="${mixed_bin}:${PATH}" artifact_dir="${artifact}" continuous_profiling=1 capture_telemetry=1 \
+PERFLAB_PROFILING_TYPES="cpu,wall,allocation,lock,exception,live-heap" \
+pyroscope_url="http://127.0.0.1:4040" pyroscope_services="perflab-api" \
+pyroscope_required_services="perflab-api" start_epoch=1 end_epoch=30 telemetry_run_id="run-1" target_mode="local" \
+PYROSCOPE_CAPTURE_ATTEMPTS=1 PYROSCOPE_CAPTURE_SLEEP=0 \
+  pyroscope_capture_profiles
+for profile_type in cpu wall allocation lock exception live-heap; do
+  [[ -s "${artifact}/telemetry/profiles/perflab-api-${profile_type}.json" ]] || fail "missing ${profile_type} profile"
+  grep -q "\"profileCategory\":\"${profile_type}\"" "${artifact}/telemetry/profiles-signal.json" || fail "missing ${profile_type} state"
+done
+grep -q '"profileTypes":\["cpu","wall","allocation","lock","exception","live-heap"\]' "${artifact}/telemetry/profiles/query.json" || fail "multi-type query manifest"
+
+# CPU coverage: profiled CPU over the process CPU in the window (1 core for the
+# 29 s window here). 0.1 s of samples is partial; 29 s is complete.
+coverage_case() { # coverage_case <name> <numTicks at sampleRate 100> -> signal file
+  local artifact="${test_root}/$1" bin="${test_root}/bin-$1"
+  mkdir -p "${artifact}/telemetry/metrics"
+  printf '{"data":{"result":[{"metric":{"service_name":"perflab-api","cpu_mode":"user"},"values":[[10,"0.75"],[20,"0.75"]]},{"metric":{"service_name":"perflab-api","cpu_mode":"system"},"values":[[10,"0.25"],[20,"0.25"]]}]}}\n' \
+    > "${artifact}/telemetry/metrics/process_cpu.json"
+  install_curl "${bin}" ok "$("${PYTHON}" -c 'import json,sys; names=["total"]+["Frame%d"%i for i in range(40)]; print(json.dumps({"flamebearer":{"names":names,"levels":[[0,1,2,1]],"numTicks":int(sys.argv[1])},"metadata":{"sampleRate":100}}))' "$2")"
+  PATH="${bin}:${PATH}" artifact_dir="${artifact}" continuous_profiling=1 capture_telemetry=1 pyroscope_url="http://127.0.0.1:4040" \
+    pyroscope_services="perflab-api" pyroscope_required_services="perflab-api" start_epoch=1 end_epoch=30 telemetry_run_id="run-1" \
+    target_mode="local" PYROSCOPE_CAPTURE_ATTEMPTS=1 PYROSCOPE_CAPTURE_SLEEP=0 pyroscope_capture_profiles
+  printf '%s' "${artifact}/telemetry/profiles-signal.json"
+}
+signal="$(coverage_case thin 10)"
+jq -e '.services[0] | .captureState == "captured" and .sufficientCoverage == false and (.coverage * 1000 | round) == 3
+       and (.reason | test("thin profile: it holds 0.34% of the process CPU in the window \\(floor 5%\\)"))' "${signal}" >/dev/null \
+  || fail "a thin CPU profile was not marked partial: $(cat "${signal}")"
+signal="$(coverage_case covered 2900)"
+jq -e '.services[0] | .sufficientCoverage == true and .coverage == 1 and .reason == ""' "${signal}" >/dev/null \
+  || fail "a covered CPU profile was marked partial: $(cat "${signal}")"
+
+# Ingestion lags the window: content is re-read until it stops growing.
+growing_bin="${test_root}/bin-growing"; mkdir -p "${growing_bin}"
+cat > "${growing_bin}/curl" <<CURL
+#!/usr/bin/env bash
+out=""; url=""
+while [[ \$# -gt 0 ]]; do case "\$1" in -o) out="\$2"; shift 2 ;; -w|--data-urlencode|--max-time) shift 2 ;; http*) url="\$1"; shift ;; *) shift ;; esac; done
+[[ "\${url}" == */ready ]] && exit 0
+calls="\$(cat "${test_root}/growing-calls" 2>/dev/null || echo 0)"; calls=\$((calls + 1)); echo "\${calls}" > "${test_root}/growing-calls"
+ticks=\$(( calls < 3 ? calls * 100 : 300 ))
+printf '{"flamebearer":{"names":["total","Frame"],"levels":[[0,1,1,1]],"numTicks":%s},"metadata":{"sampleRate":100}}\n' "\${ticks}" > "\${out}"
+printf '200'
+CURL
+chmod +x "${growing_bin}/curl"
+artifact="${test_root}/growing"; mkdir -p "${artifact}"
+PATH="${growing_bin}:${PATH}" artifact_dir="${artifact}" continuous_profiling=1 capture_telemetry=1 pyroscope_url="http://127.0.0.1:4040" \
+  pyroscope_services="perflab-api" pyroscope_required_services="perflab-api" start_epoch=1 end_epoch=30 telemetry_run_id="run-1" \
+  target_mode="local" PYROSCOPE_CAPTURE_ATTEMPTS=6 PYROSCOPE_CAPTURE_SLEEP=0 pyroscope_capture_profiles
+jq -e '.services[0].attempts == 4' "${artifact}/telemetry/profiles-signal.json" >/dev/null && jq -e '.flamebearer.numTicks == 300' "${artifact}/telemetry/profiles/perflab-api-cpu.json" >/dev/null \
+  || fail "a growing profile was accepted before it settled: $(jq -c '.services[0].attempts' "${artifact}/telemetry/profiles-signal.json")"
+
+# A re-read that fails after content arrived keeps the content.
+flaky_bin="${test_root}/bin-flaky"; mkdir -p "${flaky_bin}"
+cat > "${flaky_bin}/curl" <<CURL
+#!/usr/bin/env bash
+out=""; url=""; want=0
+while [[ \$# -gt 0 ]]; do case "\$1" in -o) out="\$2"; shift 2 ;; -w) want=1; shift 2 ;; --data-urlencode|--max-time) shift 2 ;; http*) url="\$1"; shift ;; *) shift ;; esac; done
+[[ "\${url}" == */ready ]] && exit 0
+calls="\$(cat "${test_root}/flaky-calls" 2>/dev/null || echo 0)"; calls=\$((calls + 1)); echo "\${calls}" > "${test_root}/flaky-calls"
+if (( calls == 1 )); then
+  printf '{"flamebearer":{"names":["total","Frame"],"levels":[[0,1,1,1]],"numTicks":100},"metadata":{"sampleRate":100}}\n' > "\${out}"; printf '200'
+else
+  printf '{"code":"internal"}\n' > "\${out}"; printf '503'; exit 22
+fi
+CURL
+chmod +x "${flaky_bin}/curl"
+artifact="${test_root}/flaky"; mkdir -p "${artifact}"
+PATH="${flaky_bin}:${PATH}" artifact_dir="${artifact}" continuous_profiling=1 capture_telemetry=1 pyroscope_url="http://127.0.0.1:4040" \
+  pyroscope_services="perflab-api" pyroscope_required_services="perflab-api" start_epoch=1 end_epoch=30 telemetry_run_id="run-1" \
+  target_mode="local" PYROSCOPE_CAPTURE_ATTEMPTS=6 PYROSCOPE_CAPTURE_SLEEP=0 pyroscope_capture_profiles
+jq -e '.services[0] | .captureState == "captured" and .httpStatus == "200"' "${artifact}/telemetry/profiles-signal.json" >/dev/null \
+  && jq -e '.flamebearer.numTicks == 100' "${artifact}/telemetry/profiles/perflab-api-cpu.json" >/dev/null \
+  || fail "a failed re-read discarded a captured profile: $(cat "${artifact}/telemetry/profiles-signal.json")"
+
+PERFLAB_PROFILING_TYPES=lock run_case idle-lock missing ok "${stub}"
+jq -e '.captureState == "missing" and .services[0].required == false' "${test_root}/idle-lock/telemetry/profiles-signal.json" >/dev/null   || fail "an empty conditional profile was reported as captured or required"
+[[ "${profiles_incomplete}" == "0" ]] || fail "absence of optional lock events made the package incomplete"
 
 artifact="${test_root}/disabled"
 mkdir -p "${artifact}"

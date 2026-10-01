@@ -1,0 +1,4 @@
+{
+  "query": "process_cpu:...{perf_run_id=\"{{run_id}}\"}",
+  "staticPhase": ""
+}

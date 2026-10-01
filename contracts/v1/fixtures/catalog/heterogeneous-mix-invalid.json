@@ -1,0 +1,26 @@
+{
+  "apiVersion": "perflab.io/v1",
+  "kind": "WorkloadManifest",
+  "contractRevision": "v1",
+  "selectors": [
+    {
+      "id": "bad-mix",
+      "type": "mix",
+      "iterationContract": "one-selection",
+      "generators": [
+        "k6"
+      ],
+      "memberKind": "request",
+      "members": [
+        {
+          "selector": "control-products",
+          "weight": 1
+        },
+        {
+          "selector": "browse-and-buy",
+          "weight": 1
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "requests": 200,
+  "percentilePolicy": "never-average",
+  "p95": "max-across-shards"
+}

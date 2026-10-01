@@ -1,0 +1,56 @@
+# Tempo configuration for the labs' grafana/otel-lgtm image (0.31.0): the
+# image's own /otel-lgtm/tempo-config.yaml with dependency dimensions added to
+# the span metrics. Mounted over the image file by each lab's compose.
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9096
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "127.0.0.1:4417"
+        http:
+          endpoint: "127.0.0.1:4418"
+
+memberlist:
+  bind_addr: [127.0.0.1]
+  bind_port: 7947
+
+querier:
+  frontend_worker:
+    frontend_address: 127.0.0.1:9096
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /data/tempo/wal
+    local:
+      path: /data/tempo/blocks
+
+metrics_generator:
+  processor:
+    span_metrics:
+      # The image keys span metrics by span name only, so a Redis GET and an
+      # HTTP GET were one series. These dimensions name the dependency a client
+      # span calls, so each dependency's share of server time is measurable.
+      dimensions:
+        - service_name
+        - operation
+        - status_code
+        - db.system
+        - db.system.name
+        - messaging.system
+        - server.address
+  storage:
+    path: /data/tempo/generator/wal
+    remote_write:
+      - url: http://127.0.0.1:9090/api/v1/write
+        send_exemplars: true
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [service-graphs, span-metrics]

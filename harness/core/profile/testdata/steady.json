@@ -1,0 +1,27 @@
+{
+  "name": "steady",
+  "loadModel": "closed",
+  "rateUnit": "concurrent-iterations",
+  "sessionRequired": false,
+  "updateLoadRequired": false,
+  "stages": [
+    {
+      "name": "warmup",
+      "kind": "warmup",
+      "durationSeconds": 3,
+      "target": 8
+    },
+    {
+      "name": "stabilize",
+      "kind": "stabilize",
+      "durationSeconds": 3,
+      "target": 8
+    },
+    {
+      "name": "measure",
+      "kind": "measure",
+      "durationSeconds": 30,
+      "target": 8
+    }
+  ]
+}

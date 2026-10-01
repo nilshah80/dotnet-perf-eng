@@ -1,0 +1,35 @@
+{
+  "name": "breakpoint",
+  "loadModel": "closed",
+  "rateUnit": "concurrent-iterations",
+  "sessionRequired": false,
+  "updateLoadRequired": false,
+  "lastHealthyTarget": 8,
+  "firstFailingTarget": 16,
+  "stages": [
+    {
+      "name": "bracket-low",
+      "kind": "measure",
+      "durationSeconds": 7,
+      "target": 4
+    },
+    {
+      "name": "bracket-mid",
+      "kind": "measure",
+      "durationSeconds": 7,
+      "target": 8
+    },
+    {
+      "name": "bracket-high",
+      "kind": "measure",
+      "durationSeconds": 7,
+      "target": 16
+    },
+    {
+      "name": "narrow",
+      "kind": "measure",
+      "durationSeconds": 7,
+      "target": 12
+    }
+  ]
+}

@@ -36,7 +36,7 @@ services:
       ENABLE_LOGS_OTELCOL: "true"
       ENABLE_LOGS_LOKI: "true"
       TEMPO_EXTRA_ARGS: --query-frontend.mcp-server.enabled=true
-      PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=6h --storage.tsdb.retention.size=512MB
+      PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=12h --storage.tsdb.retention.size=2GB
       # Land on the eCommerce overview board (was previously stock Grafana -- the
       # ecommerce lab shipped no provisioned dashboards at all).
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/grafana/conf/provisioning/dashboards/custom/00-overview.json
@@ -55,6 +55,7 @@ services:
       - "127.0.0.1:4040:4040"
     volumes:
       - lgtm-data:/data
+      - ../../harness/adapters/observability/lgtm/tempo-config.yaml:/otel-lgtm/tempo-config.yaml:ro
       # Provision the whole dashboards/ folder -- one JSON per focused board
       # (overview, runtime, http, dependencies). Regenerate with
       # harness/adapters/observability/grafana/generate-dashboards.py.
@@ -67,8 +68,26 @@ services:
       - ./infra/observability/loki-config.yaml:/otel-lgtm/loki-config.yaml:ro
     mem_limit: 4g
 
+  # Deploy-time telemetry injection (D-P1-3, D-P1-8): stages the startup-hook
+  # assembly in a volume the .NET services mount read-only. The application is
+  # not changed or rebuilt; see harness/adapters/runtime/dotnet/injection.
+  telemetry-injection:
+    build:
+      context: ../../harness/adapters/runtime/dotnet/injection
+    volumes:
+      - telemetry-injection:/mnt/injection
+
+  diagnostic-permissions:
+    image: alpine:3.22
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /diag/crash-dumps/incomplete && chown -R 1654:1654 /diag && chmod -R 0770 /diag"]
+    volumes:
+      - diagnostic-ipc:/diag
+
   dotnet-monitor:
-    image: mcr.microsoft.com/dotnet/monitor:10.0
+    build:
+      context: ../../harness/adapters/runtime/dotnet/monitor
+      dockerfile: Dockerfile
     command:
       - collect
       - --no-auth
@@ -76,14 +95,24 @@ services:
       DOTNETMONITOR_DiagnosticPort__ConnectionMode: Listen
       DOTNETMONITOR_DiagnosticPort__EndpointName: /diag/dotnet-monitor.sock
       DOTNETMONITOR_Storage__DefaultSharedPath: /diag
+      DOTNETMONITOR_Storage__DumpTempFolder: /diag/crash-dumps
       DOTNETMONITOR_InProcessFeatures__Enabled: "true"
       DOTNETMONITOR_Urls: http://+:52323
       DOTNETMONITOR_Metrics__Endpoints: http://+:52325
+      PERF_RUN_MODE: ${PERF_RUN_MODE:-measure}
+      PERFLAB_TARGET_KIND: ${PERFLAB_TARGET_KIND:-managed-compose}
+      PERFLAB_COLLECTION_RULES: ${PERFLAB_COLLECTION_RULES:-0}
+      PERFLAB_DUMP_ACK: ${PERFLAB_DUMP_ACK:-}
     ports:
       - "127.0.0.1:18323:52323"
       - "127.0.0.1:18325:52325"
     volumes:
       - diagnostic-ipc:/diag
+    tmpfs:
+      - /diag/collection-rule-dumps:size=536870912,mode=0770,uid=1654,gid=1654
+    depends_on:
+      diagnostic-permissions:
+        condition: service_completed_successfully
     mem_limit: 512m
     restart: unless-stopped
 
@@ -93,7 +122,7 @@ services:
       dockerfile: src/ECommerce.Api/Dockerfile
     environment:
       ASPNETCORE_URLS: http://+:8080
-      ConnectionStrings__PostgreSql: Host=postgres;Port=5432;Database=ecommerce;Username=ecommerce;Password=${POSTGRES_PASSWORD:-ecommerce};Maximum Pool Size=20;Minimum Pool Size=0;Timeout=5;Command Timeout=5;GSS Encryption Mode=Disable;Application Name=ecommerce-api
+      ConnectionStrings__PostgreSql: Host=postgres;Port=5432;Database=ecommerce;Username=ecommerce;Password=${POSTGRES_PASSWORD:-ecommerce};Maximum Pool Size=20;Minimum Pool Size=0;Timeout=5;Command Timeout=5;Application Name=ecommerce-api
       Jwt__Key: ${JWT_KEY:-ecommerce-lab-local-dev-signing-key-do-not-use-in-production}
       Jwt__Issuer: ecommerce-lab
       Jwt__Audience: ecommerce-lab
@@ -101,9 +130,24 @@ services:
       PERF_SCENARIO: ${PERF_SCENARIO:-E00}
       PERF_RUN_ID: ${PERF_RUN_ID:-local-manual}
       PERF_RUN_MODE: ${PERF_RUN_MODE:-measure}
+      PERF_WORKLOAD_KIND: ${PERF_WORKLOAD_KIND:-request}
+      PERF_REQUIRES_MANAGED_PARTITION: ${PERF_REQUIRES_MANAGED_PARTITION:-0}
       SEED_SCALE: ${SEED_SCALE:-smoke}
+      # Per-request logging (D-P0-4 companion). OFF by default: at scenariolab
+      # throughput (S04 sustains ~19.6k rps) ASP.NET request logging emits two
+      # lines per request -- ~1.2M lines per 30s window -- which perturbs the
+      # measurement and instantly truncates the Loki budget. Turn it on for a
+      # low-rate investigation: PERFLAB_REQUEST_LOGGING=Information.
+      Logging__LogLevel__Microsoft.AspNetCore.Hosting.Diagnostics: ${PERFLAB_REQUEST_LOGGING:-Warning}
+      # HttpLogging is the category the middleware actually writes to; the
+      # Hosting.Diagnostics level above does not enable per-request records.
+      Logging__LogLevel__Microsoft.AspNetCore.HttpLogging: ${PERFLAB_REQUEST_LOGGING:-Warning}
+      PERFLAB_REQUEST_LOGGING: ${PERFLAB_REQUEST_LOGGING:-Warning}
       PERFLAB_CONTINUOUS_PROFILING: ${PERFLAB_CONTINUOUS_PROFILING:-0}
+      PERFLAB_PROFILING_TYPES: ${PERFLAB_PROFILING_TYPES:-cpu}
       PERFLAB_PROFILING_KEEP_TIERING: ${PERFLAB_PROFILING_KEEP_TIERING:-0}
+      PERFLAB_PROFILING_MIN_CORES_THRESHOLD: ${PERFLAB_PROFILING_MIN_CORES_THRESHOLD:-0.1}
+      PERFLAB_PROFILING_EFFECTIVE_CPU_CORES: "1"
       PYROSCOPE_SERVER_ADDRESS: http://lgtm:4040
       PYROSCOPE_APPLICATION_NAME: ecommerce-api
       OTEL_SERVICE_VERSION: ${OTEL_SERVICE_VERSION:-lab}
@@ -115,14 +159,26 @@ services:
       OTEL_METRICS_EXEMPLAR_FILTER: trace_based
       OTEL_TRACES_SAMPLER: parentbased_traceidratio
       OTEL_TRACES_SAMPLER_ARG: ${PERFLAB_TRACE_SAMPLE_RATIO:-0.25}
-      DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock,nosuspend
+      # Suspended until dotnet-monitor resumes it: with nosuspend the app raced
+      # the monitor's profiler injection, and /stacks failed for that process.
+      DOTNET_DiagnosticPorts: /diag/dotnet-monitor.sock
+      DOTNET_DbgEnableMiniDump: ${PERFLAB_DBG_ENABLE_MINIDUMP:-0}
+      COMPlus_DbgEnableMiniDump: ${PERFLAB_DBG_ENABLE_MINIDUMP:-0}
+      DOTNET_DbgMiniDumpType: "3"
+      DOTNET_DbgMiniDumpName: /diag/crash-dumps/coredump.%p
+      # Telemetry injection; the harness sets both empty to opt out.
+      DOTNET_STARTUP_HOOKS: ${PERFLAB_INJECTION_STARTUP_HOOK-/opt/perflab/injection/PerfLab.DotNet.Injection.dll}
+      ASPNETCORE_HOSTINGSTARTUPASSEMBLIES: ${PERFLAB_INJECTION_HOSTING_STARTUP-PerfLab.DotNet.Injection}
       DOTNET_gcServer: "1"
       DOTNET_GCHeapHardLimitPercent: "50"
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
       - diagnostic-ipc:/diag
+      - telemetry-injection:/opt/perflab/injection:ro
     depends_on:
+      telemetry-injection:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       lgtm:
@@ -166,6 +222,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  telemetry-injection:
   postgres-data:
   lgtm-data:
   diagnostic-ipc:

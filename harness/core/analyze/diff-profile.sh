@@ -4,10 +4,10 @@
 # the methods whose share of CPU grew the most (the regression culprits) and shrank
 # the most -- the step that is otherwise a manual eyeball of two flamegraphs.
 #
-# The differ runs INSIDE a python container (PERFLAB_PY_IMAGE, default
-# python:3-alpine), fed through stdin -- exactly how jqd dockerizes jq -- so NO
-# host Python is required and there are no volume-mount path issues. Both profiles
-# are piped as one {"baseline":..,"candidate":..} envelope.
+# The differ runs on a host Python 3 when there is one; otherwise INSIDE a python
+# container (PERFLAB_PY_IMAGE, default python:3-alpine), fed through stdin --
+# exactly how jqd dockerizes jq -- so there are no volume-mount path issues. Both
+# profiles are then piped as one {"baseline":..,"candidate":..} envelope.
 #
 # Speedscope files come from the runtime-diagnostics phase: capture-runtime.sh
 # collects *.nettrace and normalize-runtime.sh converts them to *.speedscope.json,
@@ -26,13 +26,21 @@ shift 2
 top="15"
 [[ "${1:-}" == "--top" ]] && { top="${2:?--top needs N}"; shift 2; }
 
-command -v docker >/dev/null 2>&1 || { echo "diff-profile: needs docker (runs the differ in ${py_image})." >&2; exit 2; }
-# The differ has no $ or backticks, so it is safe to pass as a single -c argument.
-script="$(cat "${differ}")"
+# shellcheck source=/dev/null
+. "${here}/../lib/python.sh"
+host_python="$(perflab_python || true)"
+if [[ -z "${host_python}" ]]; then
+  command -v docker >/dev/null 2>&1 || { echo "diff-profile: needs a host Python 3 or docker (runs the differ in ${py_image})." >&2; exit 2; }
+fi
 
 diff_one() { # <baseline-file> <candidate-file>  -> prints the report
+  if [[ -n "${host_python}" ]]; then
+    "${host_python}" "${differ}" "$1" "$2" --top "${top}"
+    return
+  fi
+  # A quoted expansion is passed verbatim, so the script's own $ never expands.
   { printf '{"baseline":'; cat "$1"; printf ',"candidate":'; cat "$2"; printf '}'; } \
-    | MSYS_NO_PATHCONV=1 docker run --rm -i "${py_image}" python3 -c "${script}" --stdin --top "${top}"
+    | MSYS_NO_PATHCONV=1 docker run --rm -i "${py_image}" python3 -c "$(cat "${differ}")" --stdin --top "${top}"
 }
 
 # Two explicit Speedscope files: diff them directly.

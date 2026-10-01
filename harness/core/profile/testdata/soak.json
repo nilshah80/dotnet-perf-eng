@@ -1,0 +1,15 @@
+{
+  "name": "soak",
+  "loadModel": "closed",
+  "rateUnit": "concurrent-iterations",
+  "sessionRequired": true,
+  "updateLoadRequired": false,
+  "stages": [
+    {
+      "name": "measure",
+      "kind": "measure",
+      "durationSeconds": 600,
+      "target": 8
+    }
+  ]
+}

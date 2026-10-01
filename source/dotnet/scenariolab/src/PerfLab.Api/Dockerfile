@@ -35,10 +35,15 @@ RUN apk add --no-cache curl ca-certificates \
  && rm -f "/tmp/${file}" \
  && chmod -R a+rX /opt/pyroscope
 
+FROM mcr.microsoft.com/dotnet/monitor:10.0 AS monitor
+
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS final
 WORKDIR /app
 COPY --from=build /app/publish .
 COPY --from=pyroscope /opt/pyroscope /opt/pyroscope
+# D-P0-3. dotnet-monitor's /stacks channel injects this startup hook by
+# absolute /app/shared paths. Those files must exist inside the target.
+COPY --from=monitor /app/shared /app/shared
 COPY docker/pyroscope-entrypoint.sh /usr/local/bin/pyroscope-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/pyroscope-entrypoint.sh \
     && mkdir -p /opt/pyroscope/logs \

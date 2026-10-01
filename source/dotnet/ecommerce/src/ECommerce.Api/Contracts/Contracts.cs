@@ -21,7 +21,9 @@ public sealed record OrderDetailResponse(
 
 public sealed record CreateOrderItem(int ProductId, int Quantity);
 
-public sealed record CreateOrderRequest(IReadOnlyList<CreateOrderItem> Items);
+public sealed record CreateOrderRequest(IReadOnlyList<CreateOrderItem> Items, string? ClientOrderId = null);
+
+public sealed record PaymentRequest(string IdempotencyKey);
 
 public sealed record UserResponse(int Id, string Username, string Email, string Role);
 

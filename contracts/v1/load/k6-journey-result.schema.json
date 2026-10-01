@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "$id": "https://perflab.io/v1/k6-journey-result.schema.json",
+  "required": [
+    "parent",
+    "children",
+    "failed"
+  ],
+  "properties": {
+    "parent": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "children": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "failed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "operations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

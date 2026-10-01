@@ -21,8 +21,18 @@ are in [`BLUEPRINT.md`](BLUEPRINT.md).
 |---|---|
 | Docker + Compose | every lab service; nothing runs in the cloud |
 | .NET SDK 10 | the reference API and order worker under [`source/`](source/) |
-| bash, python3 | the harness itself and the contract checks |
+| bash, Python 3 | the harness itself and the contract checks; Python is found as `python3` or `python` |
+| jq 1.7+ | the contract checks' tests; the harness itself runs jq in Docker unless `PERFLAB_JQ=host` |
 | k6 (default), optionally wrk | load generation; JMeter runs container-only |
+
+The contract checks also expect the PerfLab repository checked out beside this
+one, as `../perflab`: the plan-consistency check reads its files.
+
+**Windows.** Run the gate from Git Bash; Git for Windows supplies bash and the
+POSIX tools. Python must be a real interpreter: the `python3.exe` App
+Execution Alias only prints a Microsoft Store advert, so install Python from
+python.org or winget, or turn the Python aliases off in Settings. Install jq on
+the host as well, for example with `winget install jqlang.jq`.
 
 ## Single-operator constraint
 

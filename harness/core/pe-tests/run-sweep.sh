@@ -62,7 +62,7 @@ for rate in "${rates[@]}"; do
   PERFLAB_PROFILE=arrival PERFLAB_TARGET_RPS="${rate}" \
   PERFLAB_ARTIFACT_DIR="${level_dir}" PERFLAB_PACKAGE_RUN_ID="${sweep_id}-rps-${rate}" \
   PERFLAB_TELEMETRY_RUN_ID="${sweep_id}-rps-${rate}" \
-    "${harness_core_dir}/run/run-scenario.sh" "${scenario_id}" "${seconds}" >/dev/null 2>&1 || level_rc=$?
+    "${harness_core_dir}/run/run-scenario.sh" "${scenario_id}" "${seconds}" > "${level_dir}/run.log" 2>&1 || level_rc=$?
 
   f="${level_dir}/facts.json"; [[ -s "$f" ]] || f="${level_dir}/benchmark/observations.json"
   # An errored level (non-zero exit or no observations) is a harness/bring-up

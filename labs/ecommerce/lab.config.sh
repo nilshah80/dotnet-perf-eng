@@ -17,8 +17,11 @@ PERFLAB_RUNTIME="dotnet"
 PERFLAB_COMPOSE_FILE="labs/ecommerce/compose.yaml"
 PERFLAB_APP_SERVICES="api"
 PERFLAB_PRIMARY_APP_SERVICE="api"
-PERFLAB_BASE_URL="http://127.0.0.1:8080"
-PERFLAB_READY_URL="http://127.0.0.1:8080/health/ready"
+PERFLAB_BASE_URL="${PERFLAB_BASE_URL:-http://127.0.0.1:8080}"
+PERFLAB_READY_URL="${PERFLAB_READY_URL:-http://127.0.0.1:8080/health/ready}"
+# The API provides /api/perf/runs/{id}/seed|reset|cleanup, so write mixes and
+# the checkout journey run in a managed-reference run partition.
+PERFLAB_WRITE_SAFETY_CLASS="managed-reference"
 
 # --- Telemetry correlation ---
 PERFLAB_PROM_JOB_REGEX="ecommerce-.*"
@@ -36,21 +39,30 @@ PERFLAB_PYROSCOPE_URL="${PERFLAB_PYROSCOPE_URL:-http://127.0.0.1:4040}"
 PERFLAB_PYROSCOPE_SERVICES="ecommerce-api"
 PERFLAB_PYROSCOPE_REQUIRED_SERVICES="ecommerce-api"
 PERFLAB_PYROSCOPE_ROLE_SERVICES="api:ecommerce-api"
+PERFLAB_PROFILING_MIN_CORES_THRESHOLD="0.1"
+PERFLAB_PROFILING_SERVICE_QUOTAS="api=1"
+PERFLAB_PROFILING_QUOTA_SOURCE="compose.cpus"
 PERFLAB_DIAGNOSTICS_URL="http://127.0.0.1:18323"
 
 # --- Load generators ---
 PERFLAB_LOAD_GENERATOR_DEFAULT="k6"
 PERFLAB_INTERNAL_BASE_URL="http://api:8080"
 PERFLAB_COMPOSE_NETWORK="ecommerce_default"
-PERFLAB_WRK_IMAGE=""
-# JMeter is optional and uses the shared PerfLab image. k6.js is unchanged.
+PERFLAB_WRK_IMAGE="${PERFLAB_WRK_IMAGE:-}"
+# JMeter is optional and container-only. Build the native image with
+# harness/adapters/loadgen/jmeter/package.sh, then pin PERFLAB_JMETER_IMAGE
+# to that digest. k6.js is unchanged.
 # PERFLAB_JMETER_IMAGE="sha256:<local-image-id>"
 # PERFLAB_JMETER_PLAN="labs/ecommerce/loadgen/test-plan.jmx"
 # PERFLAB_JMETER_FILES='[]'
-# The workload is this lab's own loadgen/k6.js: it authenticates once in setup()
-# and sends the bearer token on every request, so protected scenarios need no
-# harness change. JMeter and wrk do not run that setup() login, so protected
-# endpoints need a pre-minted token via PERF_HEADERS (or stay on k6).
+# The endpoints are JWT-protected: the harness logs in once before traffic and
+# hands the bearer token to k6, wrk and JMeter alike in PERF_HEADERS. The default
+# credentials are the seeded fixture user; override PERF_LOGIN_USER/PASSWORD, or
+# pass a pre-minted PERF_HEADERS Authorization to skip the login.
+PERFLAB_LOGIN_PATH="/api/auth/login"
+PERFLAB_LOGIN_RESPONSE_FIELD="token"
+PERF_LOGIN_USER="${PERF_LOGIN_USER:-user1}"
+PERF_LOGIN_PASSWORD="${PERF_LOGIN_PASSWORD:-Password123!}"
 
 # --- Dependencies (postgres only) ---
 PERFLAB_DEPENDENCIES="postgres"
@@ -70,3 +82,5 @@ PERFLAB_BUILD_COMMAND="dotnet build ECommerce.slnx -c Release"
 # --- Paths ---
 PERFLAB_ARTIFACTS_ROOT="artifacts"
 PERFLAB_SCENARIOS="labs/ecommerce/scenarios.tsv"
+PERFLAB_CATALOG="labs/ecommerce/catalog.json"
+PERFLAB_WORKLOAD_MANIFEST="labs/ecommerce/workload-manifest.json"

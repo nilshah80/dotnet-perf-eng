@@ -1,0 +1,45 @@
+{
+  "name": "spike",
+  "loadModel": "closed",
+  "rateUnit": "concurrent-iterations",
+  "sessionRequired": false,
+  "updateLoadRequired": false,
+  "stages": [
+    {
+      "name": "baseline",
+      "kind": "measure",
+      "durationSeconds": 5,
+      "target": 8
+    },
+    {
+      "name": "hold-baseline",
+      "kind": "measure",
+      "durationSeconds": 7,
+      "target": 8
+    },
+    {
+      "name": "surge",
+      "kind": "measure",
+      "durationSeconds": 5,
+      "target": 32
+    },
+    {
+      "name": "hold-surge",
+      "kind": "measure",
+      "durationSeconds": 7,
+      "target": 32
+    },
+    {
+      "name": "recover",
+      "kind": "recover",
+      "durationSeconds": 5,
+      "target": 8
+    },
+    {
+      "name": "hold-recover",
+      "kind": "measure",
+      "durationSeconds": 7,
+      "target": 8
+    }
+  ]
+}

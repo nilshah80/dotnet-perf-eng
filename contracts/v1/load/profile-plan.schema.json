@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "$id": "https://perflab.io/v1/profile-plan.schema.json",
+  "required": [
+    "profile",
+    "generator",
+    "workloadKind",
+    "stages"
+  ],
+  "properties": {
+    "profile": {
+      "type": "string"
+    },
+    "generator": {
+      "type": "string"
+    },
+    "workloadKind": {
+      "enum": [
+        "request",
+        "journey"
+      ]
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 1
+    }
+  }
+}

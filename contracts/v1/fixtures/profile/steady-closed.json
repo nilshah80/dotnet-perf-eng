@@ -1,0 +1,12 @@
+{
+  "profile": "steady",
+  "generator": "k6",
+  "workloadKind": "request",
+  "stages": [
+    {
+      "id": "steady",
+      "kind": "closed",
+      "measurement": true
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "id": "request-iteration-accounting",
+  "cases": [
+    {
+      "name": "one-primary-request",
+      "measuredIterations": 1,
+      "primaryProtocolRequests": 1,
+      "expectedOperationIdFrom": "scenario-id"
+    },
+    {
+      "name": "failed-http-counts",
+      "httpFailed": 1,
+      "transportFailed": 1,
+      "requestAttemptTotal": 2
+    },
+    {
+      "name": "redirects-separate",
+      "redirects": 1,
+      "primaryProtocolRequests": 1,
+      "notCountedAsIteration": [
+        "setup",
+        "teardown"
+      ]
+    }
+  ]
+}
