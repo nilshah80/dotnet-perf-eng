@@ -20,14 +20,6 @@ artifact_dir="${1:?snapshot hook needs <artifact-dir>}"
 mkdir -p "${artifact_dir}/dependencies"
 plan_file="${artifact_dir}/dependencies/postgres-query-plan.json"
 
-# Deadlock + rollback counters -- the definitive evidence for the deadlock
-# scenario (S27), captured for every scenario (deadlocks=0 for the rest). These
-# are cumulative since the last stats reset, so on a fresh stack the count
-# reflects this run; read it as a delta if the stack has served earlier runs.
-compose exec -T "${pg_service}" psql -U "${pg_user}" -d "${pg_db}" -c \
-  "COPY (SELECT datname, numbackends, xact_commit, xact_rollback, deadlocks FROM pg_stat_database WHERE datname='${pg_db}') TO STDOUT WITH CSV HEADER" \
-  > "${artifact_dir}/dependencies/postgres-deadlocks.csv" 2>/dev/null || true
-
 method="${PERF_METHOD:-GET}"
 full_path="${PERF_PATH:-}"
 base_path="${full_path%%\?*}"

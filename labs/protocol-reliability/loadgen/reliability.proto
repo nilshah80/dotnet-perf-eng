@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package reliability.v1;
+
+service Reliability {
+  rpc Ping (PingRequest) returns (PingReply);
+}
+
+message PingRequest {
+  string run_id = 1;
+  string tenant = 2;
+  int32 work_units = 3;
+}
+
+message PingReply {
+  string instance_id = 1;
+  string run_id = 2;
+  string tenant = 3;
+  int64 sequence = 4;
+}

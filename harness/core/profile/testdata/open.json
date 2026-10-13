@@ -1,0 +1,21 @@
+{
+  "name": "open",
+  "loadModel": "open",
+  "rateUnit": "requests/s",
+  "sessionRequired": false,
+  "updateLoadRequired": false,
+  "stages": [
+    {
+      "name": "warmup",
+      "kind": "warmup",
+      "durationSeconds": 3,
+      "target": 1
+    },
+    {
+      "name": "measure",
+      "kind": "measure",
+      "durationSeconds": 30,
+      "target": 8
+    }
+  ]
+}

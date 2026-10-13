@@ -98,7 +98,9 @@ The harness handles JSON without installing jq on the host:
   output, k6's nested summary) is parsed by **`jqd`** — `jq` run via
   `docker run --rm -i <jq-image>` (the lab already requires Docker). Simple
   presence checks use `grep`. This also removes the Windows jq CRLF/MSYS pain,
-  since jq now runs on Linux.
+  since jq now runs on Linux. `PERFLAB_JQ=host` opts into a host jq instead
+  (faster on Docker Desktop for Windows); `jqd` strips CR and disables MSYS path
+  conversion in both modes.
 
 ## Evidence package layout
 

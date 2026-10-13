@@ -7,6 +7,7 @@ using ECommerce.Api.Contracts;
 using ECommerce.Api.Data;
 using ECommerce.Api.Diagnostics;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.HttpLogging;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Npgsql;
@@ -29,6 +30,7 @@ builder.Services.AddSingleton(settings);
 builder.Services.AddPooledDbContextFactory<EcommerceDbContext>(options =>
     options.UseNpgsql(settings.PostgreSql, npgsql => npgsql.CommandTimeout(5)));
 builder.Services.AddSingleton<DatabaseSeeder>();
+builder.Services.AddSingleton<RunPartitionStore>();
 builder.Services.AddSingleton<TokenService>();
 builder.Services.AddProblemDetails();
 
@@ -101,8 +103,51 @@ builder.Logging.AddOpenTelemetry(logging =>
     });
 });
 
+// Per-request logging is an explicit opt-in (D-P0-12). The knob is
+// PERFLAB_REQUEST_LOGGING, which compose maps onto the logging categories; it is
+// OFF by default because at this lab's throughput two lines per request is over
+// a million records per window, which perturbs the measurement and instantly
+// truncates the log budget.
+//
+// It has to be HTTP logging middleware rather than a category level: raising
+// Microsoft.AspNetCore to Information does NOT produce per-request records on
+// this framework version, so the knob silently did nothing and every run
+// reported an empty log window. Fields are restricted to what correlates a line
+// to a trace and a route -- bodies and headers are never logged, because this
+// runs against synthetic data but the habit should not depend on that.
+var requestLogging = Environment.GetEnvironmentVariable("PERFLAB_REQUEST_LOGGING");
+var requestLoggingEnabled = requestLogging is not null && (
+    requestLogging.Equals("Trace", StringComparison.OrdinalIgnoreCase) ||
+    requestLogging.Equals("Debug", StringComparison.OrdinalIgnoreCase) ||
+    requestLogging.Equals("Information", StringComparison.OrdinalIgnoreCase));
+if (requestLoggingEnabled)
+{
+    // The filter is set here rather than left to configuration layering. The
+    // compose variable sets Logging:LogLevel:Microsoft.AspNetCore.HttpLogging,
+    // but appsettings.json pins the parent Microsoft.AspNetCore to Warning and
+    // that pin wins in practice -- so the documented knob silently did nothing.
+    // An explicit filter makes the knob authoritative instead of dependent on
+    // which of two files is read last.
+    builder.Logging.AddFilter("Microsoft.AspNetCore.HttpLogging", LogLevel.Information);
+    builder.Services.AddHttpLogging(options =>
+    {
+        options.LoggingFields =
+            HttpLoggingFields.RequestMethod |
+            HttpLoggingFields.RequestPath |
+            HttpLoggingFields.ResponseStatusCode |
+            HttpLoggingFields.Duration;
+        options.CombineLogs = true;
+    });
+}
+
 var app = builder.Build();
 app.UseExceptionHandler();
+
+if (requestLoggingEnabled)
+{
+    app.UseHttpLogging();
+}
+
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -315,11 +360,17 @@ api.MapGet("/orders/{id:long}", async (
 });
 
 api.MapPost("/orders", async (
-    CreateOrderRequest request, ClaimsPrincipal principal,
+    CreateOrderRequest request, ClaimsPrincipal principal, HttpContext http,
+    RunPartitionStore partitions,
     IDbContextFactory<EcommerceDbContext> contextFactory,
     CancellationToken cancellationToken) =>
 {
     var userId = CurrentUserId(principal);
+    var runId = http.Request.Headers["X-Perf-Run-Id"].FirstOrDefault() ?? runContext.RunId;
+    if (RejectUnreadyPartition(partitions, runId, runContext.RequiresManagedPartition) is { } rejected)
+    {
+        return rejected;
+    }
     if (request.Items is null || request.Items.Count == 0)
     {
         return Results.BadRequest(new { error = "order must contain at least one item" });
@@ -358,9 +409,31 @@ api.MapPost("/orders", async (
     }
 
     order.Total = total;
-    db.Orders.Add(order);
-    await db.SaveChangesAsync(cancellationToken);
-    AppTelemetry.OrdersCreated.Add(1);
+    RunPartitionStore.Partition? reservation = null;
+    if (runContext.RequiresManagedPartition && !partitions.TryReserveWrite(runId, out reservation))
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status429TooManyRequests,
+            title: "managed-reference write budget exhausted");
+    }
+    try
+    {
+        db.Orders.Add(order);
+        await db.SaveChangesAsync(cancellationToken);
+        AppTelemetry.OrdersCreated.Add(1);
+        if (reservation is not null)
+        {
+            partitions.CommitWrite(reservation, order.Id, order.Status);
+        }
+    }
+    catch
+    {
+        if (reservation is not null)
+        {
+            partitions.CancelWrite(reservation);
+        }
+        throw;
+    }
 
     return Results.Created(
         $"/api/orders/{order.Id}",
@@ -399,6 +472,170 @@ api.MapGet("/users", async (
     return Results.Ok(new PagedResponse<UserResponse>(items, p, ps, total));
 });
 
+api.MapPost("/orders/{id:long}/payment", async (
+    long id, PaymentRequest request, ClaimsPrincipal principal, HttpContext http,
+    RunPartitionStore partitions,
+    IDbContextFactory<EcommerceDbContext> contextFactory,
+    CancellationToken cancellationToken) =>
+{
+    var userId = CurrentUserId(principal);
+    var runId = http.Request.Headers["X-Perf-Run-Id"].FirstOrDefault() ?? runContext.RunId;
+    if (RejectUnreadyPartition(partitions, runId, runContext.RequiresManagedPartition) is { } rejected)
+    {
+        return rejected;
+    }
+
+    await using var db = await contextFactory.CreateDbContextAsync(cancellationToken);
+    var order = await db.Orders.FirstOrDefaultAsync(o => o.Id == id && o.UserId == userId, cancellationToken);
+    if (order is null)
+    {
+        return Results.NotFound();
+    }
+
+    if (string.IsNullOrWhiteSpace(request.IdempotencyKey))
+    {
+        return Results.BadRequest(new { error = "idempotencyKey is required" });
+    }
+
+    RunPartitionStore.Partition? reservation = null;
+    if (runContext.RequiresManagedPartition && !partitions.TryReserveWrite(runId, out reservation))
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status429TooManyRequests,
+            title: "managed-reference write budget exhausted");
+    }
+    try
+    {
+        order.Status = "completed";
+        await db.SaveChangesAsync(cancellationToken);
+        if (reservation is not null)
+        {
+            partitions.CommitWrite(reservation, order.Id, order.Status);
+        }
+    }
+    catch
+    {
+        if (reservation is not null)
+        {
+            partitions.CancelWrite(reservation);
+        }
+        throw;
+    }
+    return Results.Ok(new OrderResponse(order.Id, order.CreatedAt, order.Total, order.Status));
+});
+
+api.MapPost("/perf/runs/{runId}/seed", (string runId, HttpRequest http, RunPartitionStore partitions) =>
+{
+    if (string.IsNullOrWhiteSpace(runId))
+    {
+        return Results.BadRequest(new { error = "runId is required" });
+    }
+
+    var budget = 0;
+    if (int.TryParse(http.Query["budget"], out var parsed) && parsed > 0)
+    {
+        budget = parsed;
+    }
+    else if (int.TryParse(Environment.GetEnvironmentVariable("PERF_WRITE_BUDGET"), out var fromEnv) && fromEnv > 0)
+    {
+        budget = fromEnv;
+    }
+
+    if (budget <= 0)
+    {
+        return Results.BadRequest(new { error = "write budget must be positive" });
+    }
+
+    try
+    {
+        var part = partitions.Seed(runId, budget);
+        return Results.Ok(new { runId = part.RunId, seeded = part.Seeded, ready = part.Ready, budget = part.Budget });
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Conflict(new { error = ex.Message });
+    }
+});
+
+api.MapPost("/perf/runs/{runId}/reset", async (
+    string runId, RunPartitionStore partitions,
+    IDbContextFactory<EcommerceDbContext> contextFactory,
+    CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(runId))
+    {
+        return Results.BadRequest(new { error = "runId is required" });
+    }
+
+    if (!partitions.TryReset(runId, out var part))
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "managed-reference partition is not seeded for this run");
+    }
+
+    var ids = part.Orders.Keys.ToArray();
+    if (ids.Length > 0)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(cancellationToken);
+        await db.Orders.Where(order => ids.Contains(order.Id)).ExecuteDeleteAsync(cancellationToken);
+        part.Orders.Clear();
+    }
+
+    return Results.Ok(new { runId = part.RunId, reset = part.Reset, ready = part.Ready, budget = part.Budget });
+});
+
+api.MapPost("/perf/runs/{runId}/cleanup", async (
+    string runId, RunPartitionStore partitions,
+    IDbContextFactory<EcommerceDbContext> contextFactory,
+    CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(runId))
+    {
+        return Results.BadRequest(new { error = "runId is required" });
+    }
+
+    if (!partitions.TryBeginCleanup(runId, out var part))
+    {
+        if (partitions.WasCleaned(runId))
+        {
+            return Results.Ok(new { runId, cleaned = true, remaining = 0, alreadyClean = true });
+        }
+        return Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "managed-reference partition is missing; cleanup cannot complete");
+    }
+
+    try
+    {
+        var ids = part.Orders.Keys.ToArray();
+        if (ids.Length > 0)
+        {
+            await using var db = await contextFactory.CreateDbContextAsync(cancellationToken);
+            await db.Orders.Where(order => ids.Contains(order.Id)).ExecuteDeleteAsync(cancellationToken);
+        }
+        part.Orders.Clear();
+        partitions.CompleteCleanup(part);
+        return Results.Ok(new { runId = part.RunId, cleaned = true, remaining = 0 });
+    }
+    catch
+    {
+        partitions.RestoreAfterFailedCleanup(part);
+        throw;
+    }
+});
+
+api.MapGet("/perf/runs/{runId}/orders/{id:long}", (
+    string runId, long id, RunPartitionStore partitions) =>
+{
+    if (!partitions.TryGet(runId, out var part) || !part.Orders.TryGetValue(id, out var status))
+    {
+        return Results.NotFound();
+    }
+
+    return Results.Ok(new { runId, orderId = id, status, workerOutcome = 1 });
+});
+
 await using (var seedScope = app.Services.CreateAsyncScope())
 {
     var seeder = seedScope.ServiceProvider.GetRequiredService<DatabaseSeeder>();
@@ -412,3 +649,27 @@ app.Logger.LogInformation(
     runContext.RunMode);
 
 await app.RunAsync();
+
+static IResult? RejectUnreadyPartition(RunPartitionStore partitions, string runId, bool required)
+{
+    if (!partitions.TryGet(runId, out var part))
+    {
+        if (!required)
+        {
+            return null;
+        }
+
+        return Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "managed-reference partition is not seeded/reset for this run");
+    }
+
+    if (!part.Ready)
+    {
+        return Results.Problem(
+            statusCode: StatusCodes.Status409Conflict,
+            title: "managed-reference partition is not seeded/reset for this run");
+    }
+
+    return null;
+}

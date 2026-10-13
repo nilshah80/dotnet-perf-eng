@@ -1,0 +1,33 @@
+# Independence scan notes for the native repository.
+#
+# This file documents what the scan in scripts/contract/independence.sh allows
+# and rejects. Compatibility environment NAMES may appear in shipped files;
+# peer-owned JMeter artifacts and sibling checkouts must not.
+#
+# Allowed compatibility names (values must be native-owned):
+#   PERFLAB_JMETER_IMAGE
+#   PERFLAB_JMETER_PLAN
+#   PERFLAB_JMETER_FILES
+#   PERFLAB_JMETER_PROP_BASE_URL
+#   PERFLAB_JMETER_PROP_THREADS
+#   PERFLAB_JMETER_PROP_DURATION_SECONDS
+#   PERFLAB_JMETER_PROP_RUN_ID
+#   PERFLAB_JMETER_PROP_SCENARIO
+#   PERFLAB_PLUGIN_ID
+#   PERFLAB_PLUGIN_VERSION
+#   PERFLAB_PLUGIN_IMAGE_DIGEST
+#   PERFLAB_PLUGIN_CPUS
+#   PERFLAB_PLUGIN_MEMORY_BYTES
+#
+# Forbidden in harness/, labs/, README.md, source/:
+#   package-plugin.sh
+#   perflab-load-jmeter
+#   perflab.load.jmeter as a runtime default
+#   sibling paths ../perflab and ../../perflab
+#   PoC/perflab as a runtime root
+#
+# Scan exclusions:
+#   docs/REAL-WORLD-PERFORMANCE-ENGINEERING-IMPLEMENTATION-PLAN.md (joint plan)
+#   docs/archive/
+#   contracts/ (frozen fixtures may mention example adapter IDs)
+#   scripts/contract/ (this allowlist and the scanner)

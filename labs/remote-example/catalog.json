@@ -1,0 +1,91 @@
+{
+  "apiVersion": "perflab.io/v1",
+  "kind": "ScenarioCatalog",
+  "contractRevision": "v1",
+  "scenarios": [
+    {
+      "id": "R00",
+      "name": "remote-health-ready",
+      "workload": {
+        "type": "request",
+        "selector": "R00"
+      },
+      "targets": [
+        "remote"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 32,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "none"
+      }
+    },
+    {
+      "id": "R01",
+      "name": "remote-catalog-ranking",
+      "workload": {
+        "type": "request",
+        "selector": "R01"
+      },
+      "targets": [
+        "remote"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 64,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "none"
+      }
+    },
+    {
+      "id": "R02",
+      "name": "remote-runtime-threading",
+      "workload": {
+        "type": "request",
+        "selector": "R02"
+      },
+      "targets": [
+        "remote"
+      ],
+      "effects": {
+        "classification": "read"
+      },
+      "defaults": {
+        "loadModel": "closed",
+        "rate": 96,
+        "rateUnit": "concurrent-iterations"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "none"
+      },
+      "diagnostics": {
+        "preset": "none"
+      }
+    }
+  ]
+}

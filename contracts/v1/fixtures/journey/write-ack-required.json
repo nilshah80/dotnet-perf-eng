@@ -1,0 +1,10 @@
+{
+  "writeSafety": {
+    "class": "managed-reference"
+  },
+  "lifecycle": {
+    "ownership": "managed"
+  },
+  "requiresAck": true,
+  "requiresPartition": true
+}

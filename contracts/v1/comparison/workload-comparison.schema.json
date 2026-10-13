@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perflab.io/schemas/comparison/v1/workload-comparison.schema.json",
+  "title": "WorkloadComparisonCompatibility",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "workloadType", "compatible", "incompatibilities"],
+  "properties": {
+    "apiVersion": { "const": "perflab.io/v1" },
+    "kind": { "const": "WorkloadComparisonCompatibility" },
+    "workloadType": { "enum": ["request", "journey", "mix", "protocol"] },
+    "compatible": { "const": true },
+    "incompatibilities": {
+      "type": "array",
+      "maxItems": 0
+    }
+  }
+}
