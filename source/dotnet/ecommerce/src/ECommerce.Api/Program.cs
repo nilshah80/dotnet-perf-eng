@@ -7,9 +7,11 @@ using ECommerce.Api.Contracts;
 using ECommerce.Api.Data;
 using ECommerce.Api.Diagnostics;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.HttpLogging;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi;
 using Npgsql;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
@@ -56,6 +58,33 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         };
     });
 builder.Services.AddAuthorization();
+builder.Services.AddOpenApi(options =>
+{
+    options.AddDocumentTransformer((document, _, _) =>
+    {
+        document.Components ??= new OpenApiComponents();
+        document.Components.SecuritySchemes ??= new Dictionary<string, IOpenApiSecurityScheme>();
+        document.Components.SecuritySchemes["Bearer"] = new OpenApiSecurityScheme
+        {
+            Type = SecuritySchemeType.Http,
+            Scheme = "bearer",
+            BearerFormat = "JWT"
+        };
+        return Task.CompletedTask;
+    });
+    options.AddOperationTransformer((operation, context, _) =>
+    {
+        if (context.Description.ActionDescriptor.EndpointMetadata.OfType<IAuthorizeData>().Any())
+        {
+            operation.Security ??= [];
+            operation.Security.Add(new OpenApiSecurityRequirement
+            {
+                [new OpenApiSecuritySchemeReference("Bearer", context.Document)] = []
+            });
+        }
+        return Task.CompletedTask;
+    });
+});
 
 var resourceAttributes = new Dictionary<string, object>
 {
@@ -196,6 +225,8 @@ app.MapGet("/health/ready", async (
     await db.Database.ExecuteSqlRawAsync("SELECT 1", cancellationToken);
     return Results.Ok(new { status = "ready", postgres = "ok" });
 });
+
+app.MapOpenApi();
 
 // ---- Auth (public) ----
 app.MapPost("/api/auth/login", async (
@@ -555,7 +586,7 @@ api.MapPost("/perf/runs/{runId}/seed", (string runId, HttpRequest http, RunParti
     {
         return Results.Conflict(new { error = ex.Message });
     }
-});
+}).ExcludeFromDescription();
 
 api.MapPost("/perf/runs/{runId}/reset", async (
     string runId, RunPartitionStore partitions,
@@ -583,7 +614,7 @@ api.MapPost("/perf/runs/{runId}/reset", async (
     }
 
     return Results.Ok(new { runId = part.RunId, reset = part.Reset, ready = part.Ready, budget = part.Budget });
-});
+}).ExcludeFromDescription();
 
 api.MapPost("/perf/runs/{runId}/cleanup", async (
     string runId, RunPartitionStore partitions,
@@ -623,7 +654,7 @@ api.MapPost("/perf/runs/{runId}/cleanup", async (
         partitions.RestoreAfterFailedCleanup(part);
         throw;
     }
-});
+}).ExcludeFromDescription();
 
 api.MapGet("/perf/runs/{runId}/orders/{id:long}", (
     string runId, long id, RunPartitionStore partitions) =>
@@ -634,7 +665,7 @@ api.MapGet("/perf/runs/{runId}/orders/{id:long}", (
     }
 
     return Results.Ok(new { runId, orderId = id, status, workerOutcome = 1 });
-});
+}).ExcludeFromDescription();
 
 await using (var seedScope = app.Services.CreateAsyncScope())
 {
