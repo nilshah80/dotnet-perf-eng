@@ -1,6 +1,7 @@
 import http from 'k6/http';
-import { Counter } from 'k6/metrics';
+import { Counter, Trend } from 'k6/metrics';
 import { mixEnabled, pickRequest } from './mix.js';
+import { withPerfBaggage } from './baggage.js';
 
 // Shared DEFAULT k6 workload: one stateless request per iteration, driven
 // entirely by the PERF_* env contract. It is the k6 counterpart of the shared
@@ -27,6 +28,8 @@ const extraHeaders = __ENV.PERF_HEADERS || '';
 // capture-evidence.sh reads these counters instead of http_req_failed.
 const nonSuccessResponses = new Counter('perflab_http_non_2xx_3xx');
 const transportErrors = new Counter('perflab_http_transport_errors');
+const primaryRequests = new Counter('perflab_primary_requests');
+const primaryRequestLatency = new Trend('perflab_primary_request_latency');
 
 export const options = {
   // Response bodies are never asserted by the lab, and discarding them keeps
@@ -42,10 +45,10 @@ export const options = {
 };
 
 const params = {
-  headers: {
+  headers: withPerfBaggage({
     Accept: 'application/json',
     'X-Perf-Run-Id': runId,
-  },
+  }, runId),
 };
 
 if (method === 'POST' || method === 'PUT' || method === 'PATCH') {
@@ -74,6 +77,9 @@ export default function () {
     : params;
 
   const response = http.request(m, `${baseUrl}${p}`, sends ? b : null, rp);
+
+  primaryRequests.add(1);
+  primaryRequestLatency.add(response.timings.duration);
 
   if (response.status === 0) {
     // No HTTP status was received: connection refused, timeout, or reset.

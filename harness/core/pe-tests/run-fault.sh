@@ -8,7 +8,7 @@
 # dependency (e.g. any DB scenario for --dependency postgres).
 #
 #   run-fault.sh <scenario> [duration] [--dependency postgres|redis|rabbitmq]
-#                [--kind pause|stop] [--at N] [--for N] [--profile P]
+#                [--kind pause|stop|kill] [--at N] [--for N] [--profile P]
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 require_loadgen
@@ -37,7 +37,7 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option '$1'." >&2; exit 1 ;;
   esac
 done
-[[ "${kind}" == "pause" || "${kind}" == "stop" ]] || { echo "--kind must be 'pause' or 'stop'." >&2; exit 1; }
+[[ "${kind}" == "pause" || "${kind}" == "stop" || "${kind}" == "kill" ]] || { echo "--kind must be 'pause', 'stop', or 'kill'." >&2; exit 1; }
 [[ "${at}" =~ ^[0-9]+$ && "${for_s}" =~ ^[1-9][0-9]*$ ]] || { echo "--at/--for must be whole seconds." >&2; exit 1; }
 # The fault must land inside the measured window, else it fires during the
 # post-load cooldown/capture (or never) and measures nothing. Validate against the

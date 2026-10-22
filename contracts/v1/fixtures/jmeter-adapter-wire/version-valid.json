@@ -1,0 +1,17 @@
+{
+  "generator": "jmeter",
+  "adapterId": "perflab.load.jmeter",
+  "adapterVersion": "0.1.0",
+  "imageDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "cpus": 2,
+  "memoryBytes": 2147483648,
+  "maxThreads": 128,
+  "modes": [
+    "run-once",
+    "normalize",
+    "version"
+  ],
+  "fingerprint": "adapter=0.1.0;maxThreads=128",
+  "capabilityRevision": "v1",
+  "contractDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

@@ -44,7 +44,7 @@ PERFLAB_READY_URL="${PERFLAB_READY_URL:-http://127.0.0.1:8080/health/ready}"
 # wrk (Docker) also works against a genuinely remote URL; set PERFLAB_WRK_IMAGE to
 # a wrk image whose entrypoint is wrk. Leave empty to use k6 only.
 PERFLAB_LOAD_GENERATOR_DEFAULT="k6"
-PERFLAB_WRK_IMAGE=""
+PERFLAB_WRK_IMAGE="${PERFLAB_WRK_IMAGE:-}"
 
 # --- Optional richer tiers (only if you have MORE than URL access) ------------
 # The default above is a pure black-box test. If you have READ access to the

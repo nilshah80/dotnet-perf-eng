@@ -1,0 +1,33 @@
+{
+  "name": "ramp",
+  "loadModel": "closed",
+  "rateUnit": "concurrent-iterations",
+  "sessionRequired": false,
+  "updateLoadRequired": false,
+  "stages": [
+    {
+      "name": "ramp-25",
+      "kind": "measure",
+      "durationSeconds": 7,
+      "target": 2
+    },
+    {
+      "name": "ramp-50",
+      "kind": "measure",
+      "durationSeconds": 7,
+      "target": 4
+    },
+    {
+      "name": "ramp-75",
+      "kind": "measure",
+      "durationSeconds": 7,
+      "target": 6
+    },
+    {
+      "name": "ramp-100",
+      "kind": "measure",
+      "durationSeconds": 7,
+      "target": 8
+    }
+  ]
+}

@@ -22,6 +22,17 @@ Dockerfile      text eol=lf
 # Read by the load generators, which run on the host but parse these verbatim.
 *.lua           text eol=lf
 *.js            text eol=lf
+*.jmx           text eol=lf
+*.jtl           text eol=lf
+*.csv           text eol=lf
+*.txt           text eol=lf
+*.xml           text eol=lf
+*.jsonl         text eol=lf
+*.ndjson        text eol=lf
+
+# Plans and repository documentation are compared byte-for-byte across
+# platforms and repositories.
+*.md            text eol=lf
 
 # Differential analysers (diff-*.py) are piped as source into a python container
 # (python3 -c); a CR in that source is fragile across CPython versions.
@@ -41,3 +52,27 @@ enabled_plugins text eol=lf
 # Parsed by docker compose on the host; a stray CR would corrupt a value.
 .env            text eol=lf
 .env.example    text eol=lf
+
+# Diagnostic fixtures and retained artifacts must never be line-normalized.
+*.nettrace      binary
+*.gcdump        binary
+*.dmp           binary
+*.jfr           binary
+*.hprof         binary
+*.pprof         binary
+*.speedscope    binary
+*.cpuprofile    binary
+*.heapsnapshot  binary
+
+# Archives, images, documents, and fonts are binary.
+*.gz    binary
+*.zip   binary
+*.tar   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.woff  binary
+*.woff2 binary

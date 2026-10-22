@@ -21,8 +21,8 @@ PERFLAB_RUNTIME="dotnet"
 PERFLAB_COMPOSE_FILE="labs/scenariolab/compose.yaml"
 PERFLAB_APP_SERVICES="api worker"        # rebuilt/recreated by the harness
 PERFLAB_PRIMARY_APP_SERVICE="api"        # used for app-socket snapshots
-PERFLAB_BASE_URL="http://127.0.0.1:8080"
-PERFLAB_READY_URL="http://127.0.0.1:8080/health/ready"
+PERFLAB_BASE_URL="${PERFLAB_BASE_URL:-http://127.0.0.1:8080}"
+PERFLAB_READY_URL="${PERFLAB_READY_URL:-http://127.0.0.1:8080/health/ready}"
 
 # --- Telemetry correlation ---
 PERFLAB_PROM_JOB_REGEX="perflab-.*"           # Prometheus job selector
@@ -37,6 +37,9 @@ PERFLAB_PYROSCOPE_URL="${PERFLAB_PYROSCOPE_URL:-http://127.0.0.1:4040}"
 PERFLAB_PYROSCOPE_SERVICES="perflab-api perflab-worker"
 PERFLAB_PYROSCOPE_REQUIRED_SERVICES="perflab-api"
 PERFLAB_PYROSCOPE_ROLE_SERVICES="api:perflab-api worker:perflab-worker"
+PERFLAB_PROFILING_MIN_CORES_THRESHOLD="0.1"
+PERFLAB_PROFILING_SERVICE_QUOTAS="api=1 worker=0.75"
+PERFLAB_PROFILING_QUOTA_SOURCE="compose.cpus"
 PERFLAB_DIAGNOSTICS_URL="http://127.0.0.1:18323"   # dotnet-monitor (runtime adapter)
 
 # --- Load generators ---
@@ -45,9 +48,11 @@ PERFLAB_DIAGNOSTICS_URL="http://127.0.0.1:18323"   # dotnet-monitor (runtime ada
 PERFLAB_LOAD_GENERATOR_DEFAULT="k6"
 PERFLAB_INTERNAL_BASE_URL="http://api:8080"   # app URL on the compose network (Docker load gens)
 PERFLAB_COMPOSE_NETWORK="perflab_default"     # compose network a Docker load gen joins
-PERFLAB_WRK_IMAGE=""                           # set to your wrk Docker image to enable wrk
-# JMeter uses the same pinned container image as PerfLab. Leave unset unless
-# PERFLAB_LOAD_GENERATOR=jmeter; k6 remains the lab default.
+PERFLAB_WRK_IMAGE="${PERFLAB_WRK_IMAGE:-}"                           # set to your wrk Docker image to enable wrk
+# JMeter is container-only. Build the native image with
+# harness/adapters/loadgen/jmeter/package.sh, then pin PERFLAB_JMETER_IMAGE
+# to that digest. Leave unset unless PERFLAB_LOAD_GENERATOR=jmeter;
+# k6 remains the lab default.
 # PERFLAB_JMETER_IMAGE="sha256:<local-image-id>"
 # PERFLAB_JMETER_PLAN="labs/scenariolab/loadgen/test-plan.jmx"
 # PERFLAB_JMETER_FILES='[]'

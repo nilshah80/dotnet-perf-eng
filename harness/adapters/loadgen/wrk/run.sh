@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# wrk load adapter -- wrk is NOT installed on the host; it runs via Docker,
-# joined to the compose network, targeting the app's INTERNAL url (e.g.
-# http://api:8080). k6, by contrast, runs on the host. Set PERFLAB_WRK_IMAGE in
-# the descriptor to a wrk image whose entrypoint is wrk.
+# wrk load adapter. With PERFLAB_WRK_IMAGE set, wrk runs via Docker, joined to
+# the compose network, targeting the app's INTERNAL url (e.g. http://api:8080);
+# the image's entrypoint must be wrk and its architecture must match the Docker
+# host. Without an image, the host's wrk binary runs against the app's published
+# base_url, the same path k6 uses.
 #   run.sh <artifact-dir> <phase>   phase = warmup | measure | diagnostic
 set -euo pipefail
 HARNESS_ROOT="${PERFLAB_HARNESS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
@@ -11,9 +12,16 @@ source "${HARNESS_ROOT}/core/lib/common.sh"   # json_escape, compose_network, in
 
 artifact_dir="${1:?run.sh <artifact-dir> <phase>}"
 phase="${2:?phase required (warmup|measure|diagnostic)}"
+# wrk.lua sends this phase as request baggage (perflab-baggage-v1, D-P1-8).
+export PERF_PHASE="${phase}"
 mkdir -p "${artifact_dir}/benchmark"
 
-[[ -n "${wrk_image}" ]] || { echo "PERFLAB_WRK_IMAGE is not set; wrk runs via Docker." >&2; exit 1; }
+if [[ "${PERF_WORKLOAD_KIND:-request}" == "journey" || "${PERF_WORKLOAD_KIND:-request}" == "mix" ]]; then
+  echo "capability generator.wrk.journey is unsupported; rejected before traffic" >&2
+  exit 1
+fi
+
+wrk_mode="$(wrk_execution_mode)" || exit 1
 
 # The workload script is the lab's own wrk.lua if it ships one, else the shared
 # default.lua. Its directory (not this adapter's) is mounted at /lab, and the
@@ -22,42 +30,65 @@ mkdir -p "${artifact_dir}/benchmark"
 script="$(loadgen_script)"
 script_dir="$(cd "$(dirname "${script}")" && pwd)"
 script_base="$(basename "${script}")"
-# Local target: join the compose network and hit the app's INTERNAL url. Remote
-# target: no compose network -- run on Docker's default bridge and hit base_url
-# (the app's external url). A host-loopback base_url (127.0.0.1) is NOT reachable
-# from inside the container, so a host-local remote target must use k6, not wrk.
-if [[ "${target_mode:-local}" == "remote" ]]; then
-  network_args=()
+if [[ "${wrk_mode}" == "host" ]]; then
+  # The host binary reaches the app where k6 does: the published base_url, for a
+  # local or a remote target, including host loopback.
   url="${base_url}"
-  # wrk runs in a container: its 127.0.0.1 is the container's own loopback, not the
-  # host, so a host-loopback remote base_url yields an all-transport-errors run. Fail
-  # fast with the fix rather than emitting a misleading 100%-error result.
-  case "${url}" in
-    *"://127.0.0.1"*|*"://localhost"*|*"://[::1]"*)
-      echo "wrk cannot reach a host-loopback remote target (${url}) from inside its container. Use PERFLAB_LOAD_GENERATOR=k6 for a host-local remote target, or point PERFLAB_BASE_URL at a routable host." >&2
-      exit 1 ;;
-  esac
+  lua="${script_dir}/${script_base}"
+  wrk_run() { wrk "$@"; }
 else
-  network_args=(--network "${compose_network}")
-  url="${internal_base_url}"
+  # Local target: join the compose network and hit the app's INTERNAL url. Remote
+  # target: no compose network -- run on Docker's default bridge and hit base_url
+  # (the app's external url). A host-loopback base_url (127.0.0.1) is NOT reachable
+  # from inside the container, so a host-local remote target must use the host wrk
+  # or k6.
+  if [[ "${target_mode:-local}" == "remote" ]]; then
+    network_args=()
+    url="${base_url}"
+    # wrk runs in a container: its 127.0.0.1 is the container's own loopback, not the
+    # host, so a host-loopback remote base_url yields an all-transport-errors run. Fail
+    # fast with the fix rather than emitting a misleading 100%-error result.
+    case "${url}" in
+      *"://127.0.0.1"*|*"://localhost"*|*"://[::1]"*)
+        echo "wrk cannot reach a host-loopback remote target (${url}) from inside its container. Unset PERFLAB_WRK_IMAGE to use the host wrk, use PERFLAB_LOAD_GENERATOR=k6, or point PERFLAB_BASE_URL at a routable host." >&2
+        exit 1 ;;
+    esac
+  else
+    network_args=(--network "${compose_network}")
+    url="${internal_base_url}"
+  fi
+  wrk_run() {
+    MSYS_NO_PATHCONV=1 docker run --rm "${network_args[@]}" \
+      -e PERF_METHOD -e PERF_PATH -e PERF_BODY -e PERF_RUN_ID -e PERF_PHASE -e PERF_HEADERS \
+      -v "${script_dir}:/lab:ro" \
+      "${wrk_image}" "$@"
+  }
+  lua="/lab/${script_base}"
 fi
-wrk_run() {
-  MSYS_NO_PATHCONV=1 docker run --rm "${network_args[@]}" \
-    -e PERF_METHOD -e PERF_PATH -e PERF_BODY -e PERF_RUN_ID -e PERF_HEADERS \
-    -v "${script_dir}:/lab:ro" \
-    "${wrk_image}" "$@"
-}
-lua="/lab/${script_base}"
 
 case "${phase}" in
   warmup)
-    wrk_run -t2 -c16 -d10s -s "${lua}" "${url}" > "${artifact_dir}/benchmark/warmup.txt"
+    # Same bounds k6 applies: the run announces PERFLAB_WARMUP_SECONDS, so the
+    # warm-up must last that long rather than a fixed 10 seconds.
+    warmup_seconds="${PERFLAB_WARMUP_SECONDS:-10}"
+    case "${warmup_seconds}" in
+      ''|*[!0-9]*) echo "PERFLAB_WARMUP_SECONDS must be an integer number of seconds; received '${warmup_seconds}'." >&2; exit 1 ;;
+    esac
+    if (( warmup_seconds < 1 || warmup_seconds > 600 )); then
+      echo "PERFLAB_WARMUP_SECONDS must be between 1 and 600; received '${warmup_seconds}'." >&2
+      exit 1
+    fi
+    # The measured connection count, not a fixed 16: a warm-up hotter than the
+    # measurement changes the state the measurement starts from.
+    conns="${PERFLAB_CONNECTIONS:?PERFLAB_CONNECTIONS not set}"
+    threads=$(( conns < 2 ? conns : 2 ))
+    wrk_run -t"${threads}" -c"${conns}" -d"${warmup_seconds}s" -s "${lua}" "${url}" > "${artifact_dir}/benchmark/warmup.txt"
     ;;
   measure | diagnostic)
     conns="${PERFLAB_CONNECTIONS:?PERFLAB_CONNECTIONS not set}"
     dur="${PERFLAB_DURATION_SECONDS:?PERFLAB_DURATION_SECONDS not set}"
     if [[ "${phase}" == "measure" ]]; then out="wrk.txt"; else out="diagnostic-wrk.txt"; fi
-    wrk_run -t4 -c"${conns}" -d"${dur}s" --latency -s "${lua}" "${url}" \
+    loadgen_timed wrk_run -t4 -c"${conns}" -d"${dur}s" --latency -s "${lua}" "${url}" \
       > "${artifact_dir}/benchmark/${out}"
 
     [[ "${phase}" == "measure" ]] || exit 0
@@ -80,10 +111,16 @@ case "${phase}" in
     # total transport failure compute error_rate 1.0.
     total="$(awk -v c="${completed}" -v tr="${transport}" 'BEGIN { print c + tr }')"
     errrate="$(awk -v e="$((non2xx + transport))" -v t="${total}" 'BEGIN { if (t + 0 > 0) printf "%.6f", e / (t + 0); else print 0 }')"
-    # wrk latency percentiles are unit-suffixed strings (e.g. "1.23ms") -> tagged
-    # wrk-duration; the counts and rates are numeric.
-    printf '[{"name":"http.requests_per_second","value":%s,"unit":"request/s","source":"benchmark/wrk.txt"},{"name":"http.latency.p50","value":"%s","unit":"wrk-duration","source":"benchmark/wrk.txt"},{"name":"http.latency.p90","value":"%s","unit":"wrk-duration","source":"benchmark/wrk.txt"},{"name":"http.latency.p99","value":"%s","unit":"wrk-duration","source":"benchmark/wrk.txt"},{"name":"http.responses.non_2xx_3xx","value":%s,"unit":"response","source":"benchmark/wrk.txt"},{"name":"http.transport_errors","value":%s,"unit":"error","source":"benchmark/wrk.txt"},{"name":"http.requests.total","value":%s,"unit":"request","source":"benchmark/wrk.txt"},{"name":"http.error_rate","value":%s,"unit":"ratio","source":"benchmark/wrk.txt"}]\n' \
-      "${rps}" "$(json_escape "${p50:-unknown}")" "$(json_escape "${p90:-unknown}")" "$(json_escape "${p99:-unknown}")" "${non2xx}" "${transport}" "${total}" "${errrate}" \
+    # wrk prints unit-suffixed percentiles ("612.00us", "1.23ms", "2.10s"); they
+    # are recorded in ms like every other generator. A string read as a number
+    # took 612 us for 612 ms.
+    wrk_ms() {
+      awk -v v="$1" 'BEGIN {
+        if (v ~ /us$/) printf "%.4f", v / 1000; else if (v ~ /ms$/) printf "%.4f", v + 0
+        else if (v ~ /[0-9]s$/) printf "%.4f", v * 1000; else if (v ~ /[0-9]m$/) printf "%.4f", v * 60000; else print "null" }'
+    }
+    printf '[{"name":"http.requests_per_second","value":%s,"unit":"request/s","source":"benchmark/wrk.txt"},{"name":"http.latency.p50","value":%s,"unit":"ms","source":"benchmark/wrk.txt"},{"name":"http.latency.p90","value":%s,"unit":"ms","source":"benchmark/wrk.txt"},{"name":"http.latency.p99","value":%s,"unit":"ms","source":"benchmark/wrk.txt"},{"name":"http.responses.non_2xx_3xx","value":%s,"unit":"response","source":"benchmark/wrk.txt"},{"name":"http.transport_errors","value":%s,"unit":"error","source":"benchmark/wrk.txt"},{"name":"http.requests.total","value":%s,"unit":"request","source":"benchmark/wrk.txt"},{"name":"http.error_rate","value":%s,"unit":"ratio","source":"benchmark/wrk.txt"}]\n' \
+      "${rps}" "$(wrk_ms "${p50:-}")" "$(wrk_ms "${p90:-}")" "$(wrk_ms "${p99:-}")" "${non2xx}" "${transport}" "${total}" "${errrate}" \
       > "${artifact_dir}/benchmark/observations.json"
     ;;
   *)
