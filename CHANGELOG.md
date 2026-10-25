@@ -214,6 +214,11 @@ No version has been tagged yet. The entries below describe the state of `main`.
 
 ### Changed
 
+- The `scenariolab` Compose project is named `scenario` instead of `perflab`,
+  so its containers (`scenario-api-1`, `scenario-worker-1`, …), network
+  (`scenario_default`) and volumes no longer share a name with the separate
+  PerfLab repository. Volumes created under the old `perflab_` prefix are not
+  reused; remove them with `docker volume rm` once they are no longer needed.
 - Query provenance records carry the range step or the pinned evaluation time,
   page, attempt count and last transport exit; the derived efficiency scalars
   and every Loki page are recorded (D-P2-7).

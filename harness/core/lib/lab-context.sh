@@ -429,7 +429,7 @@ if [[ "${load_generator}" != "wrk" && "${load_generator}" != "k6" && "${load_gen
 fi
 # k6 runs on the host; wrk runs via Docker on the compose network (no host wrk).
 internal_base_url="${PERFLAB_INTERNAL_BASE_URL:-http://api:8080}"
-compose_network="${PERFLAB_COMPOSE_NETWORK:-perflab_default}"
+compose_network="${PERFLAB_COMPOSE_NETWORK:-scenario_default}"
 wrk_image="${PERFLAB_WRK_IMAGE:-}"
 
 # Load profile: the SHAPE of the measure-phase load. "steady" (default) is the

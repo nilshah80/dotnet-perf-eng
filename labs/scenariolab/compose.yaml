@@ -1,4 +1,4 @@
-name: perflab
+name: scenario
 
 services:
   postgres:
