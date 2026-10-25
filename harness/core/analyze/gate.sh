@@ -80,9 +80,27 @@ while IFS=$'\t' read -r n v; do [[ -n "${n}" ]] && OBS["${n}"]="${v}"; done < <(
 
 # --- 1. Absolute SLO checks -------------------------------------------------
 fail=0; checked=0
+if awk -v value="${OBS[browser.checks.failed]:-0}" 'BEGIN { exit !((value + 0) > 0) }'; then
+  fail=$((fail+1)); checked=$((checked+1))
+  echo "  browser.checks.failed              max 0           observed=${OBS[browser.checks.failed]} FAIL (correctness)"
+fi
+# k6 reports journey.failed and the JMeter adapter journeys.failed. Reading only
+# the JMeter name passed a k6 checkout run with failed journeys.
+journey_metric="journey.failed"
+[[ -n "${OBS[journey.failed]:-}" ]] || journey_metric="journeys.failed"
+journey_failed="${OBS[${journey_metric}]:-0}"
+if awk -v value="${journey_failed}" 'BEGIN { exit !((value + 0) > 0) }'; then
+  fail=$((fail+1)); checked=$((checked+1))
+  printf '  %-34s max 0           observed=%s FAIL (correctness)\n' "${journey_metric}" "${journey_failed}"
+fi
 if [[ -s "${slos_file}" ]]; then
   echo "Absolute SLOs:"
-  while IFS=$'\t' read -r metric op thr; do
+  # Three fields: a missing operator would shift the threshold into its place
+  # and gate on a comparison nobody wrote.
+  while IFS= read -r gate_line; do
+    metric="$(printf '%s' "${gate_line}" | awk -F'\t' '{print $1}')"
+    op="$(printf '%s' "${gate_line}" | awk -F'\t' '{print $2}')"
+    thr="$(printf '%s' "${gate_line}" | awk -F'\t' '{print $3}')"
     [[ -n "${metric}" ]] || continue
     # An unknown operator is a config error, not a pass -- fail it.
     if [[ "${op}" != "max" && "${op}" != "min" ]]; then
@@ -133,7 +151,19 @@ elif [[ "${use_baseline}" == "true" ]]; then
   echo "Regression vs baseline: none stored at ${baseline} (record one with update-baseline.sh)."
 fi
 
-# --- 3. Steady-state requirement (opt-in) -----------------------------------
+# --- 4. Managed-reference cleanup (fail-closed) ------------------------------
+if [[ -f "${run_dir}/cleanup-incomplete" ]]; then
+  echo "gate cannot pass: cleanup is incomplete" >&2
+  exit 1
+fi
+if [[ "$(jqd -r '.writeSafety.class // .writeSafetyClass // empty' < "${facts}" 2>/dev/null || true)" == "managed-reference" ]]; then
+  if [[ ! -f "${run_dir}/cleanup-complete" ]]; then
+    echo "gate cannot pass: cleanup is incomplete" >&2
+    exit 1
+  fi
+fi
+
+# --- 5. Verdict --------------------------------------------------------------
 # The absolute SLOs and the baseline compare a single p99/throughput number -- but
 # that number is only trustworthy if the measure window was in STEADY STATE. When
 # asked, refuse unless the candidate's verdict is exactly "steady".

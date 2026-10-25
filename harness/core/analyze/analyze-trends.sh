@@ -94,12 +94,29 @@ if [[ "${#emit[@]}" -eq 0 ]]; then
 else
   series="$(printf '%s\n' "${emit[@]}" | jqd -s 'add // []' 2>/dev/null || echo '[]')"
 fi
-printf '{"kind":"trend-report","growthThreshold":%s,"series":%s}\n' "${growth_threshold}" "${series}" > "${report}"
+# A leak is growth under constant load. On a profile whose load changes inside
+# the window (ramp, stress, spike, capacity, breakpoint, load) the queue and heap
+# follow the load, and E06's surge read as a thread-pool "leak candidate". Those
+# series are kept for reference but none is flagged. Same profile set as
+# steady-state.sh.
+profile="$(jqd -r '.workload.profile // ""' < "${artifact_dir}/manifest.json" 2>/dev/null || true)"
+verdict="captured"; reason=""
+case "${profile}" in
+  steady|closed|arrival|open|soak|"" ) : ;;
+  * )
+    verdict="not-applicable"
+    reason="profile '${profile}' changes load inside the window, so growth tracks the load, not a leak"
+    series="$(printf '%s' "${series}" | jqd -c 'map(.growing = false)' 2>/dev/null || echo '[]')" ;;
+esac
+printf '{"kind":"trend-report","verdict":"%s","profile":"%s","growthThreshold":%s,"series":%s%s}\n' \
+  "${verdict}" "$(json_escape "${profile}")" "${growth_threshold}" "${series}" \
+  "$([[ -n "${reason}" ]] && printf ',"reason":"%s"' "$(json_escape "${reason}")")" > "${report}"
 
 leaks="$(jqd -r '[.series[]|select(.growing)]|length' < "${report}" 2>/dev/null || echo 0)"
 echo "Trend report: ${report}"
 jqd -r '.series[] | "  \(.key)\(if (.instance // "") != "" and .instance != "?" then " [" + (.instance|tostring|.[0:12]) + "]" else "" end): first=\(.first) last=\(.last) growth=\(.growth) slope=\(.slopePerSample) \(if .growing then "GROWING (leak candidate)" elif .insufficientPoints then "(too few samples)" else "stable" end)"' \
   < "${report}" 2>/dev/null || true
+[[ "${verdict}" == "captured" ]] || echo "Trend: not a leak test -- ${reason}."
 if [[ "${leaks}" -gt 0 ]]; then
   echo "WARNING: ${leaks} instance-series growing over the window -- likely a leak/drift (strongest evidence on a soak run)." >&2
 fi

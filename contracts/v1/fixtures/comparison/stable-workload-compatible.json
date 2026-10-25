@@ -1,0 +1,7 @@
+{
+  "apiVersion": "perflab.io/v1",
+  "kind": "WorkloadComparisonCompatibility",
+  "workloadType": "journey",
+  "compatible": true,
+  "incompatibilities": []
+}

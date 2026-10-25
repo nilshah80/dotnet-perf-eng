@@ -1,0 +1,16 @@
+{
+  "apiVersion": "perflab.io/v1",
+  "kind": "ScenarioCatalog",
+  "contractRevision": "v1",
+  "unexpected": true,
+  "scenarios": [
+    {
+      "id": "E00",
+      "name": "x",
+      "workload": {
+        "type": "request",
+        "selector": "x"
+      }
+    }
+  ]
+}

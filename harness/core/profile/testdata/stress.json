@@ -1,0 +1,23 @@
+{
+  "name": "stress",
+  "loadModel": "closed",
+  "rateUnit": "concurrent-iterations",
+  "sessionRequired": false,
+  "updateLoadRequired": false,
+  "lastHealthyTarget": 8,
+  "firstFailingTarget": 16,
+  "stages": [
+    {
+      "name": "expected",
+      "kind": "measure",
+      "durationSeconds": 15,
+      "target": 8
+    },
+    {
+      "name": "beyond",
+      "kind": "measure",
+      "durationSeconds": 15,
+      "target": 16
+    }
+  ]
+}

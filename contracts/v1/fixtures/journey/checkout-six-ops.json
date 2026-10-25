@@ -1,0 +1,20 @@
+{
+  "id": "checkout",
+  "operations": [
+    "login",
+    "browse",
+    "create",
+    "pay",
+    "poll",
+    "verify"
+  ],
+  "parentLabel": "journey::checkout",
+  "childLabels": [
+    "op::login",
+    "op::browse",
+    "op::create",
+    "op::pay",
+    "op::poll",
+    "op::verify"
+  ]
+}

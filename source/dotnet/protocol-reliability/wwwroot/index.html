@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Protocol reliability target</title>
+</head>
+<body>
+  <main>
+    <h1>Protocol reliability target</h1>
+    <output id="status">loading</output>
+  </main>
+  <script>
+    fetch('/api/reliability/status')
+      .then(response => response.json())
+      .then(value => { document.querySelector('#status').textContent = value.instanceId; });
+  </script>
+</body>
+</html>

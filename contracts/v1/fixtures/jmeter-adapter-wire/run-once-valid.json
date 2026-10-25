@@ -1,0 +1,16 @@
+{
+  "mode": "run-once",
+  "workloadRoot": ".",
+  "plan": "loadgen/test-plan.jmx",
+  "files": [],
+  "properties": {
+    "perf.base_url": "http://127.0.0.1:8080",
+    "perf.threads": "1",
+    "perf.duration_seconds": "5",
+    "perf.run_id": "run-1",
+    "perf.scenario": "E00"
+  },
+  "phase": "measure",
+  "outputDirectory": "artifacts",
+  "timeoutSeconds": 60
+}

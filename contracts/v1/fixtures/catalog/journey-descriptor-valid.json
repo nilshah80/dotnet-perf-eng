@@ -1,0 +1,53 @@
+{
+  "apiVersion": "perflab.io/v1",
+  "kind": "ScenarioCatalog",
+  "contractRevision": "v1",
+  "scenarios": [
+    {
+      "id": "checkout",
+      "name": "Browse and buy",
+      "workload": {
+        "type": "journey",
+        "selector": "browse-and-buy"
+      },
+      "targets": [
+        "storefront",
+        "payments"
+      ],
+      "effects": {
+        "classification": "idempotent-write",
+        "replayable": true,
+        "resetPolicy": "restore-snapshot"
+      },
+      "services": {
+        "required": [
+          "api"
+        ],
+        "participating": [
+          "worker",
+          "payments"
+        ]
+      },
+      "defaults": {
+        "loadModel": "open",
+        "rate": 20,
+        "rateUnit": "journeys/s"
+      },
+      "lifecycle": {
+        "ownership": "managed"
+      },
+      "writeSafety": {
+        "class": "managed-reference"
+      },
+      "diagnostics": {
+        "targets": [
+          "api",
+          "worker"
+        ],
+        "preset": "cpu-memory",
+        "sourceLoadLevel": "first-failing"
+      },
+      "sloProfile": "checkout-default"
+    }
+  ]
+}

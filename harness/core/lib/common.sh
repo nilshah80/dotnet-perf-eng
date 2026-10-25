@@ -10,10 +10,11 @@ set -euo pipefail
 #   harness_root     = <harness_root>            (the reusable toolkit)
 #   repo_root        = holds harness/, the project tree, and lab.config.sh
 #
-# Design: zero host jq. The descriptor and scenario catalog are bash-native
-# (lab.config.sh + scenarios.tsv), JSON the harness emits is built with printf
-# helpers, and the few places that must parse foreign JSON (telemetry APIs,
-# Claude output) call jq inside Docker via jqd(). Nothing here hardcodes a
+# Design: no host jq by default. The descriptor and scenario catalog are
+# bash-native (lab.config.sh + scenarios.tsv), JSON the harness emits is built
+# with printf helpers, and the few places that must parse foreign JSON
+# (telemetry APIs, Claude output) call jqd(), which runs jq inside Docker unless
+# PERFLAB_JQ=host opts into the host jq. Nothing here hardcodes a
 # service name, port, metric, or source path; those come from the descriptor or
 # an adapter under <harness_root>/adapters.
 # ---------------------------------------------------------------------------
@@ -27,11 +28,10 @@ repo_root="$(cd "${harness_root}/.." && pwd)"
 # "C:/Program Files/Git/api/..." and the concatenated base URL became host
 # "127.0.0.1:8080C", failing DNS on every request. These variables are URL
 # parts and payloads consumed by the native load generators, not filesystem
-# paths, so exclude them. (No jq CRLF shim is needed anymore: jq runs in Linux
-# via jqd and the harness emits its own JSON with printf.)
+# paths, so exclude them. jqd separately normalizes jq output in both modes.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*)
-    export MSYS2_ENV_CONV_EXCL='PERF_BASE_URL;PERF_METHOD;PERF_PATH;PERF_BODY;PERF_RUN_ID;PERF_SCENARIO;PERF_RUN_MODE;PERF_HEADERS;PERF_MIX;PERFLAB_CONNECTIONS;PERFLAB_DURATION_SECONDS;PERFLAB_GENERATOR_NETWORK_PATH;PERFLAB_PLUGIN_IMAGE_DIGEST'
+    export MSYS2_ENV_CONV_EXCL='PERF_BASE_URL;PERF_SECONDARY_BASE_URL;PERF_METHOD;PERF_PATH;PERF_BODY;PERF_RUN_ID;PERF_SCENARIO;PERF_RUN_MODE;PERF_HEADERS;PERF_MIX;PERF_ALLOWED_ORIGINS;PERFLAB_CONNECTIONS;PERFLAB_DURATION_SECONDS;PERFLAB_GENERATOR_NETWORK_PATH;PERFLAB_PLUGIN_IMAGE_DIGEST'
     ;;
 esac
 
@@ -42,7 +42,8 @@ require_command() {
   fi
 }
 
-# Base dependencies. jq is deliberately NOT one of them -- it runs in Docker.
+# Base dependencies. jq is deliberately NOT one of them -- it runs in Docker by
+# default, and PERFLAB_JQ=host requires the host jq below.
 require_command docker
 require_command curl
 require_command awk
@@ -91,6 +92,122 @@ resolve_repo_path() {
   esac
 }
 
+# jqd: the jq for everything the harness must parse. By default it runs inside
+# Docker (no host jq) at the version PERFLAB_JQ_IMAGE names, so every platform
+# parses evidence with the same jq. It must be available before the selected lab
+# context validates its stable-v1 catalog and workload manifest.
+#
+# PERFLAB_JQ=host opts into the host jq instead. Starting a container per call
+# costs seconds on Docker Desktop for Windows and the harness makes hundreds of
+# calls, so the host binary is several times faster there. It is opt-in because a
+# host jq is whatever version is installed rather than the image's; the jq
+# that parsed a package is recorded in source/tool-versions.txt in either mode.
+# Both modes strip CR from jq output, including native Windows CRLF, without
+# requiring the -b flag added in jq 1.7. Under MSYS, MSYS_NO_PATHCONV stops
+# rewriting POSIX-looking arguments such as `--arg path /stacks`. This is safe
+# because jqd calls feed JSON through stdin rather than passing file paths.
+PERFLAB_JQ_IMAGE="${PERFLAB_JQ_IMAGE:-ghcr.io/jqlang/jq:1.7.1}"
+PERFLAB_JQ="${PERFLAB_JQ:-docker}"
+case "${PERFLAB_JQ}" in
+  docker) ;;
+  host) require_command jq ;;
+  *)
+    echo "PERFLAB_JQ must be 'docker' or 'host' (got '${PERFLAB_JQ}')." >&2
+    exit 1
+    ;;
+esac
+jqd() {
+  if [[ "${PERFLAB_JQ}" == "host" ]]; then
+    MSYS_NO_PATHCONV=1 command jq "$@" | tr -d '\r'
+    return "${PIPESTATUS[0]}"
+  fi
+  MSYS_NO_PATHCONV=1 docker run --rm -i "${PERFLAB_JQ_IMAGE}" "$@" | tr -d '\r'
+  return "${PIPESTATUS[0]}"
+}
+
+# perflab_python (host Python 3 resolution) is shared with the standalone tests
+# and the sh contract scripts, which cannot source this file.
+# shellcheck source=python.sh
+. "${script_lib_dir}/python.sh"
+
+# D-P1-6. Values stay in the environment. Evidence records secret:// handles
+# only. Isolated local Compose labs call these with empty auth and stay
+# unauthenticated. Defined before lab-context so remote verification can use
+# them at source time.
+backend_curl() {
+  local args=()
+  if [[ -n "${PERFLAB_BACKEND_AUTHORIZATION:-}" ]]; then
+    args+=(-H "Authorization: ${PERFLAB_BACKEND_AUTHORIZATION}")
+  fi
+  if [[ -n "${PERFLAB_BACKEND_CA_FILE:-}" ]]; then
+    args+=(--cacert "${PERFLAB_BACKEND_CA_FILE}")
+  fi
+  if [[ -n "${PERFLAB_BACKEND_CLIENT_CERT:-}" && -n "${PERFLAB_BACKEND_CLIENT_KEY:-}" ]]; then
+    args+=(--cert "${PERFLAB_BACKEND_CLIENT_CERT}" --key "${PERFLAB_BACKEND_CLIENT_KEY}")
+  fi
+  if (( ${#args[@]} > 0 )); then
+    command curl "${args[@]}" "$@"
+  else
+    command curl "$@"
+  fi
+}
+
+monitor_curl() {
+  local args=()
+  if [[ -n "${PERFLAB_MONITOR_AUTHORIZATION:-}" ]]; then
+    args+=(-H "Authorization: ${PERFLAB_MONITOR_AUTHORIZATION}")
+  fi
+  if [[ -n "${PERFLAB_MONITOR_CA_FILE:-}" ]]; then
+    args+=(--cacert "${PERFLAB_MONITOR_CA_FILE}")
+  fi
+  if [[ -n "${PERFLAB_MONITOR_CLIENT_CERT:-}" && -n "${PERFLAB_MONITOR_CLIENT_KEY:-}" ]]; then
+    args+=(--cert "${PERFLAB_MONITOR_CLIENT_CERT}" --key "${PERFLAB_MONITOR_CLIENT_KEY}")
+  fi
+  if (( ${#args[@]} > 0 )); then
+    command curl "${args[@]}" "$@"
+  else
+    command curl "$@"
+  fi
+}
+
+# The load-generator header bag may carry a target Authorization value, but it
+# must never replace the correlation identity that the harness generates for a
+# run. A caller that could override X-Perf-Run-Id would make a successful probe
+# meaningless: the probe could carry one ID while every measured request carries
+# another. Validate the bag once before any target request (including readiness
+# and the remote correlation probe), and pass it as independent curl arguments
+# rather than evaluating user-controlled text.
+validate_target_headers() {
+  [[ -z "${PERF_HEADERS:-}" ]] && return 0
+  if ! printf '%s' "${PERF_HEADERS}" | jqd -e '
+    type == "object" and
+    all(to_entries[];
+      (.key | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")) and
+      (.value | type) == "string" and
+      ((.value | length) <= 16384) and
+      ((.value | test("[\\r\\n]") | not)) and
+      ((.key | ascii_downcase) != "x-perf-run-id"))
+  ' >/dev/null 2>&1; then
+    echo "PERF_HEADERS must be a bounded JSON object of string HTTP headers and must not override X-Perf-Run-Id." >&2
+    return 1
+  fi
+}
+
+target_curl() { # [--body <data>] <curl-arg>...
+  local body="" has_body=0
+  [[ "${1:-}" == "--body" ]] && { body="$2"; has_body=1; shift 2; }
+  validate_target_headers || return 1
+  [[ -n "${PERF_HEADERS:-}" || "${has_body}" == 1 ]] || { command curl "$@"; return; }
+  # Headers and the body reach curl as a --config on stdin, never argv: a bearer
+  # token or password on the command line is visible to every local user in ps.
+  # Stdin is also the one channel native Windows curl reads; it cannot open a
+  # process substitution's /dev/fd path.
+  {
+    [[ -z "${PERF_HEADERS:-}" ]] || printf '%s' "${PERF_HEADERS}" | jqd -r 'to_entries[] | "header = " + ("\(.key): \(.value)" | @json)'
+    [[ "${has_body}" == 0 ]] || printf '%s' "${body}" | jqd -Rrs '"data-binary = " + @json'
+  } | command curl --config - "$@"
+}
+
 # Lab-specific initialization (compose file, base/ready URLs, telemetry regexes,
 # dependency wiring, load-generator/profile selection) lives in lab-context.sh
 # and runs ONLY when a lab is selected. Helpers-only consumers skip it: they get
@@ -105,38 +222,54 @@ if [[ -n "${lab_config}" ]]; then
   export PERFLAB_CONFIG="${lab_config}"
   # shellcheck disable=SC1091
   source "${script_lib_dir}/lab-context.sh"
+  # Ownership and lease rules depend on the resolved target, so they load
+  # after lab-context has decided local vs remote.
+  # shellcheck disable=SC1091
+  source "${script_lib_dir}/target-lifecycle.sh"
 fi
+
+# wrk_execution_mode: print "docker" when PERFLAB_WRK_IMAGE names an image, else
+# "host" when a wrk binary is on PATH. A Docker image whose architecture differs
+# from the Docker host is refused before traffic: an amd64 wrk emulated on an
+# arm64 host dies with SIGSEGV (exit 139), even for a plain GET.
+wrk_execution_mode() {
+  if [[ -z "${wrk_image:-}" ]]; then
+    command -v wrk >/dev/null 2>&1 || {
+      echo "wrk not found: install wrk on the host, or set PERFLAB_WRK_IMAGE to a wrk image for the Docker path." >&2
+      return 1
+    }
+    echo host
+    return 0
+  fi
+  command -v docker >/dev/null 2>&1 || { echo "wrk image ${wrk_image} needs docker, which is not installed." >&2; return 1; }
+  local image_arch host_arch
+  image_arch="$(docker image inspect --format '{{.Architecture}}' "${wrk_image}" 2>/dev/null)" || {
+    echo "wrk image ${wrk_image} is not present locally; the run never pulls it." >&2
+    return 1
+  }
+  host_arch="$(docker info --format '{{.Architecture}}' 2>/dev/null)"
+  case "${host_arch}" in aarch64) host_arch=arm64 ;; x86_64) host_arch=amd64 ;; esac
+  if [[ -n "${host_arch}" && "${image_arch}" != "${host_arch}" ]]; then
+    echo "wrk image ${wrk_image} is ${image_arch} but the Docker host is ${host_arch}; emulated wrk crashes. Unset PERFLAB_WRK_IMAGE to use the host wrk, or pin a ${host_arch} image." >&2
+    return 1
+  fi
+  echo docker
+}
 
 require_loadgen() {
   case "${load_generator}" in
     k6) require_command k6 ;;
     wrk)
-      require_command docker
-      [[ -n "${wrk_image}" ]] || {
-        echo "wrk runs via Docker; set PERFLAB_WRK_IMAGE in the descriptor to your wrk image." >&2
-        exit 1
-      }
+      wrk_execution_mode >/dev/null || exit 1
       ;;
     jmeter)
       require_command docker
       [[ -n "${PERFLAB_JMETER_IMAGE:-}" ]] || {
-        echo "jmeter runs via Docker; set PERFLAB_JMETER_IMAGE to the pinned PerfLab JMeter image." >&2
+        echo "jmeter runs via Docker; set PERFLAB_JMETER_IMAGE to the native adapter image (build with harness/adapters/loadgen/jmeter/package.sh)." >&2
         exit 1
       }
       ;;
   esac
-}
-
-# ---------------------------------------------------------------------------
-# jqd: jq inside Docker (no host jq). Reads stdin, writes stdout as LF. Callers
-# MUST pipe file content in via stdin -- never pass a host file path as an
-# argument, because it would not exist inside the container. MSYS_NO_PATHCONV
-# stops Git Bash from rewriting jq filter arguments into Windows paths.
-# ---------------------------------------------------------------------------
-PERFLAB_JQ_IMAGE="${PERFLAB_JQ_IMAGE:-ghcr.io/jqlang/jq:1.7.1}"
-jqd() {
-  MSYS_NO_PATHCONV=1 docker run --rm -i "${PERFLAB_JQ_IMAGE}" "$@" | tr -d '\r'
-  return "${PIPESTATUS[0]}"
 }
 
 # json_escape: escape a bash string for embedding inside a JSON string literal.
@@ -174,19 +307,63 @@ export PERFLAB_HARNESS_ROOT="${harness_root}"
 dependency_dir() { printf '%s/adapters/dependency/%s' "${harness_root}" "$1"; }
 loadgen_dir() { printf '%s/adapters/loadgen/%s' "${harness_root}" "${load_generator}"; }
 
-# Per-lab workload script for the active generator, falling back to the shared
-# default. Resolution order: explicit PERFLAB_{K6,WRK}_SCRIPT from the descriptor
-# > <lab>/loadgen/<gen>.<ext> > the shared default.<ext>. This is the seam that
+# Resolve the measured replay entrypoint first, then a journey/protocol
+# manifest entrypoint, followed by the existing workload-specific, descriptor,
+# lab and shared fallbacks. This is the seam that
 # lets a project own its workload (auth in k6 setup(), datasets, chaining)
 # WITHOUT forking the shared run.sh or the observations/evidence contract.
 loadgen_script() {
-  local ext override lab_script
+  local ext override lab_script manifest_script selector
   case "${load_generator}" in
     k6)  ext="js";  override="${PERFLAB_K6_SCRIPT:-}" ;;
     wrk) ext="lua"; override="${PERFLAB_WRK_SCRIPT:-}" ;;
     jmeter) ext="jmx"; override="${PERFLAB_JMETER_PLAN:-}" ;;
     *)   echo "loadgen_script: unknown generator '${load_generator}'." >&2; return 1 ;;
   esac
+  if [[ "${PERF_WORKLOAD_KIND:-}" == "journey" || "${PERF_WORKLOAD_KIND:-}" == "mix" ]]; then
+    if [[ "${load_generator}" == "wrk" ]]; then
+      echo "capability generator.wrk.journey is unsupported; rejected before traffic" >&2
+      return 1
+    fi
+  fi
+  # Diagnostic replay pins the measured entrypoint, even if today's manifest
+  # or descriptor points at a different script. Never silently replace it.
+  if [[ -n "${PERF_WORKLOAD_ENTRYPOINT:-}" ]]; then
+    lab_script="$(resolve_repo_path "${PERF_WORKLOAD_ENTRYPOINT}")"
+    [[ -f "${lab_script}" ]] || { echo "recorded workload entrypoint is missing: ${lab_script}" >&2; return 1; }
+    printf '%s' "${lab_script}"; return 0
+  fi
+  if [[ "${PERF_WORKLOAD_KIND:-}" == "journey" || "${PERF_WORKLOAD_KIND:-}" == "protocol" ]]; then
+    selector="${PERF_SCENARIO:-${scenario_id:-}}"
+    if [[ -n "${workload_manifest:-}" && -f "${workload_manifest}" && -n "${selector}" ]]; then
+      manifest_script="$(jqd -r --arg selector "${selector}" --arg generator "${load_generator}" \
+        '.selectors[] | select(.id == $selector) | .entrypoints[$generator] // empty' < "${workload_manifest}")" || return 1
+      if [[ -n "${manifest_script}" ]]; then
+        lab_script="$(resolve_repo_path "${manifest_script}")"
+        [[ -f "${lab_script}" ]] || { echo "manifest workload entrypoint is missing: ${lab_script}" >&2; return 1; }
+        printf '%s' "${lab_script}"; return 0
+      fi
+    fi
+  fi
+  if [[ "${PERF_WORKLOAD_KIND:-}" == "journey" || "${PERF_MIX_KIND:-}" == "journey" ]]; then
+    if [[ "${load_generator}" == "k6" && -f "${lab_dir}/loadgen/journey.js" ]]; then
+      printf '%s' "${lab_dir}/loadgen/journey.js"; return 0
+    fi
+    if [[ "${load_generator}" == "k6" && -f "${harness_root}/adapters/loadgen/k6/journey.js" ]]; then
+      printf '%s' "${harness_root}/adapters/loadgen/k6/journey.js"; return 0
+    fi
+    if [[ "${load_generator}" == "jmeter" && -f "${lab_dir}/loadgen/checkout-journey.jmx" ]]; then
+      printf '%s' "${lab_dir}/loadgen/checkout-journey.jmx"; return 0
+    fi
+  fi
+  if [[ "${PERF_WORKLOAD_KIND:-}" == "protocol" && "${load_generator}" == "k6" ]]; then
+    if [[ "${PERF_PROTOCOL:-}" == "browser-synthetic" ]]; then
+      printf '%s' "${lab_dir}/loadgen/browser.js"
+    else
+      printf '%s' "${lab_dir}/loadgen/protocol.js"
+    fi
+    return 0
+  fi
   if [[ -n "${override}" ]]; then resolve_repo_path "${override}"; return 0; fi
   lab_script="${lab_dir}/loadgen/${load_generator}.${ext}"
   if [[ -f "${lab_script}" ]]; then printf '%s' "${lab_script}"; return 0; fi
@@ -204,6 +381,7 @@ loadgen_supports() {
   local gen="${1:-${load_generator}}" op="${2:?loadgen_supports <generator> <operation>}"
   case "${gen}:${op}" in
     k6:*) return 0 ;;
+    jmeter:session) return 0 ;;
     jmeter:repeat) return 0 ;;
     *) return 1 ;;
   esac
@@ -213,6 +391,22 @@ loadgen_supports() {
 # phase = warmup | measure | diagnostic.
 loadgen_warmup() { "$(loadgen_dir)/run.sh" "$1" warmup; }
 loadgen_measure() { "$(loadgen_dir)/run.sh" "$1" "$2"; }
+
+# loadgen_timed <command...>: an adapter runs its generator through this. In the
+# measure phase it records the epochs bracketing the generator process in
+# benchmark/generator-window.json, which run-scenario uses as the measured
+# window: the harness clock around loadgen_measure also spans the adapter's
+# setup and evidence processing, which a slow shell (Git Bash on Windows spends
+# ~0.1 s per subshell) turns into tens of seconds of no-load window edges.
+# Reads the adapter's phase and artifact_dir.
+loadgen_timed() {
+  [[ "${phase}" == "measure" ]] || { "$@"; return; }
+  local started rc=0
+  started="$(date -u +%s)"
+  "$@" || rc=$?
+  printf '{"startEpoch":%s,"endEpoch":%s}\n' "${started}" "$(date -u +%s)" > "${artifact_dir}/benchmark/generator-window.json"
+  return "${rc}"
+}
 
 # loadgen_effective_duration <connections> <requested-duration> -> the seconds the
 # measure phase will ACTUALLY run. Most profiles == the requested duration, but a
@@ -246,6 +440,45 @@ run_lab_dependency_hook() {
   return 1
 }
 
+# read_fields <expected-count> -- fill TSV_FIELDS from one-field-per-line stdin.
+#
+# `IFS=$'\t' read -r a b c` is wrong for TSV whose fields may be empty: bash
+# treats tab as IFS WHITESPACE, so consecutive tabs collapse into one delimiter
+# and every field after an empty one shifts left. A GET workload has an empty
+# body, so this silently rebuilt the replay envelope out of the wrong values --
+# `body=true`, `dataset=64`, `conns=''` -- and the diagnostic replayed a
+# workload that was never measured.
+#
+# Emit one field per line instead (jq: `.[] | tostring`) and read them
+# positionally. An unexpected count is a refusal, not a best-effort parse,
+# because a short read is exactly what the collapse used to produce.
+TSV_FIELDS=()
+read_fields() {
+  local expected="${1:?read_fields <expected-count>}" line
+  TSV_FIELDS=()
+  while IFS= read -r line; do
+    TSV_FIELDS+=("${line}")
+  done
+  if [[ "${#TSV_FIELDS[@]}" -ne "${expected}" ]]; then
+    echo "Expected ${expected} fields, received ${#TSV_FIELDS[@]}; refusing to continue with a misaligned record." >&2
+    return 1
+  fi
+  return 0
+}
+
+# Local replicas may have identical assembly names. Resolve their isolated
+# monitor endpoint without weakening the adapter's single-match identity check.
+# Remote targets continue to require the explicitly acknowledged endpoint.
+diag_endpoint() {
+  local svc="$1" pair
+  if [[ "${target_mode:-local}" != remote ]]; then
+    for pair in ${PERFLAB_DIAG_ENDPOINTS:-}; do
+      if [[ "${pair%%=*}" == "${svc}" ]]; then printf '%s' "${pair#*=}"; return 0; fi
+    done
+  fi
+  printf '%s' "${diagnostics_url}"
+}
+
 # diag_target <app-service> -> process identity from PERFLAB_DIAG_TARGETS.
 diag_target() {
   local svc="$1" pair
@@ -267,15 +500,57 @@ scenario_value() {
   case "$field" in
     id) col=1 ;; name) col=2 ;; method) col=3 ;; path) col=4 ;; body) col=5 ;;
     target) col=6 ;; diagnostic) col=7 ;; connections) col=8 ;;
+      type|selector) col=0 ;;
+      profilingPolicy|loadModel) col=0 ;;
     *) echo "Unknown scenario field '${field}'." >&2; return 1 ;;
   esac
-  awk -F'\t' -v id="${id}" -v c="${col}" '
-    $0 ~ /^[[:space:]]*#/ { next }
-    $1 == id { print $c; exit }
-  ' "${scenario_catalog}"
+  if [[ -n "${scenario_catalog:-}" && -f "${scenario_catalog}" && "${col}" != 0 ]]; then
+    local from_tsv
+    from_tsv="$(awk -F'\t' -v id="${id}" -v c="${col}" '
+      $0 ~ /^[[:space:]]*#/ { next }
+      $1 == id { print $c; exit }
+    ' "${scenario_catalog}")"
+    if [[ -n "${from_tsv}" || "$field" == "body" ]]; then
+      if awk -F'\t' -v id="${id}" '$0 !~ /^[[:space:]]*#/ && $1 == id { found=1 } END { exit !found }' "${scenario_catalog}"; then
+        printf '%s' "${from_tsv}"
+        return 0
+      fi
+    fi
+  fi
+  if [[ -n "${json_catalog:-}" && -f "${json_catalog}" ]]; then
+    local filter
+    case "${field}" in
+      id|name) filter=".${field}" ;;
+      type|selector) filter=".workload.${field}" ;;
+      target) filter='.targets[0]' ;;
+      diagnostic) filter='.diagnostics.preset' ;;
+      profilingPolicy) filter='.diagnostics.profilingPolicy' ;;
+      connections) filter='.defaults.rate' ;;
+      loadModel) filter='.defaults.loadModel' ;;
+      *) filter='' ;;
+    esac
+    if [[ -n "${filter}" ]]; then
+      local value
+      value="$(jqd -er --arg id "${id}" ".scenarios[] | select(.id == \$id) | ${filter}" < "${json_catalog}" 2>/dev/null || true)"
+      if [[ -n "${value}" && "${value}" != "null" ]]; then
+        printf '%s' "${value}"
+        return 0
+      fi
+    fi
+  fi
+  if [[ "${field}" == "type" ]] && awk -F'\t' -v id="${id}" '$0 !~ /^[[:space:]]*#/ && $1 == id { found=1 } END { exit !found }' "${scenario_catalog}" 2>/dev/null; then
+    printf 'request'
+    return 0
+  fi
+  echo "Unknown scenario '${id}'." >&2
+  return 1
 }
 
 scenario_ids_all() {
+  if [[ -n "${json_catalog:-}" && -f "${json_catalog}" ]]; then
+    jqd -er '.scenarios[].id' < "${json_catalog}"
+    return
+  fi
   awk -F'\t' '
     $0 ~ /^[[:space:]]*#/ { next }
     NF >= 8 && $1 != "" { print $1 }
@@ -284,14 +559,20 @@ scenario_ids_all() {
 
 require_scenario() {
   local id="$1"
-  if ! awk -F'\t' -v id="${id}" '
+  if [[ -n "${scenario_catalog:-}" && -f "${scenario_catalog}" ]] && awk -F'\t' -v id="${id}" '
         $0 ~ /^[[:space:]]*#/ { next }
         $1 == id { found = 1 }
         END { exit !found }
       ' "${scenario_catalog}"; then
-    echo "Unknown scenario '${id}'. Available: $(scenario_ids_all | tr '\n' ' ')" >&2
-    exit 1
+    return 0
   fi
+  if [[ -n "${json_catalog:-}" && -f "${json_catalog}" ]]; then
+    if jqd -e --arg id "${id}" 'any(.scenarios[]; .id == $id)' < "${json_catalog}" >/dev/null; then
+      return 0
+    fi
+  fi
+  echo "Unknown scenario '${id}'. Available: $(scenario_ids_all | tr '\n' ' ')" >&2
+  exit 1
 }
 
 wait_for_api() {

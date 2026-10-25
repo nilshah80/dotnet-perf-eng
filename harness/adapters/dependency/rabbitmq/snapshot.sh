@@ -15,6 +15,10 @@ fail=0
 curl -fsS --max-time 15 -u "${auth}" "${rabbit_mgmt_url}/api/queues"      > "${dep}/rabbitmq-queues.json"      || { echo "WARNING: rabbitmq queues capture failed." >&2; fail=1; }
 curl -fsS --max-time 15 -u "${auth}" "${rabbit_mgmt_url}/api/connections" > "${dep}/rabbitmq-connections.json" || { echo "WARNING: rabbitmq connections capture failed." >&2; fail=1; }
 curl -fsS --max-time 15 -u "${auth}" "${rabbit_mgmt_url}/api/channels"    > "${dep}/rabbitmq-channels.json"    || { echo "WARNING: rabbitmq channels capture failed." >&2; fail=1; }
+# Node uptime, paired with reset-stats.sh: tells the reconciliation whether the
+# broker restarted (and reset its counters) since the baseline. Best-effort.
+nodes="$(curl -fsS --max-time 15 -u "${auth}" "${rabbit_mgmt_url}/api/nodes" 2>/dev/null)" \
+  && printf '{"capturedAtEpoch":%s,"nodes":%s}\n' "$(date -u +%s)" "${nodes}" > "${dep}/rabbitmq-nodes.json" || true
 # Broker metrics are best-effort: the Prometheus plugin may be disabled, so an
 # empty result here is not a capture failure.
 curl -fsS --max-time 15 "${rabbit_metrics_url}" 2>/dev/null \

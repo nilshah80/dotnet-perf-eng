@@ -33,6 +33,8 @@ ruler:
   alertmanager_url: http://127.0.0.1:9093
 
 pattern_ingester:
+  # Detected log patterns (Grafana Logs Drilldown, the patterns API).
+  enabled: true
   lifecycler:
     min_ready_duration: 1s
 
